@@ -5,6 +5,8 @@ import time
 import base64
 import asyncio
 import aiohttp
+import socket
+import struct
 import random
 import hashlib
 import json
@@ -36,6 +38,21 @@ import api.miner_client as miner_client
 from api.instance.schemas import Instance
 from api.chute.codecheck import is_bad_code
 
+
+TCP_STATES = {
+    "01": "ESTABLISHED",
+    "02": "SYN_SENT",
+    "03": "SYN_RECV",
+    "04": "FIN_WAIT1",
+    "05": "FIN_WAIT2",
+    "06": "TIME_WAIT",
+    "07": "CLOSE",
+    "08": "CLOSE_WAIT",
+    "09": "LAST_ACK",
+    "0A": "LISTEN",
+    "0B": "CLOSING",
+    "0C": "NEW_SYN_RECV",
+}
 
 PAST_DAY_METRICS_QUERY = """
 UPDATE chutes
@@ -725,7 +742,9 @@ def uuid_dict(data, current_path=[], salt=settings.envcheck_52_salt):
     return flat_dict
 
 
-def is_kubernetes_env(instance: Instance, dump: dict, log_prefix: str):
+def is_kubernetes_env(
+    instance: Instance, dump: dict, log_prefix: str, standard_template: str = None
+):
     # Ignore if we don't have envdump configured.
     if not settings.kubecheck_salt:
         return True
@@ -735,6 +754,13 @@ def is_kubernetes_env(instance: Instance, dump: dict, log_prefix: str):
 
     # Simple flags.
     flat = uuid_dict(dump, salt=settings.kubecheck_salt)
+    if standard_template and flat.get("b3633cbf-9ee4-50ef-a8b9-fb17926a7bc7"):
+        logger.warning(
+            f"{log_prefix} Invalid environment found: "
+            "expected NOT to find b3633cbf-9ee4-50ef-a8b9-fb17926a7bc7"
+        )
+        return False
+
     secret = flat.get("8bc7db7a-4fd5-56a8-a595-e67c4b3bd61d")
     if not secret:
         logger.warning(
@@ -1564,6 +1590,122 @@ async def report_missing_short_lived_instances():
         except Exception as exc:
             logger.warning(f"Failed to execute report_missing_short_lived_instances(): {exc=}")
         await asyncio.sleep(600)
+
+
+def parse_proc_net_tcp(raw_content_ipv4, raw_content_ipv6):
+    connections = []
+    try:
+        for line in raw_content_ipv4.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            local_ip, local_port = fields[1].split(":")
+            remote_ip, remote_port = fields[2].split(":")
+            connections.append(
+                {
+                    "local": f"{hex_to_ipv4(local_ip)}:{int(local_port, 16)}",
+                    "remote": f"{hex_to_ipv4(remote_ip)}:{int(remote_port, 16)}",
+                    "state": TCP_STATES.get(fields[3], fields[3]),
+                }
+            )
+    except FileNotFoundError:
+        pass
+
+    try:
+        for line in raw_content_ipv6.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            local_ip, local_port = fields[1].split(":")
+            remote_ip, remote_port = fields[2].split(":")
+            connections.append(
+                {
+                    "local": f"{hex_to_ipv6(local_ip)}:{int(local_port, 16)}",
+                    "remote": f"{hex_to_ipv6(remote_ip)}:{int(remote_port, 16)}",
+                    "state": TCP_STATES.get(fields[3], fields[3]),
+                }
+            )
+    except FileNotFoundError:
+        pass
+
+    connections.sort(key=lambda x: (x["state"] != "LISTEN", x["state"], x["local"]))
+    return connections
+
+
+def hex_to_ipv4(hex_ip):
+    return socket.inet_ntoa(struct.pack("<I", int(hex_ip, 16)))
+
+
+def hex_to_ipv6(hex_ip):
+    parts = []
+    for i in range(0, 32, 8):
+        part = hex_ip[i : i + 8]
+        reversed_part = "".join([part[j : j + 2] for j in range(6, -1, -2)])
+        parts.append(reversed_part)
+    return socket.inet_ntop(socket.AF_INET6, bytes.fromhex("".join(parts)))
+
+
+def find_suspicious_outbound(connections):
+    SERVER_PORTS = {8000, 8001, 10101}
+
+    def is_local_ip(ip):
+        return (
+            ip.startswith("127.")
+            or ip.startswith("10.")
+            or ip.startswith("172.")
+            or ip.startswith("192.168.")
+            or ip == "::1"
+            or ip.startswith("::ffff:127.")
+            or ip.startswith("::ffff:10.")
+            or ip.startswith("::ffff:172.")
+            or ip.startswith("::ffff:192.168.")
+        )
+
+    for conn in connections:
+        # Fix 1: Check for 'ESTABLISHED' not '01'
+        if conn["state"] != "ESTABLISHED":
+            continue
+
+        # Fix 2: Parse the local/remote strings to extract IP and port
+        local_ip, local_port = conn["local"].rsplit(":", 1)
+        remote_ip, remote_port = conn["remote"].rsplit(":", 1)
+
+        if int(local_port) in SERVER_PORTS:
+            continue
+
+        if is_local_ip(remote_ip):
+            continue
+
+        logger.warning(f"SUSPICIOUS: {conn=}")
+        return True
+
+    logger.success("No suspicious outbound connections.")
+    return False
+
+
+async def check_instance_connections(instance):
+    """
+    Check if the instance has any outbound connections.
+    """
+    if not instance.active:
+        return
+    try:
+        payload = {"path": "/proc/net/tcp"}
+        raw_tcp4 = (await do_slurp(instance, payload, True)).decode()
+        payload["path"] = "/proc/net/tcp6"
+        raw_tcp6 = (await do_slurp(instance, payload, True)).decode()
+        connections = parse_proc_net_tcp(raw_tcp4, raw_tcp6)
+        logger.info(f"{'State':<15} {'Local Address':<45} {'Remote Address':<45}")
+        logger.info("-" * 105)
+        for conn in connections:
+            logger.info(f"{conn['state']:<15} {conn['local']:<45} {conn['remote']:<45}")
+        logger.info(f"\nTotal: {len(connections)} connections")
+        return find_suspicious_outbound(connections)
+    except Exception as exc:
+        logger.error(
+            f"Unexpected error checking {instance.instance_id=} {instance.miner_hotkey=}: {str(exc)}"
+        )
+    return False
 
 
 async def main():

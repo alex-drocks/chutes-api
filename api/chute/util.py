@@ -476,6 +476,16 @@ async def _invoke_one(
                                 f"BAD_RESPONSE {target.instance_id=} {chute.name} returned invalid chunks"
                             )
 
+                    if chute.standard_template == "vllm" and chunk.startswith(b"data: {"):
+                        try:
+                            data = json.loads(chunk[6:])
+                            if data.get("model") != chute.name:
+                                logger.warning(
+                                    f"Model does not match chute name!: expected={chute.name} found {data.get('model')}"
+                                )
+                        except Exception:
+                            ...
+
                     last_chunk = chunk
                 if b"data:" in chunk:
                     any_chunks = True

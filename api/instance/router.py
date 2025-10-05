@@ -141,11 +141,6 @@ async def _check_scalable(db, chute, hotkey):
                 f"using conservative current count as default: {target_count}"
             )
 
-    # Edge case where we have too many instances already but none are active.
-    if current_count <= target_count + 2 and active_count == 0:
-        logger.warning("No active instances, allowing!")
-        return
-
     # When there is a rolling update in progress, use the permitted list.
     if chute.rolling_update and current_count >= target_count - 2:
         limit = chute.rolling_update.permitted.get(hotkey, 0) or 0
@@ -162,7 +157,7 @@ async def _check_scalable(db, chute, hotkey):
         return
 
     # Check if scaling is allowed based on target count.
-    if current_count >= target_count:
+    if active_count >= target_count:
         logger.warning(
             f"SCALELOCK: chute {chute_id=} {chute.name} has reached target capacity: "
             f"{current_count=}, {active_count=}, {target_count=}, {hotkey_count=}"
@@ -173,8 +168,8 @@ async def _check_scalable(db, chute, hotkey):
         )
 
     # Prevent monopolizing capped chutes.
-    remaining_slots = target_count - current_count
-    if remaining_slots <= 2 and hotkey_count == current_count:
+    remaining_slots = target_count - active_count
+    if remaining_slots <= 2 and hotkey_count == active_count:
         logger.warning(
             f"SCALELOCK: chute {chute_id=} {chute.name} - miner {hotkey} already has {hotkey_count} instances, "
             f"only {remaining_slots} slots remaining"
@@ -228,12 +223,12 @@ async def _check_scalable_private(db, chute, miner):
         (await db.execute(public_chute_query, {"miner_hotkey": miner.hotkey})).mappings().first()
     )
     if (
-        public_result["public_instance_count"] < 2
-        or public_result["public_instance_gpu_count"] < 16
+        public_result["public_instance_count"] < 5
+        or public_result["public_instance_gpu_count"] < 48
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Miner {miner.hotkey} must have at least 2 public chutes deployed (and 16 GPUs for public chutes) to deploy private chutes.",
+            detail=f"Miner {miner.hotkey} insufficient public chutes/GPUs to deploy private chutes.",
         )
 
 
@@ -509,7 +504,9 @@ async def claim_launch_config(
 
         # K8S check.
         log_prefix = f"ENVDUMP: {config_id=} {chute.chute_id=}"
-        if not is_kubernetes_env(chute, dump, log_prefix=log_prefix):
+        if not is_kubernetes_env(
+            chute, dump, log_prefix=log_prefix, standard_template=chute.standard_template
+        ):
             logger.error(f"{log_prefix} is not running a valid kubernetes environment")
             launch_config.failed_at = func.now()
             launch_config.verification_error = "Failed kubernetes environment check."
