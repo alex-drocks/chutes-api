@@ -1188,6 +1188,23 @@ files = [
 colorama = {version = "*", markers = "platform_system == \"Windows\""}
 
 [[package]]
+name = "cllmv"
+version = "0.0.4"
+description = "Chutes fast LLM verification."
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "cllmv-0.0.4-py3-none-any.whl", hash = "sha256:8ee9576495271ff88b4b774579b01f620faf4c19966e30793978e3f4404c20dd"},
+]
+
+[package.dependencies]
+setuptools = ">=0.75"
+
+[package.extras]
+dev = ["ruff", "wheel"]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 description = "Cross-platform colored terminal text."
@@ -6291,4 +6308,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "<3.13,>=3.9"
-content-hash = "4305f5e3ab0d68d7e88f770aca391a95276c0dd59b2eaeb20f42496149898bba"
+content-hash = "0b03b719894393d8932b5629629c5a789e32b6205f72ac22755981dd725b6792"

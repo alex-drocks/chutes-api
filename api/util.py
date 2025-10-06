@@ -766,6 +766,21 @@ async def is_cloudflare_ip(ip_address):
     return False
 
 
+def image_supports_cllmv(image) -> bool:
+    if image.name != "sglang":
+        return False
+
+    tag = image.tag.lower()
+    if not tag.startswith("nightly-"):
+        return False
+    date_part = tag[8:]
+    try:
+        date_num = int(date_part)
+        return date_num >= 2025100601
+    except (ValueError, Exception):
+        return False
+
+
 async def validate_tool_call_arguments(body: dict) -> None:
     if not body.get("messages"):
         return

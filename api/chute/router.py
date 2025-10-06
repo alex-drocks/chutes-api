@@ -70,6 +70,7 @@ from api.util import (
     get_current_hf_commit,
     is_affine_registered,
     notify_deleted,
+    image_supports_cllmv,
 )
 from api.affine import check_affine_code
 from api.util import memcache_get, memcache_set
@@ -944,21 +945,6 @@ async def _deploy_chute(
                 detail="You are not allowed to limit deployments to b200/mi300x at this time.",
             )
 
-    # Disable non-chutes official images for affine.
-    if (
-        affine_dev
-        and (
-            image.user_id != await chutes_user_id() or not image.name.startswith(("sglang", "vllm"))
-        )
-    ) and not current_user.has_role(Permissioning.unlimited_dev):
-        logger.error(
-            f"Affine user tried to deploy unofficial vllm/sglang image: {image.name=} {image.tag=} {current_user.username=}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Must use either sglang or vllm official chutes image for affine deployments.",
-        )
-
     # Require revision for LLM templates.
     if chute_args.standard_template == "vllm" and not chute_args.revision:
         raise HTTPException(
@@ -975,6 +961,14 @@ async def _deploy_chute(
                 f"(or ask chutes team to upgrade) {image.name=} {image.image_id=} currently {image.chutes_version}"
             ),
         )
+
+    # Only allow newer SGLang versions for affine.
+    if "/affine" in chute_args.name.lower():
+        if not image_supports_cllmv(image) or image.user_id != await chutes_user_id():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Must use image="chutes/sglang:nightly-2025100601" (or later dated versions) for affine deployments.',
+            )
 
     old_version = None
     if chute:

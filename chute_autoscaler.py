@@ -466,8 +466,9 @@ async def perform_autoscale(dry_run: bool = False):
         rate_limit_1h = metrics["rate_limit_ratio"].get("1h", 0)
         utilization_1h = metrics["utilization"].get("1h", 0)
         utilization_15m = metrics["utilization"].get("15m", 0)
-        rate_limit_basis = max(rate_limit_1h, rate_limit_15m)
-        utilization_basis = max(utilization_1h, utilization_15m)
+        utilization_5m = metrics["utilization"].get("5m", 0)
+        rate_limit_basis = max(rate_limit_1h, rate_limit_15m, rate_limit_5m)
+        utilization_basis = max(utilization_1h, utilization_15m, utilization_5m)
 
         # Scale up candidate: high utilization
         threshold = info.scaling_threshold or UTILIZATION_SCALE_UP

@@ -33,7 +33,13 @@ from api.constants import (
 )
 from api.database import get_session
 from api.fmv.fetcher import get_fetcher
-from api.exceptions import InstanceRateLimit, BadRequest, KeyExchangeRequired, EmptyLLMResponse
+from api.exceptions import (
+    InstanceRateLimit,
+    BadRequest,
+    KeyExchangeRequired,
+    EmptyLLMResponse,
+    InvalidCLLMV,
+)
 from api.util import (
     sse,
     now_str,
@@ -42,6 +48,7 @@ from api.util import (
     use_encryption_v2,
     use_encrypted_path,
     notify_deleted,
+    image_supports_cllmv,
     has_legacy_private_billing,
 )
 from api.util import memcache_get, memcache_set, memcache_delete
@@ -60,6 +67,7 @@ from api.metrics.capacity import (
     track_request_completed,
     track_request_rate_limited,
 )
+from cllmv import validate as cllmv_validate
 
 
 # Tokenizer for input/output token estimation.
@@ -476,15 +484,62 @@ async def _invoke_one(
                                 f"BAD_RESPONSE {target.instance_id=} {chute.name} returned invalid chunks"
                             )
 
+                    # This should really never happen -- check model name against chute name.
                     if chute.standard_template == "vllm" and chunk.startswith(b"data: {"):
+                        valid_model = True
                         try:
                             data = json.loads(chunk[6:])
-                            if data.get("model") != chute.name:
+                            if data.get("model") != chute.name and not data.get("error"):
                                 logger.warning(
-                                    f"Model does not match chute name!: expected={chute.name} found {data.get('model')}"
+                                    f"Model does not match chute name!: expected={chute.name} found {data.get('model')} -> {data=}"
                                 )
+                                valid_model = False
                         except Exception:
                             ...
+                        if not valid_model:
+                            raise EmptyLLMResponse(
+                                f"BAD_RESPONSE {target.instance_id=} {chute.name} returned invalid chunk (model name)"
+                            )
+
+                    # New verification hash.
+                    if (
+                        image_supports_cllmv(chute.image)
+                        and target.version == chute.version
+                        and chunk.startswith(b"data: {")
+                    ):
+                        try:
+                            data = json.loads(chunk[6:])
+                            if "model" in data:
+                                verification_token = data.get("chutes_verification")
+                                text = None
+                                if data.get("choices"):
+                                    choice = data["choices"][0]
+                                    if "text" in choice:
+                                        text = choice["text"]
+                                    elif "delta" in choice and choice["delta"]:
+                                        text = choice["delta"].get("content") or choice[
+                                            "delta"
+                                        ].get("reasoning_content")
+
+                                # Verify the hash.
+                                if not verification_token or not cllmv_validate(
+                                    data.get("id") or "bad",
+                                    data.get("created") or 0,
+                                    text,
+                                    verification_token,
+                                    target.config_id,
+                                    chute.name,
+                                    chute.revision,
+                                ):
+                                    logger.warning(
+                                        f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
+                                    )
+                                    raise InvalidCLLMV(
+                                        f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                                    )
+                        except Exception as exc:
+                            if isinstance(exc, InvalidCLLMV):
+                                raise
 
                     last_chunk = chunk
                 if b"data:" in chunk:
@@ -625,6 +680,38 @@ async def _invoke_one(
                         logger.warning(
                             f"Estimated the prompt tokens: {prompt_tokens} for {chute.name}"
                         )
+
+                    # New verification hash.
+                    if (
+                        image_supports_cllmv(chute.image)
+                        and target.version == chute.version
+                        and "model" in json_data
+                    ):
+                        verification_token = json_data.get("chutes_verification")
+                        text = None
+                        if json_data.get("choices"):
+                            choice = json_data["choices"][0]
+                            if "text" in choice:
+                                text = choice["text"]
+                            elif isinstance(choice.get("message"), dict):
+                                text = choice["message"].get(
+                                    "content", choice["message"].get("reasoning_content")
+                                )
+                        if not verification_token or not cllmv_validate(
+                            json_data.get("id") or "bad",
+                            json_data.get("created") or 0,
+                            text,
+                            verification_token,
+                            target.config_id,
+                            chute.name,
+                            chute.revision,
+                        ):
+                            logger.warning(
+                                f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
+                            )
+                            raise InvalidCLLMV(
+                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                            )
 
                     output_text = None
                     if plain_path == "chat":
@@ -1047,6 +1134,8 @@ async def invoke(
                     error_message = "KEY_EXCHANGE_REQUIRED"
                 elif isinstance(exc, EmptyLLMResponse):
                     error_message = "EMPTY_STREAM"
+                elif isinstance(exc, InvalidCLLMV):
+                    error_message = "CLLMV_FAILURE"
 
                 async with get_session() as session:
                     await session.execute(
