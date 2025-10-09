@@ -63,6 +63,7 @@ from api.config import settings
 from api.constants import (
     DIFFUSION_PRICE_MULT_PER_STEP,
     INTEGRATED_SUBNETS,
+    CHUTE_UTILIZATION_QUERY,
 )
 from api.util import (
     semcomp,
@@ -679,54 +680,7 @@ async def get_chute_utilization(request: Request):
     Get chute utilization data from the most recent capacity log.
     """
     async with get_session(readonly=True) as session:
-        query = text("""
-            WITH latest_logs AS (
-                SELECT DISTINCT ON (chute_id)
-                    chute_id,
-                    timestamp,
-                    utilization_current,
-                    utilization_5m,
-                    utilization_15m,
-                    utilization_1h,
-                    rate_limit_ratio_5m,
-                    rate_limit_ratio_15m,
-                    rate_limit_ratio_1h,
-                    total_requests_5m,
-                    total_requests_15m,
-                    total_requests_1h,
-                    completed_requests_5m,
-                    completed_requests_15m,
-                    completed_requests_1h,
-                    rate_limited_requests_5m,
-                    rate_limited_requests_15m,
-                    rate_limited_requests_1h,
-                    instance_count,
-                    action_taken,
-                    target_count
-                FROM capacity_log
-                ORDER BY chute_id, timestamp DESC
-            ),
-            chute_details AS (
-                SELECT
-                    c.chute_id,
-                    CASE WHEN c.public IS true THEN c.name ELSE '[private chute]' END AS name,
-                    EXISTS(SELECT 1 FROM rolling_updates WHERE chute_id = c.chute_id) AS update_in_progress,
-                    COUNT(i.instance_id) AS total_instance_count,
-                    COUNT(CASE WHEN i.active = true AND i.verified = true THEN 1 END) AS active_instance_count
-                FROM chutes c
-                LEFT JOIN instances i ON c.chute_id = i.chute_id
-                GROUP BY c.chute_id, c.name, c.public
-            )
-            SELECT
-                ll.*,
-                cd.name,
-                cd.update_in_progress,
-                cd.total_instance_count,
-                cd.active_instance_count
-            FROM latest_logs ll
-            JOIN chute_details cd ON cd.chute_id = ll.chute_id
-            ORDER BY ll.total_requests_1h DESC
-        """)
+        query = text(CHUTE_UTILIZATION_QUERY)
         results = await session.execute(query)
         rows = results.mappings().all()
         utilization_data = []
@@ -990,7 +944,7 @@ async def _deploy_chute(
         if not image_supports_cllmv(image) or image.user_id != await chutes_user_id():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Must use image="chutes/sglang:nightly-2025100800" (or later dated versions) for affine deployments.',
+                detail='Must use image="chutes/sglang:nightly-2025100801" (or later dated versions) for affine deployments.',
             )
 
     old_version = None

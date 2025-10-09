@@ -71,3 +71,98 @@ INTEGRATED_SUBNETS = {
         "model_substring": "turbovision",
     },
 }
+
+# Chute utilization query.
+CHUTE_UTILIZATION_QUERY = """
+WITH chute_details AS (
+    SELECT
+        c.chute_id,
+        CASE WHEN c.public IS true THEN c.name ELSE '[private chute]' END AS name,
+        COALESCE(ARRAY_AGG(i.instance_id), ARRAY[]::text[]) AS instances,
+        COUNT(i.instance_id) AS active_instance_count
+    FROM chutes c
+    LEFT JOIN instances i ON c.chute_id = i.chute_id
+    LEFT JOIN rolling_updates ru ON c.chute_id = ru.chute_id
+    GROUP BY c.chute_id, c.name, c.public
+),
+latest_logs AS (
+    SELECT
+        cd.chute_id,
+        ll.timestamp,
+        ll.utilization_current,
+        ll.utilization_5m,
+        ll.utilization_15m,
+        ll.utilization_1h,
+        ll.rate_limit_ratio_5m,
+        ll.rate_limit_ratio_15m,
+        ll.rate_limit_ratio_1h,
+        ll.total_requests_5m,
+        ll.total_requests_15m,
+        ll.total_requests_1h,
+        ll.completed_requests_5m,
+        ll.completed_requests_15m,
+        ll.completed_requests_1h,
+        ll.rate_limited_requests_5m,
+        ll.rate_limited_requests_15m,
+        ll.rate_limited_requests_1h,
+        ll.instance_count,
+        ll.action_taken,
+        ll.target_count
+    FROM chute_details cd
+    CROSS JOIN LATERAL (
+        SELECT
+            timestamp,
+            utilization_current,
+            utilization_5m,
+            utilization_15m,
+            utilization_1h,
+            rate_limit_ratio_5m,
+            rate_limit_ratio_15m,
+            rate_limit_ratio_1h,
+            total_requests_5m,
+            total_requests_15m,
+            total_requests_1h,
+            completed_requests_5m,
+            completed_requests_15m,
+            completed_requests_1h,
+            rate_limited_requests_5m,
+            rate_limited_requests_15m,
+            rate_limited_requests_1h,
+            instance_count,
+            action_taken,
+            target_count
+        FROM capacity_log cl
+        WHERE cl.chute_id = cd.chute_id
+        ORDER BY cl.timestamp DESC
+        LIMIT 1
+    ) ll
+)
+SELECT
+    cd.chute_id,
+    cd.name,
+    ll.timestamp,
+    ll.utilization_current,
+    ll.utilization_5m,
+    ll.utilization_15m,
+    ll.utilization_1h,
+    ll.rate_limit_ratio_5m,
+    ll.rate_limit_ratio_15m,
+    ll.rate_limit_ratio_1h,
+    ll.total_requests_5m,
+    ll.total_requests_15m,
+    ll.total_requests_1h,
+    ll.completed_requests_5m,
+    ll.completed_requests_15m,
+    ll.completed_requests_1h,
+    ll.rate_limited_requests_5m,
+    ll.rate_limited_requests_15m,
+    ll.rate_limited_requests_1h,
+    ll.instance_count,
+    ll.action_taken,
+    ll.target_count,
+    cd.instances,
+    cd.active_instance_count
+FROM chute_details cd
+JOIN latest_logs ll ON cd.chute_id = ll.chute_id
+ORDER BY ll.total_requests_1h DESC;
+"""

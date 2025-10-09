@@ -223,8 +223,8 @@ async def _check_scalable_private(db, chute, miner):
         (await db.execute(public_chute_query, {"miner_hotkey": miner.hotkey})).mappings().first()
     )
     if (
-        public_result["public_instance_count"] < 5
-        or public_result["public_instance_gpu_count"] < 48
+        public_result["public_instance_count"] < 4
+        or public_result["public_instance_gpu_count"] < 32
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

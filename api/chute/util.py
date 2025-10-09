@@ -1192,23 +1192,24 @@ async def invoke(
                             consecutive_failures
                             and consecutive_failures >= settings.consecutive_failure_limit
                         ):
-                            await session.execute(
+                            delete_result = await session.execute(
                                 text("DELETE FROM instances WHERE instance_id = :instance_id"),
                                 {"instance_id": target.instance_id},
                             )
-                            await session.execute(
-                                text(
-                                    f"UPDATE instance_audit SET deletion_reason = 'max consecutive failures {consecutive_failures} reached' WHERE instance_id = :instance_id"
-                                ),
-                                {"instance_id": target.instance_id},
-                            )
-                            await session.commit()
-                            asyncio.create_task(
-                                notify_deleted(
-                                    target,
-                                    message=f"Instance {target.instance_id} of miner {target.miner_hotkey} has reached the consecutive failure limit of {settings.consecutive_failure_limit} and has been deleted.",
+                            if delete_result.rowcount > 0:
+                                await session.execute(
+                                    text(
+                                        f"UPDATE instance_audit SET deletion_reason = 'max consecutive failures {consecutive_failures} reached' WHERE instance_id = :instance_id"
+                                    ),
+                                    {"instance_id": target.instance_id},
                                 )
-                            )
+                                await session.commit()
+                                asyncio.create_task(
+                                    notify_deleted(
+                                        target,
+                                        message=f"Instance {target.instance_id} of miner {target.miner_hotkey} has reached the consecutive failure limit of {settings.consecutive_failure_limit} and has been deleted.",
+                                    )
+                                )
 
                 if error_message == "BAD_REQUEST":
                     logger.warning(
