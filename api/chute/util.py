@@ -319,25 +319,33 @@ async def _get_one(name_or_id: str, nonce: int = None):
         return chute
 
 
-async def get_one(name_or_id: str):
+async def get_one(name_or_id: str, nonce: int = None):
     """
     Wrapper around the actual cached get_one with 30 second nonce to force refresh.
     """
-    nonce = int(time.time())
-    nonce -= nonce % 30
+    if not nonce:
+        nonce = int(time.time())
+        nonce -= nonce % 30
     return await _get_one(name_or_id, nonce=nonce)
 
 
+@alru_cache(maxsize=5000, ttl=300)
 async def is_shared(chute_id: str, user_id: str):
     """
     Check if a chute has been shared with a user.
     """
+    cache_key = f"cshare:{chute_id}:{user_id}"
+    cached = await memcache_get(cache_key)
+    if cached:
+        return cached == b"1"
     async with get_session() as db:
         query = select(
             exists().where(and_(ChuteShare.chute_id == chute_id, ChuteShare.shared_to == user_id))
         )
         result = await db.execute(query)
-        return result.scalar()
+        shared = result.scalar()
+        await memcache_set(cache_key, b"1" if shared else b"0", exptime=60)
+        return shared
 
 
 async def track_prefix_hashes(prefixes, instance_id):

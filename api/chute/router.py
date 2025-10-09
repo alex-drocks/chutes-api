@@ -42,7 +42,6 @@ from api.chute.templates import (
 from api.gpu import SUPPORTED_GPUS
 from api.chute.response import ChuteResponse
 from api.chute.util import (
-    get_chute_by_id_or_name,
     selector_hourly_price,
     get_one,
     is_shared,
@@ -51,7 +50,7 @@ from api.chute.util import (
 from api.instance.schemas import Instance
 from api.instance.util import get_chute_target_manager
 from api.user.schemas import User
-from api.user.service import get_current_user, chutes_user_id
+from api.user.service import get_current_user, chutes_user_id, subnet_role_accessible
 from api.image.schemas import Image
 from api.image.util import get_image_by_id_or_name
 from api.permissions import Permissioning
@@ -63,12 +62,13 @@ from api.fmv.fetcher import get_fetcher
 from api.config import settings
 from api.constants import (
     DIFFUSION_PRICE_MULT_PER_STEP,
+    INTEGRATED_SUBNETS,
 )
 from api.util import (
     semcomp,
     limit_deployments,
     get_current_hf_commit,
-    is_affine_registered,
+    is_registered_to_subnet,
     notify_deleted,
     image_supports_cllmv,
 )
@@ -608,6 +608,7 @@ async def get_chute_code(
             )
         )
         or "/affine" in chute.name.lower()
+        or subnet_role_accessible(chute, current_user, admin=True)
     ):
         authorized = True
     if not authorized:
@@ -636,6 +637,7 @@ async def warm_up_chute(
         not chute.public
         and not chute.user_id == current_user.user_id
         and not await is_shared(chute.chute_id, current_user.user_id)
+        and not subnet_role_accessible(chute, current_user)
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -751,8 +753,32 @@ async def get_chute(
     """
     Load a chute by ID or name.
     """
-    chute = await get_chute_by_id_or_name(chute_id_or_name, db, current_user, load_instances=True)
-    if not chute:
+    chute = await get_one(chute_id_or_name)
+    if chute:
+        # Complete reload from DB.
+        chute = (
+            (
+                await db.execute(
+                    select(Chute)
+                    .where(Chute.chute_id == chute.chute_id)
+                    .options(selectinload(Chute.instances))
+                )
+            )
+            .unique()
+            .scalar_one_or_none()
+        )
+    # Auth check.
+    authorized = False
+    if chute:
+        if (
+            chute.public
+            or (current_user and chute.user_id == current_user.user_id)
+            or (current_user and await is_shared(chute.chute_id, current_user.user_id))
+            or (current_user and subnet_role_accessible(chute, current_user, admin=True))
+            or "affine" in chute.name.lower()
+        ):
+            authorized = True
+    if not authorized:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Chute not found, or does not belong to you",
@@ -762,50 +788,48 @@ async def get_chute(
     return response
 
 
-@router.delete("/{chute_id_or_name:path}")
+@router.delete("/{chute_id}")
 async def delete_chute(
-    chute_id_or_name: str,
+    chute_id: str,
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user(purpose="chutes")),
 ):
     """
-    Delete a chute by ID or name.
+    Delete a chute by ID.
     """
-    chute = None
-    if (
-        current_user.has_role(Permissioning.affine_admin)
-        and current_user.user_id != await chutes_user_id()
-    ):
-        try:
-            uuid.UUID(chute_id_or_name)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Must use chute UUID to delete affine models.",
-            )
-        chute = await get_one(chute_id_or_name)
-        if not chute:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chute not found",
-            )
-        if chute.user_id != current_user.user_id and "affine" not in chute.name.lower():
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot delete non-affine chutes not owned by you.",
-            )
-        logger.warning(
-            f"AFFINE DEV DELETION TRIGGERED: {current_user.user_id=} "
-            f"{current_user.username=} {chute.chute_id=} {chute.name=}"
+    try:
+        uuid.UUID(chute_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Must use chute UUID to delete.",
         )
-    else:
-        chute = await get_chute_by_id_or_name(chute_id_or_name, db, current_user)
-        if not chute or chute.user_id != current_user.user_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chute not found, or does not belong to you",
-            )
 
+    # Make sure the chute exists and the user has permissions to delete it.
+    # - user owns it
+    # - part of a subnet integration and user is a subnet admin
+    chute = (
+        (await db.execute(select(Chute).where(Chute.chute_id == chute_id)))
+        .unique()
+        .scalar_one_or_none()
+    )
+    allowed = False
+    if chute:
+        if chute.user_id == current_user.user_id:
+            allowed = True
+        if subnet_role_accessible(chute, current_user, admin=True):
+            allowed = True
+            logger.warning(
+                f"Subnet admin triggered chute deletion: {current_user.user_id=} "
+                f"{current_user.username=} {chute.chute_id=} {chute.name=}"
+            )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chute not found, or does not belong to you",
+        )
+
+    # Perform the deletion.
     chute_id = chute.chute_id
     version = chute.version
     await db.delete(chute)
@@ -819,7 +843,6 @@ async def delete_chute(
             }
         ).decode(),
     )
-
     return {"chute_id": chute_id, "deleted": True}
 
 
@@ -914,7 +937,7 @@ async def _deploy_chute(
             ),
         )
 
-    affine_dev = await is_affine_registered(db, current_user)
+    affine_dev = await is_registered_to_subnet(db, current_user, 120)
     if (
         current_user.user_id != await chutes_user_id()
         and not current_user.has_role(Permissioning.unlimited_dev)
@@ -967,7 +990,7 @@ async def _deploy_chute(
         if not image_supports_cllmv(image) or image.user_id != await chutes_user_id():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Must use image="chutes/sglang:nightly-2025100601" (or later dated versions) for affine deployments.',
+                detail='Must use image="chutes/sglang:nightly-2025100800" (or later dated versions) for affine deployments.',
             )
 
     old_version = None
@@ -1175,7 +1198,17 @@ async def _deploy_chute(
                 }
             ).decode(),
         )
-    return await get_chute_by_id_or_name(chute.chute_id, db, current_user, load_instances=True)
+    return (
+        (
+            await db.execute(
+                select(Chute)
+                .where(Chute.chute_id == chute.chute_id)
+                .options(selectinload(Chute.instances))
+            )
+        )
+        .unique()
+        .scalar_one_or_none()
+    )
 
 
 @router.post("/", response_model=ChuteResponse)
@@ -1188,31 +1221,33 @@ async def deploy_chute(
     """
     Standard deploy from the CDK.
     """
-    is_affine_model = False
-    affine_checked = False
-    if await is_affine_registered(db, current_user):
-        if not re.match(r"[^/]+/affine.*", chute_args.name, re.I):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Affine miners may only deploy chutes named */affine*",
-            )
-        affine_checked = True
+    # For custom subnet integrations, limit who can deploy chutes with
+    # their unique substrings (and require being either an admin or registered).
+    is_subnet_model = False
+    for subnet, info in INTEGRATED_SUBNETS.items():
+        if info["model_substring"] in chute_args.name.lower():
+            if (
+                not current_user.has_role(Permissioning.unlimited_dev)
+                and not subnet_role_accessible(chute_args, current_user, admin=True)
+                and not is_registered_to_subnet(db, current_user, info["netuid"])
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"You must be a registered miner on {subnet=} netuid={info['netuid']} "
+                        f"to deploy models with {info['model_substring']}"
+                    ),
+                )
+            is_subnet_model = True
+            break
 
     # Affine special handling.
     if (
         "affine" in chute_args.name.lower()
         and not current_user.has_role(Permissioning.unlimited_dev)
+        and not subnet_role_accessible(chute_args, current_user, admin=True)
         and current_user.username.lower() not in ("affine", "affine2", "unconst", "nonaffine")
     ):
-        if not affine_checked and not await is_affine_registered(db, current_user):
-            logger.warning(
-                "Attempted affine deployment by unregistered hotkey: "
-                f"{current_user.user_id=} {current_user.username=}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only users with hotkeys registered on affine may deploy chutes with 'affine' in the name",
-            )
         valid, message = check_affine_code(chute_args.code)
         if not valid:
             logger.warning(
@@ -1224,7 +1259,7 @@ async def deploy_chute(
                 detail=message,
             )
 
-        # Sanity check the model.
+        # Sanity check the model's node selector (and HF config generally).
         async with aiohttp.ClientSession() as hsession:
             try:
                 guessed_config = await guesser.analyze_model(chute_args.name, hsession)
@@ -1269,15 +1304,10 @@ async def deploy_chute(
             f"Affine deployment initiated: {chute_args.name=} from {current_user.hotkey=}, "
             "code check and prelim model config/node selector config passed."
         )
-        is_affine_model = True
 
     # No-DoS-Plz.
     await limit_deployments(db, current_user)
-    if current_user.user_id not in (
-        await chutes_user_id(),
-        "b167f56b-3e8d-5ffa-88bf-5cc6513bb6f4",
-        "5bf8a979-ea71-54bf-8644-26a3411a3b58",
-    ) and not current_user.has_role(Permissioning.unlimited_dev):
+    if not current_user.has_role(Permissioning.unlimited_dev):
         bad, response = await is_bad_code(chute_args.code)
         if bad:
             logger.warning(
@@ -1291,40 +1321,9 @@ async def deploy_chute(
         chute_args,
         db,
         current_user,
-        use_rolling_update=not is_affine_model,
+        use_rolling_update=not is_subnet_model,
         accept_fee=accept_fee,
     )
-
-    # Auto-share affine chutes with affine admin users.
-    if "/affine" in chute.name.lower():
-        af_dev_user_ids = (
-            (
-                await db.execute(
-                    select(User.user_id).where(
-                        User.permissions_bitmask.op("&")(Permissioning.affine_admin.bitmask) != 0
-                    )
-                )
-            )
-            .unique()
-            .scalars()
-            .all()
-        )
-        if af_dev_user_ids:
-            stmt = insert(ChuteShare).values(
-                [
-                    {
-                        "chute_id": chute.chute_id,
-                        "shared_by": current_user.user_id,
-                        "shared_to": user_id,
-                        "shared_at": func.now(),
-                    }
-                    for user_id in af_dev_user_ids
-                    if user_id != current_user.user_id
-                ]
-            )
-            stmt = stmt.on_conflict_do_nothing()
-            await db.execute(stmt)
-
     return chute
 
 
@@ -1386,7 +1385,7 @@ async def easy_deploy_vllm_chute(
         detail="Easy deployment is currently disabled!",
     )
 
-    if await is_affine_registered(db, current_user):
+    if await is_registered_to_subnet(db, current_user, 120):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Easy vllm deployment method not supported for Affine currently.",
@@ -1621,12 +1620,23 @@ async def update_common_attributes(
     """
     Update readme, tagline, etc. (but not code, image, etc.).
     """
-    chute = await get_chute_by_id_or_name(chute_id_or_name, db, current_user, load_instances=True)
+    chute = await get_one(chute_id_or_name)
     if not chute or chute.user_id != current_user.user_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Chute not found, or does not belong to you",
         )
+    chute = (
+        (
+            await db.execute(
+                select(Chute)
+                .where(Chute.chute_id == chute.chute_id)
+                .options(selectinload(Chute.instances))
+            )
+        )
+        .unique()
+        .scalar_one_or_none()
+    )
     if args.tagline and args.tagline.strip():
         chute.tagline = args.tagline
     if args.readme and args.readme.strip():

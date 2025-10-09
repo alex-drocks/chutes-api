@@ -75,9 +75,11 @@ async def main():
         await asyncio.wait_for(sync_and_save_metagraph(netuid=settings.netuid), 60)
         logger.info(f"Successfully synced metagraph for {settings.netuid=}")
 
-        # Other subnets (e.g. we sync affine here so miners get dev access.
-        for netuid in (120,):
-            await asyncio.wait_for(sync_and_save_metagraph(netuid=netuid), 60)
+        # Other subnets (affine, babelbit, score, etc.).
+        from api.constants import INTEGRATED_SUBNETS
+
+        for subnet_info in INTEGRATED_SUBNETS.values():
+            await asyncio.wait_for(sync_and_save_metagraph(netuid=subnet_info["netuid"]), 60)
     finally:
         await engine.dispose()
 
