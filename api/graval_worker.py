@@ -37,6 +37,7 @@ from api.database import get_session
 from api.node.schemas import Node
 from api.chute.schemas import Chute, RollingUpdate
 from api.instance.schemas import Instance
+from api.instance.util import invalidate_instance_cache
 from sqlalchemy import update, func
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -709,6 +710,7 @@ async def handle_rolling_update(chute_id: str, version: str, reason: str = "code
                     instance,
                     message=f"Instance {instance.instance_id} of miner {instance.miner_hotkey} still bound to old version, deleting...",
                 )
+                await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
                 logger.warning(
                     f"Instance did not respond to rolling update event: {instance.instance_id} of miner {instance.miner_hotkey}"
                 )

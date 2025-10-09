@@ -954,6 +954,10 @@ async def perform_autoscale(dry_run: bool = False):
                 kicked.add(unlucky_instance.instance_id)
                 await purge(unlucky_instance, reason=unlucky_reason)
                 await notify_deleted(unlucky_instance, message=unlucky_reason)
+                await invalidate_instance_cache(
+                    unlucky_instance.chute_id, instance_id=unlucky_instance.instance_id
+                )
+
                 instances_removed += 1
                 gpus_removed += len(unlucky_instance.nodes)
 

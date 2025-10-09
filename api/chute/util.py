@@ -58,7 +58,7 @@ from api.user.schemas import User, InvocationQuota, InvocationDiscount, PriceOve
 from api.user.service import chutes_user_id
 from api.miner_client import sign_request
 from api.instance.schemas import Instance
-from api.instance.util import LeastConnManager, update_shutdown_timestamp
+from api.instance.util import LeastConnManager, update_shutdown_timestamp, invalidate_instance_cache
 from api.gpu import COMPUTE_UNIT_PRICE_BASIS
 from api.metrics.vllm import track_usage as track_vllm_usage
 from api.metrics.perf import PERF_TRACKER
@@ -1157,23 +1157,27 @@ async def invoke(
                     # Handle the case where encryption V2 is in use and the instance needs a new key exchange.
                     if error_message == "KEY_EXCHANGE_REQUIRED":
                         # NOTE: Could probably just re-validate rather than deleting the instance, but this ensures no shenanigans are afoot.
-                        await session.execute(
+                        delete_result = await session.execute(
                             text("DELETE FROM instances WHERE instance_id = :instance_id"),
                             {"instance_id": target.instance_id},
                         )
-                        await session.execute(
-                            text(
-                                "UPDATE instance_audit SET deletion_reason = 'miner responded with 426 upgrade required, new symmetric key needed' WHERE instance_id = :instance_id"
-                            ),
-                            {"instance_id": target.instance_id},
-                        )
-                        await session.commit()
-                        asyncio.create_task(
-                            notify_deleted(
-                                target,
-                                message=f"Instance {target.instance_id} of miner {target.miner_hotkey} responded with a 426 error, indicating a new key exchange is required.",
+                        if delete_result.rowcount > 0:
+                            await session.execute(
+                                text(
+                                    "UPDATE instance_audit SET deletion_reason = 'miner responded with 426 upgrade required, new symmetric key needed' WHERE instance_id = :instance_id"
+                                ),
+                                {"instance_id": target.instance_id},
                             )
-                        )
+                            await session.commit()
+                            await invalidate_instance_cache(
+                                target.chute_id, instance_id=target.instance_id
+                            )
+                            asyncio.create_task(
+                                notify_deleted(
+                                    target,
+                                    message=f"Instance {target.instance_id} of miner {target.miner_hotkey} responded with a 426 error, indicating a new key exchange is required.",
+                                )
+                            )
 
                     elif error_message not in ("RATE_LIMIT", "BAD_REQUEST"):
                         # Handle consecutive failures (auto-delete instances).
@@ -1197,6 +1201,9 @@ async def invoke(
                                 {"instance_id": target.instance_id},
                             )
                             if delete_result.rowcount > 0:
+                                await invalidate_instance_cache(
+                                    target.chute_id, instance_id=target.instance_id
+                                )
                                 await session.execute(
                                     text(
                                         f"UPDATE instance_audit SET deletion_reason = 'max consecutive failures {consecutive_failures} reached' WHERE instance_id = :instance_id"
