@@ -240,9 +240,9 @@ async def grant_subnet_role(
     user = (
         (
             await db.execute(
-                select(User).where(
-                    or_(User.user_id == args.user, User.username == args.user).limit(1)
-                )
+                select(User)
+                .where(or_(User.user_id == args.user, User.username == args.user))
+                .limit(1)
             )
         )
         .unique()
@@ -286,9 +286,9 @@ async def revoke_subnet_role(
     user = (
         (
             await db.execute(
-                select(User).where(
-                    or_(User.user_id == args.user, User.username == args.user).limit(1)
-                )
+                select(User)
+                .where(or_(User.user_id == args.user, User.username == args.user))
+                .limit(1)
             )
         )
         .unique()
@@ -1136,17 +1136,6 @@ async def admin_create_user(
     actual_ip = actual_ip.split(",")[0]
     logger.info(f"USERCREATION: {actual_ip} username={user_args.username}")
 
-    # Prevent multiple signups from the same IP.
-    ip_signups = await settings.redis_client.get(f"ip_signups:{actual_ip}")
-    if ip_signups and int(ip_signups) >= 2:
-        logger.warning(
-            f"Attempted multiple registrations from the same IP: {actual_ip} {ip_signups=}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too may registration requests from this IP.",
-        )
-
     # Only admins can create users.
     if not current_user.has_role(Permissioning.create_user):
         raise HTTPException(
@@ -1180,7 +1169,8 @@ async def admin_create_user(
     )
     generate_user_uid(None, None, user)
     user.payment_address, user.wallet_secret = await generate_payment_address()
-    user.coldkey = user.payment_address
+    if not user_args.coldkey:
+        user.coldkey = user.payment_address
     if settings.all_accounts_free:
         user.permissions_bitmask = 0
         Permissioning.enable(user, Permissioning.free_account)
@@ -1209,10 +1199,6 @@ async def admin_create_user(
     key_response.secret_key = one_time_secret
     response = _registration_response(user, fingerprint)
     response.api_key = key_response
-
-    # Track signups per IP.
-    await settings.redis_client.incr(f"ip_signups:{actual_ip}")
-    await settings.redis_client.expire(f"ip_signups:{actual_ip}", 24 * 60 * 60)
 
     return response
 

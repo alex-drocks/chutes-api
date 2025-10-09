@@ -1183,7 +1183,7 @@ async def deploy_chute(
             if (
                 not current_user.has_role(Permissioning.unlimited_dev)
                 and not subnet_role_accessible(chute_args, current_user, admin=True)
-                and not is_registered_to_subnet(db, current_user, info["netuid"])
+                and not await is_registered_to_subnet(db, current_user, info["netuid"])
             ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
