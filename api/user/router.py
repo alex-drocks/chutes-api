@@ -26,7 +26,7 @@ from api.user.schemas import (
 )
 from api.util import memcache_get, memcache_set, memcache_delete, is_cloudflare_ip
 from api.user.response import RegistrationResponse, SelfResponse
-from api.user.service import get_current_user
+from api.user.service import get_current_user, bt_user_exists
 from api.user.events import generate_uid as generate_user_uid
 from api.user.tokens import create_token
 from api.payment.schemas import AdminBalanceChange
@@ -711,7 +711,6 @@ def _registration_response(user, fingerprint):
         hotkey=user.hotkey,
         coldkey=user.coldkey,
         payment_address=user.payment_address,
-        developer_payment_address=user.developer_payment_address,
         fingerprint=fingerprint,
     )
 
@@ -800,7 +799,6 @@ async def register(
     )
     generate_user_uid(None, None, user)
     user.payment_address, user.wallet_secret = await generate_payment_address()
-    user.developer_payment_address, user.developer_wallet_secret = await generate_payment_address()
     if settings.all_accounts_free:
         user.permissions_bitmask = 0
         Permissioning.enable(user, Permissioning.free_account)
@@ -1159,17 +1157,30 @@ async def admin_create_user(
     # Validate the username
     await _validate_username(db, user_args.username)
 
+    # Validate hotkey/coldkey if either is specified.
+    if user_args.coldkey or user_args.hotkey:
+        if (
+            not user_args.coldkey
+            or not user_args.hotkey
+            or not is_valid_ss58_address(user_args.coldkey)
+            or not is_valid_ss58_address(user_args.hotkey)
+            or await bt_user_exists(db, hotkey=user_args.hotkey)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing or invalid coldkey/hotkey values (or hotkey is already registered).",
+            )
+
     # Create the user, faking the hotkey and using the payment address as the coldkey, since this
     # user is API/APP only and not really cognisant of bittensor.
     user, fingerprint = User.create(
         username=user_args.username,
-        coldkey=secrets.token_hex(24),
-        hotkey=secrets.token_hex(24),
+        coldkey=user_args.coldkey or secrets.token_hex(24),
+        hotkey=user_args.hotkey or secrets.token_hex(24),
     )
     generate_user_uid(None, None, user)
     user.payment_address, user.wallet_secret = await generate_payment_address()
     user.coldkey = user.payment_address
-    user.developer_payment_address, user.developer_wallet_secret = await generate_payment_address()
     if settings.all_accounts_free:
         user.permissions_bitmask = 0
         Permissioning.enable(user, Permissioning.free_account)

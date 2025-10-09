@@ -42,6 +42,8 @@ class UserRequest(BaseModel):
 
 class AdminUserRequest(BaseModel):
     username: str
+    coldkey: Optional[str] = None
+    hotkey: Optional[str] = None
     logo_id: Optional[str] = None
 
 

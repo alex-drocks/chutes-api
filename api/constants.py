@@ -78,8 +78,8 @@ WITH chute_details AS (
     SELECT
         c.chute_id,
         CASE WHEN c.public IS true THEN c.name ELSE '[private chute]' END AS name,
-        COALESCE(ARRAY_AGG(i.instance_id), ARRAY[]::text[]) AS instances,
-        COUNT(i.instance_id) AS active_instance_count
+        COUNT(i.instance_id) AS total_instance_count,
+        COUNT(i.instance_id) FILTER (WHERE i.active IS true) AS active_instance_count
     FROM chutes c
     LEFT JOIN instances i ON c.chute_id = i.chute_id
     LEFT JOIN rolling_updates ru ON c.chute_id = ru.chute_id
@@ -160,7 +160,7 @@ SELECT
     ll.instance_count,
     ll.action_taken,
     ll.target_count,
-    cd.instances,
+    cd.total_instance_count,
     cd.active_instance_count
 FROM chute_details cd
 JOIN latest_logs ll ON cd.chute_id = ll.chute_id

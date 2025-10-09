@@ -209,3 +209,12 @@ def subnet_role_accessible(chute, user, admin: bool = False):
     if not admin:
         perms.append(Permissioning.subnet_invoke)
     return user.netuids and netuid in user.netuids and any(user.has_role(perm) for perm in perms)
+
+
+async def bt_user_exists(session, hotkey: str) -> bool:
+    user = (
+        (await session.execute(select(User).where(User.hotkey == hotkey)))
+        .unique()
+        .scalar_one_or_none()
+    )
+    return user is not None
