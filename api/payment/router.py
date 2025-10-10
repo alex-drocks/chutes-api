@@ -43,8 +43,16 @@ async def get_daily_revenue_summary(db: AsyncSession = Depends(get_db_session)):
             "new_subscriber_revenue": float(row.new_subscriber_revenue),
             "paygo_revenue": float(row.paygo_revenue),
             "pending_instance_revenue": float(row.instance_revenue),
+            "sponsored_inference": float(row.sponsored_inference),
             "total_revenue": float(
-                row.new_subscriber_revenue + row.paygo_revenue + row.instance_revenue
+                sum(
+                    [
+                        row.new_subscriber_revenue,
+                        row.paygo_revenue,
+                        row.instance_revenue,
+                        row.sponsored_inference,
+                    ]
+                )
             ),
         }
         for row in rows

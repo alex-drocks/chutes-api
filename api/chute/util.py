@@ -504,24 +504,25 @@ async def _invoke_one(
                     ):
                         verification_token = data.get("chutes_verification")
                         text = None
-                        if data.get("choices"):
+                        has_tool_call = False
+                        if "choices" in data and isinstance(data["choices"], list):
                             choice = data["choices"][0]
-                            if "text" in choice:
-                                text = choice["text"]
-                            elif "delta" in choice and choice["delta"]:
-                                text = choice["delta"].get("content") or choice["delta"].get(
-                                    "reasoning_content"
-                                )
-                        requires_verification = True
-                        if (
-                            not text
-                            and isinstance(data.get("tool_calls"), (list, dict))
-                            and not verification_token
-                        ):
-                            requires_verification = False
+                            if isinstance(choice, dict):
+                                if "text" in choice:
+                                    text = choice["text"]
+                                elif "delta" in choice and choice["delta"]:
+                                    text = choice["delta"].get("content") or choice["delta"].get(
+                                        "reasoning_content"
+                                    )
+                                if (
+                                    "tool_calls" in choice
+                                    and isinstance(choice["tool_calls"], list)
+                                    and choice["tool_calls"]
+                                ):
+                                    has_tool_call = True
 
                         # Verify the hash.
-                        if requires_verification and (
+                        if (text or not has_tool_call) and (
                             not verification_token
                             or not cllmv_validate(
                                 data.get("id") or "bad",

@@ -1,4 +1,17 @@
 -- migrate:up
+CREATE TABLE IF NOT EXISTS inference_sponsorships (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE,
+    daily_threshold FLOAT NOT NULL,
+    description TEXT
+);
+CREATE TABLE IF NOT EXISTS sponsorship_chutes (
+    sponsorship_id UUID NOT NULL REFERENCES inference_sponsorships(id) ON DELETE CASCADE,
+    chute_id TEXT NOT NULL,
+    PRIMARY KEY (sponsorship_id, chute_id)
+);
 
 DROP MATERIALIZED VIEW IF EXISTS daily_instance_revenue;
 CREATE MATERIALIZED VIEW IF NOT EXISTS daily_instance_revenue AS
@@ -100,13 +113,14 @@ ORDER BY date DESC;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_instance_revenue_date ON daily_instance_revenue(date);
 
 DROP MATERIALIZED VIEW IF EXISTS daily_revenue_summary CASCADE;
-CREATE MATERIALIZED VIEW IF NOT EXISTS daily_revenue_summary AS 
+CREATE MATERIALIZED VIEW daily_revenue_summary AS
 SELECT
-    COALESCE(iq.date, ud.date, ir.date) as date,
+    COALESCE(iq.date, ud.date, ir.date, si.date) as date,
     COALESCE(iq.new_subscriber_count, 0) as new_subscriber_count,
     COALESCE(iq.new_subscriber_revenue, 0) as new_subscriber_revenue,
     COALESCE(ud.paygo_revenue, 0) as paygo_revenue,
-    COALESCE(ir.instance_revenue, 0) as instance_revenue
+    COALESCE(ir.instance_revenue, 0) as instance_revenue,
+    COALESCE(si.sponsored_inference, 0) as sponsored_inference
 FROM (
     SELECT
         date(updated_at) as date,
@@ -129,11 +143,25 @@ FULL OUTER JOIN (
     GROUP BY date
 ) ud ON iq.date = ud.date
 FULL OUTER JOIN (
-    SELECT 
+    SELECT
         date,
         instance_revenue
     FROM daily_instance_revenue
 ) ir ON COALESCE(iq.date, ud.date) = ir.date
+FULL OUTER JOIN (
+    SELECT
+        date(ud.bucket) as date,
+        sum(ud.amount) - MAX(isp.daily_threshold) as sponsored_inference
+    FROM usage_data ud
+    JOIN inference_sponsorships isp
+        ON ud.user_id = isp.user_id
+        AND date(ud.bucket) >= isp.start_date
+        AND (isp.end_date IS NULL OR date(ud.bucket) <= isp.end_date)
+    JOIN sponsorship_chutes sc
+        ON isp.id = sc.sponsorship_id
+        AND ud.chute_id = sc.chute_id
+    GROUP BY date(ud.bucket)
+) si ON COALESCE(iq.date, ud.date, ir.date) = si.date
 ORDER BY date DESC;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_revenue_summary_date ON daily_revenue_summary(date);
 
