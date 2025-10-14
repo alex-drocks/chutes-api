@@ -748,7 +748,7 @@ async def register(
     x_forwarded_for = request.headers.get("X-Forwarded-For")
     actual_ip = x_forwarded_for.split(",")[0] if x_forwarded_for else request.client.host
     attempts = await settings.redis_client.get(f"user_signup:{actual_ip}")
-    if attempts and int(attempts) > 3:
+    if attempts and int(attempts) > 2:
         logger.warning(
             f"Attempted multiple registrations from the same IP: {actual_ip} {attempts=}"
         )
@@ -771,11 +771,10 @@ async def register(
         allowed_ip = await memcache_get(f"regtoken:{token}".encode())
         if allowed_ip:
             allowed_ip = allowed_ip.decode()
-    # if actual_ip != allowed_ip:
-    if not allowed_ip:
+    if actual_ip != allowed_ip:
         logger.warning(f"RTOK: token not found: {token=}")
         await memcache_delete(f"regtoken:{token}".encode())
-        # logger.warning(f"RTOK: Expected IP {allowed_ip=} but got {actual_ip=}")
+        logger.warning(f"RTOK: Expected IP {allowed_ip=} but got {actual_ip=}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid registration token, or registration token does not match expected IP address",
@@ -840,6 +839,14 @@ async def get_registration_token(request: Request):
             f"RTOK [get token]: request attempted to bypass cloudflare: {x_forwarded_for=} {actual_ip=} {cf_ip=}"
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No.")
+
+    # Rate limits.
+    attempts = await settings.redis_client.get(f"rtoken_fetch:{actual_ip}")
+    if attempts and int(attempts) > 3:
+        logger.warning(f"RTOK [get token]: too many requests from {actual_ip=}")
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="No.")
+    await settings.redis_client.incr(f"rtoken_fetch:{actual_ip}")
+    await settings.redis_client.expire(f"rtoken_fetch:{actual_ip}", 24 * 60 * 60)
 
     html_content = f"""
     <!DOCTYPE html>

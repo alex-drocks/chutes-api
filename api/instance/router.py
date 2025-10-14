@@ -141,21 +141,6 @@ async def _check_scalable(db, chute, hotkey):
                 f"using conservative current count as default: {target_count}"
             )
 
-    # When there is a rolling update in progress, use the permitted list.
-    if chute.rolling_update and current_count >= target_count - 2:
-        limit = chute.rolling_update.permitted.get(hotkey, 0) or 0
-        if limit <= 0 and chute.rolling_update.permitted:
-            logger.warning(
-                f"SCALELOCK: chute {chute_id=} {chute.name} is currently undergoing a rolling update"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_423_LOCKED,
-                detail=f"Chute {chute_id} is currently undergoing a rolling update and you have no quota, try again later.",
-            )
-        elif limit:
-            chute.rolling_update.permitted[hotkey] -= 1
-        return
-
     # Check if scaling is allowed based on target count.
     if active_count >= target_count:
         logger.warning(
@@ -217,7 +202,7 @@ async def _check_scalable_private(db, chute, miner):
         JOIN chutes c ON i.chute_id = c.chute_id
         WHERE i.miner_hotkey = :miner_hotkey
         AND i.activated_at IS NOT NULL
-        AND c.public IS true
+        AND (c.public IS true OR c.chute_id = '561e4875-254d-588f-a36f-57c9cdef8961')
     """)
     public_result = (
         (await db.execute(public_chute_query, {"miner_hotkey": miner.hotkey})).mappings().first()
@@ -970,7 +955,6 @@ async def verify_launch_config_instance(
         node_idx = random.randint(0, len(instance.nodes) - 1)
         node = instance.nodes[node_idx]
         work_product = response_body["proof"][node.uuid]["work_product"]
-        logger.info(f"CHECKING PROOF: {work_product=}\n{response_body=}")
         assert await verify_proof(node, launch_config.seed, work_product)
     except Exception as exc:
         reason = (

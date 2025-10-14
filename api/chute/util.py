@@ -505,21 +505,26 @@ async def _invoke_one(
                         verification_token = data.get("chutes_verification")
                         text = None
                         has_tool_call = False
-                        if "choices" in data and isinstance(data["choices"], list):
+                        if (
+                            "choices" in data
+                            and isinstance(data["choices"], list)
+                            and data["choices"]
+                        ):
                             choice = data["choices"][0]
                             if isinstance(choice, dict):
                                 if "text" in choice:
                                     text = choice["text"]
-                                elif "delta" in choice and choice["delta"]:
+                                elif (
+                                    "delta" in choice
+                                    and choice["delta"]
+                                    and isinstance(choice["delta"], dict)
+                                ):
                                     text = choice["delta"].get("content") or choice["delta"].get(
                                         "reasoning_content"
                                     )
-                                if (
-                                    "tool_calls" in choice
-                                    and isinstance(choice["tool_calls"], list)
-                                    and choice["tool_calls"]
-                                ):
-                                    has_tool_call = True
+                                    tool_calls = choice["delta"].get("tool_calls")
+                                    if isinstance(tool_calls, list) and tool_calls:
+                                        has_tool_call = True
 
                         # Verify the hash.
                         if (text or not has_tool_call) and (
@@ -537,12 +542,9 @@ async def _invoke_one(
                             logger.warning(
                                 f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
                             )
-
-                            # Still testing other models...
-                            if "affine" in chute.name:
-                                raise InvalidCLLMV(
-                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                                )
+                            raise InvalidCLLMV(
+                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                            )
 
                     last_chunk = chunk
                 if b"data:" in chunk:
@@ -720,10 +722,9 @@ async def _invoke_one(
                             logger.warning(
                                 f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
                             )
-                            if "affine" in chute.name:
-                                raise InvalidCLLMV(
-                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                                )
+                            raise InvalidCLLMV(
+                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                            )
 
                     output_text = None
                     if plain_path == "chat":

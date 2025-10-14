@@ -432,14 +432,6 @@ async def perform_autoscale(dry_run: bool = False):
             )
             continue
 
-        # Skip if rolling update in progress
-        if info.has_rolling_update:
-            logger.warning(f"Skipping {chute_id=}, rolling update in progress")
-            chute_actions[chute_id] = "skipped_rolling_update"
-            # Keep current instance count as target for rolling updates
-            chute_target_counts[chute_id] = info.instance_count
-            continue
-
         # XXX Manual configurations, just in case, e.g. here kimi-k2-tools on vllm with b200s.
         if chute_id in LIMIT_OVERRIDES:
             limit = LIMIT_OVERRIDES[chute_id]
@@ -643,10 +635,6 @@ async def perform_autoscale(dry_run: bool = False):
             )
             if not chute:
                 logger.warning(f"Chute not found: {chute_id=}")
-                continue
-
-            if chute.rolling_update:
-                logger.warning(f"Chute has a rolling update in progress: {chute_id=}")
                 continue
 
             active = [

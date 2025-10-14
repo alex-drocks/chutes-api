@@ -49,7 +49,7 @@ from api.chute.util import (
 )
 from api.instance.schemas import Instance
 from api.instance.util import get_chute_target_manager
-from api.user.schemas import User
+from api.user.schemas import User, PriceOverride
 from api.user.service import get_current_user, chutes_user_id, subnet_role_accessible
 from api.image.schemas import Image
 from api.image.util import get_image_by_id_or_name
@@ -110,6 +110,17 @@ async def _inject_current_estimated_price(chute: Chute, response: ChuteResponse)
         tao_usd = await get_fetcher().get_price("tao")
         if tao_usd:
             response.current_estimated_price["per_step"]["tao"] = per_step / tao_usd
+
+    # Price overrides?
+    else:
+        price_override = await PriceOverride.get("__anyuser__", chute.chute_id)
+        if price_override and price_override.per_request:
+            response.current_estimated_price = {"per_request": {"usd": price_override.per_request}}
+            tao_usd = await get_fetcher().get_price("tao")
+            if tao_usd:
+                response.current_estimated_price["per_request"]["tao"] = (
+                    price_override.per_request / tao_usd
+                )
 
     # Legacy/fallback, and discounts.
     if not response.current_estimated_price:
@@ -636,7 +647,7 @@ async def warm_up_chute(
         )
     if (
         not chute.public
-        and not chute.user_id == current_user.user_id
+        and chute.user_id != current_user.user_id
         and not await is_shared(chute.chute_id, current_user.user_id)
         and not subnet_role_accessible(chute, current_user)
     ):
