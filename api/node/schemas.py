@@ -88,9 +88,6 @@ class Node(Base):
     )
     miner = relationship("MetagraphNode", back_populates="nodes")
     challenges = relationship("Challenge", back_populates="node", cascade="all, delete-orphan")
-    challenge_results = relationship(
-        "ChallengeResult", back_populates="node", cascade="all, delete-orphan"
-    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

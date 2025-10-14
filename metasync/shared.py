@@ -49,11 +49,6 @@ def create_metagraph_node_class(base):
             back_populates="miner",
             cascade="all, delete-orphan",
         )
-        challenge_results = relationship(
-            "ChallengeResult",
-            back_populates="miner",
-            cascade="all, delete-orphan",
-        )
 
     return MetagraphNode
 

@@ -215,17 +215,13 @@ RUN ls -la /tmp/chutesfs.*
 
         process = await asyncio.create_subprocess_exec(
             *build_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(
-            asyncio.gather(
-                _capture_logs(process.stdout, "stdout", capture=False),
-                _capture_logs(process.stderr, "stderr", capture=False),
-                process.wait(),
-            ),
-            timeout=settings.build_timeout,
-        )
+        try:
+            await asyncio.wait_for(process.wait(), timeout=settings.build_timeout)
+        except Exception as exc:
+            raise BuildFailure(f"Failed waiting for filesystem verification image: {str(exc)}")
         if process.returncode != 0:
             raise BuildFailure("Build of filesystem verification image failed!")
 

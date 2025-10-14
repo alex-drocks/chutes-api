@@ -2,6 +2,7 @@
 GraVal node validation worker.
 """
 
+import api.database.orms  # noqa
 import os
 import subprocess
 import tempfile
@@ -43,7 +44,6 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from taskiq_redis import ListQueueBroker, RedisAsyncResultBackend
 from watchtower import get_expected_command, verify_expected_command, is_kubernetes_env, get_dump
-import api.database.orms  # noqa
 import api.miner_client as miner_client
 
 broker = ListQueueBroker(url=settings.redis_url, queue_name="graval").with_result_backend(
