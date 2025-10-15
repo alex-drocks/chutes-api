@@ -199,10 +199,10 @@ def subnet_role_accessible(chute, user, admin: bool = False):
     netuid = None
     if "/affine" in chute.name.lower():
         netuid = 120
-    elif "/turbovision" in chute.name.lower():
+    elif "turbovision" in chute.name.lower():
         netuid = 44
-    elif "/babelbit" in chute.name.lower():
-        netuid = 999
+    elif "babelbit" in chute.name.lower():
+        netuid = 59
     if not netuid:
         return False
     perms = [Permissioning.subnet_admin]

@@ -766,7 +766,7 @@ async def is_cloudflare_ip(ip_address):
     return False
 
 
-def image_supports_cllmv(image) -> bool:
+def image_supports_cllmv(image, min_version: int = 2025100801) -> bool:
     if image.name != "sglang":
         return False
 
@@ -776,7 +776,7 @@ def image_supports_cllmv(image) -> bool:
     date_part = tag[8:]
     try:
         date_num = int(date_part)
-        return date_num >= 2025100801
+        return date_num >= min_version
     except (ValueError, Exception):
         return False
 
