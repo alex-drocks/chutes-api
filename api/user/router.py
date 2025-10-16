@@ -1226,8 +1226,8 @@ async def change_fingerprint(
     authorization: str | None = Header(None, alias=AUTHORIZATION_HEADER),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
     coldkey: str | None = Header(None, alias=COLDKEY_HEADER),
-    nonce: str = Header(..., description="Nonce", alias=NONCE_HEADER),
-    signature: str = Header(..., description="Hotkey signature", alias=SIGNATURE_HEADER),
+    nonce: str = Header(None, description="Nonce", alias=NONCE_HEADER),
+    signature: str = Header(None, description="Hotkey signature", alias=SIGNATURE_HEADER),
 ):
     """
     Reset a user's fingerprint using either the hotkey or coldkey.
@@ -1249,6 +1249,12 @@ async def change_fingerprint(
         await db.commit()
         await db.refresh(user)
         return {"status": "Fingerprint updated"}
+
+    if not nonce or not signature:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid BT signature.",
+        )
 
     # Get the signature bytes.
     try:
