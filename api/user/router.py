@@ -838,13 +838,19 @@ async def get_registration_token(request: Request):
         logger.warning(
             f"RTOK [get token]: request attempted to bypass cloudflare: {x_forwarded_for=} {actual_ip=} {cf_ip=}"
         )
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Request blocked, are you trying to bypass security measures?",
+        )
 
     # Rate limits.
     attempts = await settings.redis_client.get(f"rtoken_fetch:{actual_ip}")
     if attempts and int(attempts) > 3:
         logger.warning(f"RTOK [get token]: too many requests from {actual_ip=}")
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="No.")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many registration token attempts from {actual_ip}",
+        )
     await settings.redis_client.incr(f"rtoken_fetch:{actual_ip}")
     await settings.redis_client.expire(f"rtoken_fetch:{actual_ip}", 24 * 60 * 60)
 
@@ -938,7 +944,10 @@ async def post_rtok(request: Request):
         logger.warning(
             f"RTOK: request attempted to bypass cloudflare: {x_forwarded_for=} {actual_ip=} {cf_ip=}"
         )
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Request blocked; are you trying to bypass security measures?",
+        )
 
     # Validate captcha.
     form_data = await request.form()
@@ -1214,6 +1223,7 @@ async def admin_create_user(
 async def change_fingerprint(
     args: FingerprintChange,
     db: AsyncSession = Depends(get_db_session),
+    authorization: str | None = Header(None, alias=AUTHORIZATION_HEADER),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
     coldkey: str | None = Header(None, alias=COLDKEY_HEADER),
     nonce: str = Header(..., description="Nonce", alias=NONCE_HEADER),
@@ -1223,6 +1233,22 @@ async def change_fingerprint(
     Reset a user's fingerprint using either the hotkey or coldkey.
     """
     fingerprint = args.fingerprint
+
+    # Using the existing fingerprint?
+    if authorization:
+        fingerprint_hash = hashlib.blake2b(authorization.encode()).hexdigest()
+        user = (
+            await db.execute(select(User).where(User.fingerprint_hash == fingerprint_hash))
+        ).scalar_one_or_none()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing or invalid fingerprint provided.",
+            )
+        user.fingerprint_hash = hashlib.blake2b(fingerprint.encode()).hexdigest()
+        await db.commit()
+        await db.refresh(user)
+        return {"status": "Fingerprint updated"}
 
     # Get the signature bytes.
     try:
