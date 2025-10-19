@@ -519,6 +519,31 @@ async def my_quotas(
     return quotas
 
 
+@router.get("/{user_id}/quotas")
+async def admin_get_user_quotas(
+    user_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user()),
+):
+    """
+    Load quotas for a user.
+    """
+    if not current_user.has_role(Permissioning.billing_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action can only be performed by billing admin accounts.",
+        )
+    quotas = (
+        (await db.execute(select(InvocationQuota).where(InvocationQuota.user_id == user_id)))
+        .unique()
+        .scalars()
+        .all()
+    )
+    if not quotas:
+        return settings.default_quotas
+    return quotas
+
+
 @router.get("/me/discounts")
 async def my_discounts(
     db: AsyncSession = Depends(get_db_session),
