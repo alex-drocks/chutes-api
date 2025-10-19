@@ -1224,6 +1224,7 @@ async def deploy_chute(
         and not subnet_role_accessible(chute_args, current_user, admin=True)
         and current_user.username.lower() not in ("affine", "affine2", "unconst", "nonaffine")
     ):
+        # Special affine code validator.
         valid, message = check_affine_code(chute_args.code)
         if not valid:
             logger.warning(
@@ -1233,6 +1234,13 @@ async def deploy_chute(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=message,
+            )
+
+        # Make sure egress is disabled (checked in code also, but...)
+        if chute_args.allow_external_egress:
+            logger.warning(
+                f"Affine deployment attempted from {current_user.user_id=} "
+                f"{current_user.hotkey=} with external egress allowed!"
             )
 
         # Sanity check the model's node selector (and HF config generally).
