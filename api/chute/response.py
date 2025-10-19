@@ -58,6 +58,7 @@ class ChuteResponse(BaseModel):
     scaling_threshold: Optional[float] = None
     shutdown_after_seconds: Optional[int] = None
     preemptible: bool
+    allow_external_egress: Optional[bool] = True
 
     class Config:
         from_attributes = True

@@ -798,6 +798,8 @@ USER root
 RUN rm -f /etc/chutesfs.index
 USER chutes
 RUN pip install chutes=={chutes_version}
+RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-netnanny.so"))') /usr/local/lib/chutes-netnanny.so
+ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so
 """
             dockerfile_path = os.path.join(build_dir, "Dockerfile.update")
             with open(dockerfile_path, "w") as f:

@@ -165,7 +165,7 @@ class Settings(BaseSettings):
     reroll_multiplier: float = float(os.getenv("REROLL_MULTIPLIER", "0.1"))
 
     # Chutes pinned version.
-    chutes_version: str = os.getenv("CHUTES_VERSION", "0.3.11.rc3")
+    chutes_version: str = os.getenv("CHUTES_VERSION", "0.3.44")
 
     # Auto stake amount when DCAing into alpha after receiving payments.
     autostake_amount: float = float(os.getenv("AUTOSTAKE_AMOUNT", "1.0"))

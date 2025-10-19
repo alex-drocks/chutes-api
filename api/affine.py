@@ -70,9 +70,17 @@ DANGEROUS_BUILTINS = {
 }
 
 
+def is_truthy_value(node):
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    elif isinstance(node, ast.NameConstant):
+        return bool(node.value)
+    return True
+
+
 def check_affine_code(code: str) -> tuple[bool, str]:
     """
-    Check if an affine model meets the requirements (LLM chute using SGLang or vLLM).
+    Check if an affine model meets the requirements (LLM chute using SGLang only).
     """
     if len(code) > MAX_CODE_SIZE:
         return False, f"Code size exceeds maximum allowed size of {MAX_CODE_SIZE} bytes"
@@ -139,15 +147,18 @@ def check_affine_code(code: str) -> tuple[bool, str]:
                 return False, f"Invalid import from: {node.module}. Only 'from chutes.*' is allowed"
             if node.module == "chutes.chute":
                 for alias in node.names:
-                    if alias.name != "NodeSelector":
-                        return False, "From chutes.chute, only NodeSelector can be imported"
+                    if alias.name not in ["NodeSelector", "Chute"]:
+                        return (
+                            False,
+                            "From chutes.chute, only NodeSelector and Chute can be imported",
+                        )
                     imported_names.add(alias.asname if alias.asname else alias.name)
             elif node.module.startswith("chutes.chute.template"):
                 for alias in node.names:
-                    if alias.name not in ["build_vllm_chute", "build_sglang_chute"]:
+                    if alias.name != "build_sglang_chute":
                         return (
                             False,
-                            f"From {node.module}, only build_vllm_chute or build_sglang_chute can be imported",
+                            f"From {node.module}, only build_sglang_chute can be imported",
                         )
                     imported_names.add(alias.asname if alias.asname else alias.name)
             else:
@@ -155,6 +166,20 @@ def check_affine_code(code: str) -> tuple[bool, str]:
                     False,
                     f"Invalid import from {node.module}. Only chutes.chute and chutes.chute.template.* are allowed",
                 )
+
+    # Check for Chute(...) calls with allow_external_egress
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            # Check if this is a Chute constructor call
+            if isinstance(node.func, ast.Name) and node.func.id == "Chute":
+                # Check for allow_external_egress in keyword arguments
+                for keyword in node.keywords:
+                    if keyword.arg == "allow_external_egress":
+                        if is_truthy_value(keyword.value):
+                            return (
+                                False,
+                                "Chute cannot have allow_external_egress set to a truthy value",
+                            )
 
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
@@ -371,14 +396,21 @@ def check_affine_code(code: str) -> tuple[bool, str]:
 
     assignments = {}
     chute_assignment = None
+    chute_constructor_found = False
+
     for node in tree.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     var_name = target.id
+                    # Check for Chute constructor assignment
                     if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
                         func_name = node.value.func.id
-                        if func_name in ["build_sglang_chute", "build_vllm_chute"]:
+                        if func_name == "Chute":
+                            if var_name == "chute":
+                                chute_constructor_found = True
+                                chute_assignment = "Chute"
+                        elif func_name == "build_sglang_chute":
                             if func_name not in imported_names:
                                 return False, f"Function {func_name} is used but not imported"
                             if var_name == "chute":
@@ -403,71 +435,42 @@ def check_affine_code(code: str) -> tuple[bool, str]:
                                                 "image argument must be a string literal, not Image(...)",
                                             )
                                         image_str = keyword.value.value
+                                        if not image_str.startswith("chutes/sglang"):
+                                            return (
+                                                False,
+                                                "image must start with 'chutes/sglang'",
+                                            )
+                                    elif keyword.arg == "engine_args":
                                         if not (
-                                            image_str.startswith("chutes/sglang")
-                                            or image_str.startswith("chutes/vllm")
+                                            isinstance(keyword.value, ast.Constant)
+                                            and isinstance(keyword.value.value, str)
                                         ):
                                             return (
                                                 False,
-                                                "image must start with 'chutes/sglang' or 'chutes/vllm'",
+                                                "engine_args for build_sglang_chute must be a string literal",
                                             )
-                                    elif keyword.arg == "engine_args":
-                                        if func_name == "build_vllm_chute":
-                                            if not isinstance(keyword.value, ast.Dict):
-                                                return (
-                                                    False,
-                                                    "engine_args for build_vllm_chute must be a dictionary literal {...}",
-                                                )
-                                            for key, value in zip(
-                                                keyword.value.keys, keyword.value.values
-                                            ):
-                                                if not (
-                                                    isinstance(key, ast.Constant)
-                                                    and isinstance(key.value, str)
-                                                ):
-                                                    return (
-                                                        False,
-                                                        "engine_args dictionary keys must be string literals",
-                                                    )
-                                                if key.value in [
-                                                    "trust_remote_code",
-                                                    "trust-remote-code",
-                                                ]:
-                                                    return (
-                                                        False,
-                                                        f"engine_args cannot contain '{key.value}'",
-                                                    )
-                                                if not isinstance(value, ast.Constant):
-                                                    return (
-                                                        False,
-                                                        "engine_args dictionary values must be literals, not dynamic expressions",
-                                                    )
-                                        elif func_name == "build_sglang_chute":
-                                            if not (
-                                                isinstance(keyword.value, ast.Constant)
-                                                and isinstance(keyword.value.value, str)
-                                            ):
-                                                return (
-                                                    False,
-                                                    "engine_args for build_sglang_chute must be a string literal",
-                                                )
-                                            if (
-                                                "trust_remote_code" in keyword.value.value
-                                                or "trust-remote-code" in keyword.value.value
-                                            ):
-                                                return (
-                                                    False,
-                                                    "engine_args string cannot contain 'trust_remote_code' or 'trust-remote-code'",
-                                                )
+                                        if (
+                                            "trust_remote_code" in keyword.value.value
+                                            or "trust-remote-code" in keyword.value.value
+                                        ):
+                                            return (
+                                                False,
+                                                "engine_args string cannot contain 'trust_remote_code' or 'trust-remote-code'",
+                                            )
                             else:
                                 return (
                                     False,
                                     f"Function {func_name} must be assigned to variable 'chute', not '{var_name}'",
                                 )
+                        elif func_name == "build_vllm_chute":
+                            return (
+                                False,
+                                "build_vllm_chute is not allowed, only build_sglang_chute is permitted",
+                            )
                     assignments[var_name] = node
 
-    if chute_assignment is None:
-        return False, "No 'chute' variable found calling build_sglang_chute or build_vllm_chute"
+    if chute_assignment is None and not chute_constructor_found:
+        return False, "No 'chute' variable found calling build_sglang_chute or Chute constructor"
 
     all_vars = set()
     loop_vars = set()
@@ -492,4 +495,7 @@ def check_affine_code(code: str) -> tuple[bool, str]:
             f"Found extra variables: {', '.join(sorted(extra_vars))}. Only 'chute' is allowed",
         )
 
-    return True, f"Valid chute file with {chute_assignment}"
+    if chute_assignment:
+        return True, f"Valid chute file with {chute_assignment}"
+    else:
+        return True, "Valid chute file with Chute constructor"

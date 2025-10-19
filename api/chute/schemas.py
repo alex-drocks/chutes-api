@@ -185,6 +185,7 @@ class ChuteArgs(BaseModel):
     max_instances: Optional[int] = Field(default=1, ge=1, le=100)
     scaling_threshold: Optional[float] = Field(default=0.75, ge=0.0, le=1.0)
     shutdown_after_seconds: Optional[int] = Field(default=300, ge=60, le=604800)
+    allow_external_egress: Optional[bool] = None
 
 
 class InvocationArgs(BaseModel):
@@ -223,6 +224,7 @@ class Chute(Base):
     max_instances = Column(Integer, nullable=True)
     scaling_threshold = Column(Float, nullable=True)
     shutdown_after_seconds = Column(Integer, nullable=True)
+    allow_external_egress = Column(Boolean, default=True)
 
     # Stats for sorting.
     invocation_count = Column(BigInteger, default=0)

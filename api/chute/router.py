@@ -859,6 +859,15 @@ async def _deploy_chute(
             detail=f"Chute with name={chute_args.name}, {version=} and public={chute_args.public} already exists",
         )
 
+    # Default for external egress.
+    allow_egress = True
+    if (
+        chute_args.allow_external_egress is None
+        and chute_args.standard_template in ("vllm", "embedding")
+        and semcomp(image.chutes_version, "0.3.45") >= 0
+    ):
+        allow_egress = False
+
     if not chute_args.node_selector:
         chute_args.node_selector = {"gpu_count": 1}
     if isinstance(chute_args.node_selector, dict):
@@ -1020,6 +1029,7 @@ async def _deploy_chute(
             if chute.public or chute.user_id == await chutes_user_id()
             else (chute_args.scaling_threshold or 0.75)
         )
+        chute.allow_external_egress = allow_egress
     else:
         try:
             is_public = (
@@ -1061,6 +1071,7 @@ async def _deploy_chute(
                 shutdown_after_seconds=None
                 if is_public or current_user.user_id == await chutes_user_id()
                 else (chute_args.shutdown_after_seconds or 300),
+                allow_external_egress=allow_egress,
             )
         except ValueError as exc:
             raise HTTPException(

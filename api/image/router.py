@@ -282,7 +282,13 @@ async def create_image(
         )
 
     # Force installation of chutes with the specified version.
-    dockerfile += f"\n\nRUN pip install chutes=={settings.chutes_version}"
+    dockerfile += "\n\n" + "\n".join(
+        [
+            f"RUN pip install chutes=={settings.chutes_version}",
+            "RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), \"chutes-netnanny.so\"))') /usr/local/lib/chutes-netnanny.so",
+            "ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so",
+        ]
+    )
 
     # Upload the build context to our S3-compatible storage backend.
     for obj, destination in (
