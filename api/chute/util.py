@@ -20,7 +20,7 @@ from fastapi import Request, status
 from loguru import logger
 from transformers import AutoTokenizer
 from typing import Optional
-from sqlalchemy import and_, or_, text, String, exists, func
+from sqlalchemy import and_, or_, text, exists, func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -83,60 +83,6 @@ TOKENIZER = AutoTokenizer.from_pretrained(
 
 REQUEST_SAMPLE_RATIO = 0.05
 LLM_PATHS = {"chat_stream", "completion_stream", "chat", "completion"}
-TRACK_INVOCATION = text(
-    """
-INSERT INTO invocations (
-    parent_invocation_id,
-    invocation_id,
-    chute_id,
-    chute_user_id,
-    function_name,
-    user_id,
-    image_id,
-    image_user_id,
-    instance_id,
-    miner_uid,
-    miner_hotkey,
-    started_at,
-    completed_at,
-    error_message,
-    compute_multiplier,
-    bounty
-) VALUES (
-    :parent_invocation_id,
-    :invocation_id,
-    :chute_id,
-    :chute_user_id,
-    :function_name,
-    :user_id,
-    :image_id,
-    :image_user_id,
-    :instance_id,
-    :miner_uid,
-    :miner_hotkey,
-    CURRENT_TIMESTAMP,
-    NULL,
-    NULL,
-    :compute_multiplier,
-    0
-) RETURNING to_char(date_trunc('week', started_at), 'IYYY_IW') AS suffix
-"""
-).columns(suffix=String)
-
-UPDATE_INVOCATION = """
-UPDATE partitioned_invocations_{suffix} SET
-    completed_at = CURRENT_TIMESTAMP,
-    bounty = :bounty,
-    metrics = :metrics
-WHERE invocation_id = :invocation_id
-RETURNING CEIL(EXTRACT(EPOCH FROM (completed_at - started_at))) * compute_multiplier AS total_compute_units
-"""
-UPDATE_INVOCATION_ERROR = """
-UPDATE partitioned_invocations_{suffix} SET
-    completed_at = CURRENT_TIMESTAMP,
-    error_message = CAST(:error_message AS TEXT)
-WHERE invocation_id = :invocation_id
-"""
 
 BASE_UNIFIED_INVOCATION_INSERT = """
 INSERT INTO {table_name} (
@@ -215,10 +161,10 @@ async def store_invocation(
     error_message: Optional[str] = None,
     bounty: Optional[int] = 0,
     metrics: Optional[dict] = {},
-    legacy: Optional[bool] = True,
+    legacy: Optional[bool] = False,
 ):
-    session_method = get_inv_session if legacy else get_session
-    insert_sql = UNIFIED_INVOCATION_INSERT if legacy else UNIFIED_INVOCATION_INSERT_LEGACY
+    session_method = get_session if legacy else get_inv_session
+    insert_sql = UNIFIED_INVOCATION_INSERT_LEGACY if legacy else UNIFIED_INVOCATION_INSERT
     async with session_method() as session:
         result = await session.execute(
             insert_sql,
@@ -979,7 +925,6 @@ async def invoke(
         }
     )
 
-    partition_suffix = None
     infra_overload = False
     avoid = []
     for attempt_idx in range(5):
@@ -1015,26 +960,6 @@ async def invoke(
             multiplier = NodeSelector(**chute.node_selector).compute_multiplier
             if chute.boost:
                 multiplier *= chute.boost
-            async with get_session() as session:
-                result = await session.execute(
-                    TRACK_INVOCATION,
-                    {
-                        "parent_invocation_id": parent_invocation_id,
-                        "invocation_id": invocation_id,
-                        "function_name": function,
-                        "chute_id": chute.chute_id,
-                        "chute_user_id": chute.user_id,
-                        "user_id": user_id,
-                        "image_id": chute.image_id,
-                        "image_user_id": chute.image.user_id,
-                        "instance_id": target.instance_id,
-                        "miner_uid": target.miner_uid,
-                        "miner_hotkey": target.miner_hotkey,
-                        "compute_multiplier": multiplier,
-                    },
-                )
-                partition_suffix = result.scalar()
-                await session.commit()
 
             try:
                 yield sse(
@@ -1096,174 +1021,177 @@ async def invoke(
                         error_message=None,
                         bounty=bounty,
                         metrics=metrics,
+                        legacy=False,
                     )
                 )
 
-                async with get_session() as session:
-                    # Mark the invocation as complete.
-                    result = await session.execute(
-                        text(UPDATE_INVOCATION.format(suffix=partition_suffix)),
-                        {
-                            "chute_id": chute_id,
-                            "bounty": bounty,
-                            "invocation_id": invocation_id,
-                            "metrics": json.dumps(metrics).decode(),
-                        },
-                    )
-                    try:
-                        await settings.redis_client.delete(
-                            f"consecutive_failures:{target.instance_id}"
+                # Track in the legacy DB.
+                store_result = await store_invocation(
+                    parent_invocation_id,
+                    invocation_id,
+                    chute.chute_id,
+                    chute.user_id,
+                    function,
+                    user_id,
+                    chute.image_id,
+                    chute.image.user_id,
+                    target.instance_id,
+                    target.miner_uid,
+                    target.miner_hotkey,
+                    duration,
+                    multiplier,
+                    error_message=None,
+                    bounty=bounty,
+                    metrics=metrics,
+                    legacy=True,
+                )
+
+                # Clear any consecutive failure flags.
+                try:
+                    await settings.redis_client.delete(f"consecutive_failures:{target.instance_id}")
+                except Exception as exc:
+                    logger.warning(f"Error clearing consecutive failures: {exc}")
+
+                # Update capacity tracking.
+                track_request_completed(chute.chute_id)
+
+                # Calculate the credits used and deduct from user's balance asynchronously.
+                # For LLMs and Diffusion chutes, we use custom per token/image step pricing,
+                # otherwise it's just based on time used.
+                compute_units = store_result.total_compute_units
+                balance_used = 0.0
+                override_applied = False
+                if compute_units and not request.state.free_invocation:
+                    hourly_price = await selector_hourly_price(chute.node_selector)
+
+                    # Per megatoken pricing.
+                    if chute.standard_template == "vllm" and metrics:
+                        per_million_in, per_million_out = await get_mtoken_price(
+                            user_id, chute.chute_id
                         )
-                    except Exception as exc:
-                        logger.warning(f"Error clearing consecutive failures: {exc}")
+                        balance_used = (metrics.get("it", 0) or 0) / 1000000.0 * per_million_in + (
+                            metrics.get("ot", 0) or 0
+                        ) / 1000000.0 * per_million_out
+                        override_applied = True
 
-                    track_request_completed(chute.chute_id)
-
-                    # Calculate the credits used and deduct from user's balance asynchronously.
-                    # For LLMs and Diffusion chutes, we use custom per token/image step pricing,
-                    # otherwise it's just based on time used.
-                    compute_units = result.scalar_one_or_none()
-                    balance_used = 0.0
-                    override_applied = False
-                    if compute_units and not request.state.free_invocation:
-                        hourly_price = await selector_hourly_price(chute.node_selector)
-
-                        # Per megatoken pricing.
-                        if chute.standard_template == "vllm" and metrics:
-                            per_million_in, per_million_out = await get_mtoken_price(
-                                user_id, chute.chute_id
-                            )
-                            balance_used = (
-                                metrics.get("it", 0) or 0
-                            ) / 1000000.0 * per_million_in + (
-                                metrics.get("ot", 0) or 0
-                            ) / 1000000.0 * per_million_out
+                    elif (
+                        price_override := await PriceOverride.get(user_id, chute.chute_id)
+                    ) is not None:
+                        if (
+                            chute.standard_template == "diffusion"
+                            and price_override.per_step is not None
+                        ):
+                            balance_used = (metrics.get("steps", 0) or 0) * price_override.per_step
                             override_applied = True
 
-                        elif (
-                            price_override := await PriceOverride.get(user_id, chute.chute_id)
-                        ) is not None:
-                            if (
-                                chute.standard_template == "diffusion"
-                                and price_override.per_step is not None
-                            ):
+                        # Per request pricing (fallback if specific pricing not available)
+                        elif price_override.per_request is not None:
+                            balance_used = price_override.per_request
+                            override_applied = True
+
+                    # If no override was applied, use standard pricing
+                    if not override_applied:
+                        # Track any discounts.
+                        discount = 0.0
+                        # A negative discount just makes the chute more than our typical pricing,
+                        # e.g. for chutes that have a concurrency of one and we can't really operate
+                        # efficiently with the normal pricing.
+                        if chute.discount and -3 < chute.discount <= 1:
+                            discount = chute.discount
+
+                        if discount < 1.0:
+                            # Diffusion per step pricing.
+                            if chute.standard_template == "diffusion":
                                 balance_used = (
-                                    metrics.get("steps", 0) or 0
-                                ) * price_override.per_step
-                                override_applied = True
-
-                            # Per request pricing (fallback if specific pricing not available)
-                            elif price_override.per_request is not None:
-                                balance_used = price_override.per_request
-                                override_applied = True
-
-                        # If no override was applied, use standard pricing
-                        if not override_applied:
-                            # Track any discounts.
-                            discount = 0.0
-                            # A negative discount just makes the chute more than our typical pricing,
-                            # e.g. for chutes that have a concurrency of one and we can't really operate
-                            # efficiently with the normal pricing.
-                            if chute.discount and -3 < chute.discount <= 1:
-                                discount = chute.discount
-
-                            if discount < 1.0:
-                                # Diffusion per step pricing.
-                                if chute.standard_template == "diffusion":
-                                    balance_used = (
-                                        (metrics.get("steps", 0) or 0)
-                                        * hourly_price
-                                        * DIFFUSION_PRICE_MULT_PER_STEP
-                                    )
-                                    balance_used -= balance_used * discount
-
-                                default_balance_used = (
-                                    compute_units * COMPUTE_UNIT_PRICE_BASIS / 3600.0
+                                    (metrics.get("steps", 0) or 0)
+                                    * hourly_price
+                                    * DIFFUSION_PRICE_MULT_PER_STEP
                                 )
-                                default_balance_used -= default_balance_used * discount
-                                if not balance_used:
-                                    logger.info(
-                                        f"BALANCE: defaulting to time-based pricing: {default_balance_used=} for {chute.name=}"
-                                    )
-                                    balance_used = default_balance_used
+                                balance_used -= balance_used * discount
 
-                    # Increment values in redis, which will be asynchronously processed to deduct from the actual balance.
-                    if balance_used and reroll and not override_applied:
-                        # Also apply fractional balance to reroll.
-                        balance_used = balance_used * settings.reroll_multiplier
+                            default_balance_used = compute_units * COMPUTE_UNIT_PRICE_BASIS / 3600.0
+                            default_balance_used -= default_balance_used * discount
+                            if not balance_used:
+                                logger.info(
+                                    f"BALANCE: defaulting to time-based pricing: {default_balance_used=} for {chute.name=}"
+                                )
+                                balance_used = default_balance_used
 
-                    # User discounts.
-                    if balance_used and not override_applied:
-                        user_discount = await InvocationDiscount.get(user_id, chute.chute_id)
-                        if user_discount:
-                            balance_used -= balance_used * user_discount
+                # Increment values in redis, which will be asynchronously processed to deduct from the actual balance.
+                if balance_used and reroll and not override_applied:
+                    # Also apply fractional balance to reroll.
+                    balance_used = balance_used * settings.reroll_multiplier
 
-                    # For private/user-created chutes, the costs of the chute are offset by
-                    # usage of the chute from users other than the chute owner, i.e.
-                    # when a private chute is shared with another user and that user makes
-                    # use of the chute, that user is charged per request and that balance is
-                    # added to the chute owner's account, reducing their overall cost.
-                    add_balance_to = None
-                    if (
-                        not chute.public
-                        and not has_legacy_private_billing(chute)
-                        and chute.user_id != await chutes_user_id()
-                    ):
-                        if user_id == chute.user_id:
-                            balance_used = 0
-                        else:
-                            add_balance_to = chute.user_id
-                            logger.info(
-                                f"Adding {balance_used} credits to {chute.user_id} due to invocation of {chute.name=} from {user_id=}"
-                            )
+                # User discounts.
+                if balance_used and not override_applied:
+                    user_discount = await InvocationDiscount.get(user_id, chute.chute_id)
+                    if user_discount:
+                        balance_used -= balance_used * user_discount
 
-                    # Ship the data over to usage tracker which actually deducts/aggregates balance/etc.
-                    try:
-                        pipeline = settings.redis_client.pipeline()
-                        key = f"balance:{user_id}:{chute.chute_id}"
-                        pipeline.hincrbyfloat(key, "amount", balance_used)
-                        pipeline.hincrby(key, "count", 1)
-                        if chute.standard_template == "vllm" and metrics:
-                            pipeline.hincrby(key, "input_tokens", metrics.get("it", 0))
-                            pipeline.hincrby(key, "output_tokens", metrics.get("ot", 0))
-                        pipeline.hset(key, "timestamp", int(time.time()))
-                        if balance_used and add_balance_to:
-                            transfer_key = f"balance:{chute.user_id}:{chute.chute_id}"
-                            pipeline.hincrbyfloat(transfer_key, "amount", 0 - balance_used)
-                        await pipeline.execute()
-                    except Exception as exc:
-                        logger.error(f"Error updating usage pipeline: {exc}")
-
-                    # Increment quota usage value.
-                    if (
-                        request.state.free_invocation
-                        and chute.discount < 1.0
-                        and (
-                            chute.public
-                            or has_legacy_private_billing(chute)
-                            or chute.user_id == await chutes_user_id()
+                # For private/user-created chutes, the costs of the chute are offset by
+                # usage of the chute from users other than the chute owner, i.e.
+                # when a private chute is shared with another user and that user makes
+                # use of the chute, that user is charged per request and that balance is
+                # added to the chute owner's account, reducing their overall cost.
+                add_balance_to = None
+                if (
+                    not chute.public
+                    and not has_legacy_private_billing(chute)
+                    and chute.user_id != await chutes_user_id()
+                ):
+                    if user_id == chute.user_id:
+                        balance_used = 0
+                    else:
+                        add_balance_to = chute.user_id
+                        logger.info(
+                            f"Adding {balance_used} credits to {chute.user_id} due to invocation of {chute.name=} from {user_id=}"
                         )
-                    ):
-                        try:
-                            value = 1.0 if not reroll else settings.reroll_multiplier
-                            if chute.name.endswith("-turbo"):
-                                value *= 2.0
-                            key = await InvocationQuota.quota_key(user.user_id, chute.chute_id)
-                            _ = await settings.quota_client.incrbyfloat(key, value)
-                        except Exception as exc:
-                            logger.error(
-                                f"Error updating quota usage for {user.user_id} chute {chute.chute_id}: {exc}"
-                            )
 
-                    # For private chutes, push back the instance termination timestamp.
-                    if (
-                        not chute.public
-                        and not has_legacy_private_billing(chute)
-                        and chute.user_id != await chutes_user_id()
-                    ):
-                        await update_shutdown_timestamp(target.instance_id)
+                # Ship the data over to usage tracker which actually deducts/aggregates balance/etc.
+                try:
+                    pipeline = settings.redis_client.pipeline()
+                    key = f"balance:{user_id}:{chute.chute_id}"
+                    pipeline.hincrbyfloat(key, "amount", balance_used)
+                    pipeline.hincrby(key, "count", 1)
+                    if chute.standard_template == "vllm" and metrics:
+                        pipeline.hincrby(key, "input_tokens", metrics.get("it", 0))
+                        pipeline.hincrby(key, "output_tokens", metrics.get("ot", 0))
+                    pipeline.hset(key, "timestamp", int(time.time()))
+                    if balance_used and add_balance_to:
+                        transfer_key = f"balance:{chute.user_id}:{chute.chute_id}"
+                        pipeline.hincrbyfloat(transfer_key, "amount", 0 - balance_used)
+                    await pipeline.execute()
+                except Exception as exc:
+                    logger.error(f"Error updating usage pipeline: {exc}")
 
-                    await session.commit()
+                # Increment quota usage value.
+                if (
+                    request.state.free_invocation
+                    and chute.discount < 1.0
+                    and (
+                        chute.public
+                        or has_legacy_private_billing(chute)
+                        or chute.user_id == await chutes_user_id()
+                    )
+                ):
+                    try:
+                        value = 1.0 if not reroll else settings.reroll_multiplier
+                        if chute.name.endswith("-turbo"):
+                            value *= 2.0
+                        key = await InvocationQuota.quota_key(user.user_id, chute.chute_id)
+                        _ = await settings.quota_client.incrbyfloat(key, value)
+                    except Exception as exc:
+                        logger.error(
+                            f"Error updating quota usage for {user.user_id} chute {chute.chute_id}: {exc}"
+                        )
+
+                # For private chutes, push back the instance termination timestamp.
+                if (
+                    not chute.public
+                    and not has_legacy_private_billing(chute)
+                    and chute.user_id != await chutes_user_id()
+                ):
+                    await update_shutdown_timestamp(target.instance_id)
 
                 yield sse(
                     {
@@ -1318,18 +1246,30 @@ async def invoke(
                         duration,
                         multiplier,
                         error_message=error_message,
+                        legacy=False,
                     )
                 )
 
-                async with get_session() as session:
-                    await session.execute(
-                        text(UPDATE_INVOCATION_ERROR.format(suffix=partition_suffix)),
-                        {
-                            "invocation_id": invocation_id,
-                            "error_message": error_message,
-                        },
-                    )
+                # Legacy invocations table storage.
+                store_result = await store_invocation(
+                    parent_invocation_id,
+                    invocation_id,
+                    chute.chute_id,
+                    chute.user_id,
+                    function,
+                    user_id,
+                    chute.image_id,
+                    chute.image.user_id,
+                    target.instance_id,
+                    target.miner_uid,
+                    target.miner_hotkey,
+                    duration,
+                    multiplier,
+                    error_message=error_message,
+                    legacy=True,
+                )
 
+                async with get_session() as session:
                     # Handle the case where encryption V2 is in use and the instance needs a new key exchange.
                     if error_message == "KEY_EXCHANGE_REQUIRED":
                         # NOTE: Could probably just re-validate rather than deleting the instance, but this ensures no shenanigans are afoot.
