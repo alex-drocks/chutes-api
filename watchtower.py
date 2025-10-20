@@ -534,7 +534,7 @@ async def check_llm_weights(chute, instances):
                 )
             else:
                 for inst in incorrect:
-                    hard_failed.append(incorrect)
+                    hard_failed.append(inst)
 
     # Now check the actual weights.
     if weight_map:
