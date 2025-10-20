@@ -9,6 +9,8 @@ import gzip
 import orjson as json
 import csv
 import uuid
+import time
+import random
 import decimal
 import traceback
 from loguru import logger
@@ -868,6 +870,8 @@ async def hostname_invocation(
     request: Request,
     current_user: User = Depends(get_current_user(raise_not_found=False)),
 ):
+    request.state.started_at = time.time()
+
     # /v1/models endpoint for llm.chutes.ai is handled differently.
     if (
         request.state.chute_id == "__megallm__"
@@ -917,6 +921,10 @@ async def hostname_invocation(
             payload["model"] = "NousResearch/Hermes-4-70B"
         elif model == "Proxima":
             payload["model"] = "NousResearch/Hermes-4-14B"
+
+        # Migration of temp/test version of DeepSeek-R1 to "normal" one.
+        if model == "deepseek-ai/DeepSeek-R1-sgtest" and random.random() <= 0.15:
+            payload["model"] = "deepseek-ai/DeepSeek-R1"
 
         # Header and/or model name options to enable thinking mode for various models.
         enable_thinking = False

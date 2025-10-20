@@ -19,6 +19,7 @@ from async_lru import alru_cache
 from fastapi import Request, status
 from loguru import logger
 from transformers import AutoTokenizer
+from typing import Optional
 from sqlalchemy import and_, or_, text, String, exists, func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.future import select
@@ -31,7 +32,7 @@ from api.constants import (
     LLM_PRICE_MULT_PER_MILLION_OUT,
     DIFFUSION_PRICE_MULT_PER_STEP,
 )
-from api.database import get_session
+from api.database import get_session, get_inv_session
 from api.fmv.fetcher import get_fetcher
 from api.exceptions import (
     InstanceRateLimit,
@@ -136,6 +137,107 @@ UPDATE partitioned_invocations_{suffix} SET
     error_message = CAST(:error_message AS TEXT)
 WHERE invocation_id = :invocation_id
 """
+
+UNIFIED_INVOCATION_INSERT = text(
+    """
+INSERT INTO invocations (
+    parent_invocation_id,
+    invocation_id,
+    chute_id,
+    chute_user_id,
+    function_name,
+    user_id,
+    image_id,
+    image_user_id,
+    instance_id,
+    miner_uid,
+    miner_hotkey,
+    started_at,
+    completed_at,
+    error_message,
+    compute_multiplier,
+    bounty,
+    metrics
+) VALUES (
+    :parent_invocation_id,
+    :invocation_id,
+    :chute_id,
+    :chute_user_id,
+    :function_name,
+    :user_id,
+    :image_id,
+    :image_user_id,
+    :instance_id,
+    :miner_uid,
+    :miner_hotkey,
+    CURRENT_TIMESTAMP - make_interval(secs => :duration),
+    CURRENT_TIMESTAMP,
+    :error_message,
+    :compute_multiplier,
+    :bounty,
+    :metrics
+) RETURNING
+    invocation_id,
+    started_at,
+    completed_at,
+    CEIL(EXTRACT(EPOCH FROM (completed_at - started_at))) * compute_multiplier AS total_compute_units,
+    EXTRACT(EPOCH FROM (completed_at - started_at)) AS actual_duration
+"""
+)
+
+
+async def store_invocation(
+    parent_invocation_id: str,
+    invocation_id: str,
+    chute_id: str,
+    chute_user_id: str,
+    function_name: str,
+    user_id: str,
+    image_id: str,
+    image_user_id: str,
+    instance_id: str,
+    miner_uid: int,
+    miner_hotkey: str,
+    duration: float,
+    compute_multiplier: float,
+    error_message: Optional[str] = None,
+    bounty: Optional[int] = 0,
+    metrics: Optional[dict] = {},
+    session_method=None,
+):
+    if not session_method:
+        session_method = get_inv_session
+    async with session_method() as session:
+        result = await session.execute(
+            UNIFIED_INVOCATION_INSERT,
+            {
+                "parent_invocation_id": parent_invocation_id,
+                "invocation_id": invocation_id,
+                "chute_id": chute_id,
+                "chute_user_id": chute_user_id,
+                "function_name": function_name,
+                "user_id": user_id,
+                "image_id": image_id,
+                "image_user_id": image_user_id,
+                "instance_id": instance_id,
+                "miner_uid": miner_uid,
+                "miner_hotkey": miner_hotkey,
+                "duration": duration,
+                "error_message": error_message,
+                "compute_multiplier": compute_multiplier,
+                "bounty": bounty,
+                "metrics": json.dumps(metrics).decode(),
+            },
+        )
+        row = result.first()
+        return row
+
+
+async def safe_store_invocation(*args, **kwargs):
+    try:
+        await store_invocation(*args, **kwargs)
+    except Exception:
+        logger.error("SAFE_STORE_INVOCATION: failed to insert new invocation record: {str(exc)}")
 
 
 async def get_miner_session(instance: Instance) -> aiohttp.ClientSession:
@@ -366,6 +468,7 @@ async def _invoke_one(
     args: str,
     kwargs: str,
     target: Instance,
+    started_at: float,
     metrics: dict = {},
     prefixes: list = None,
     manager: LeastConnManager = None,
@@ -405,7 +508,6 @@ async def _invoke_one(
         headers, payload_string = sign_request(miner_ss58=target.miner_hotkey, payload=payload)
         if iv:
             headers["X-Chutes-Serialized"] = "true"
-        started_at = time.time()
         response = await session.post(
             f"/{path}",
             data=payload_string,
@@ -897,10 +999,10 @@ async def invoke(
                 return
 
             invocation_id = str(uuid.uuid4())
+            multiplier = NodeSelector(**chute.node_selector).compute_multiplier
+            if chute.boost:
+                multiplier *= chute.boost
             async with get_session() as session:
-                multiplier = NodeSelector(**chute.node_selector).compute_multiplier
-                if chute.boost:
-                    multiplier *= chute.boost
                 result = await session.execute(
                     TRACK_INVOCATION,
                     {
@@ -935,7 +1037,16 @@ async def invoke(
                     }
                 )
                 async for data in _invoke_one(
-                    chute, path, stream, args, kwargs, target, metrics, prefixes, manager
+                    chute,
+                    path,
+                    stream,
+                    args,
+                    kwargs,
+                    target,
+                    request.state.started_at,
+                    metrics,
+                    prefixes,
+                    manager,
                 ):
                     try:
                         if "input_ids cannot be empty" in str(data):
@@ -946,11 +1057,36 @@ async def invoke(
                         ...
                     yield sse({"result": data})
 
+                # Check any bounty values.
+                bounty = await claim_bounty(chute_id)
+                if bounty is None:
+                    bounty = 0
+
+                # Store complete record in new invocations database, async.
+                duration = time.time() - request.state.started_at
+                asyncio.create_task(
+                    safe_store_invocation(
+                        parent_invocation_id,
+                        invocation_id,
+                        chute.chute_id,
+                        chute.user_id,
+                        function,
+                        user_id,
+                        chute.image_id,
+                        chute.image.user_id,
+                        target.instance_id,
+                        target.miner_uid,
+                        target.miner_hotkey,
+                        duration,
+                        multiplier,
+                        error_message=None,
+                        bounty=bounty,
+                        metrics=metrics,
+                    )
+                )
+
                 async with get_session() as session:
                     # Mark the invocation as complete.
-                    bounty = await claim_bounty(chute_id)
-                    if bounty is None:
-                        bounty = 0
                     result = await session.execute(
                         text(UPDATE_INVOCATION.format(suffix=partition_suffix)),
                         {
@@ -1149,6 +1285,27 @@ async def invoke(
                     error_message = "EMPTY_STREAM"
                 elif isinstance(exc, InvalidCLLMV):
                     error_message = "CLLMV_FAILURE"
+
+                # Store complete record in new invocations database, async.
+                duration = time.time() - request.state.started_at
+                asyncio.create_task(
+                    safe_store_invocation(
+                        parent_invocation_id,
+                        invocation_id,
+                        chute.chute_id,
+                        chute.user_id,
+                        function,
+                        user_id,
+                        chute.image_id,
+                        chute.image.user_id,
+                        target.instance_id,
+                        target.miner_uid,
+                        target.miner_hotkey,
+                        duration,
+                        multiplier,
+                        error_message=error_message,
+                    )
+                )
 
                 async with get_session() as session:
                     await session.execute(
