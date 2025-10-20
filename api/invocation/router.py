@@ -923,7 +923,7 @@ async def hostname_invocation(
             payload["model"] = "NousResearch/Hermes-4-14B"
 
         # Migration of temp/test version of DeepSeek-R1 to "normal" one.
-        if model == "deepseek-ai/DeepSeek-R1-sgtest" and random.random() <= 0.15:
+        if model == "deepseek-ai/DeepSeek-R1-sgtest" and random.random() <= 0.25:
             payload["model"] = "deepseek-ai/DeepSeek-R1"
 
         # Header and/or model name options to enable thinking mode for various models.
@@ -977,15 +977,15 @@ async def hostname_invocation(
             request.state.chute_id = chute.chute_id
             request.state.auth_object_id = chute.chute_id
 
-    # Model disabled temporarily?
-    if (
-        await settings.redis_client.get(f"model_disabled:{request.state.chute_id}")
-        and current_user.user_id != "dff3e6bb-3a6b-5a2b-9c48-da3abcd5ca5f"
-    ):
-        logger.warning(f"MODEL DISABLED: {request.state.chute_id}")
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="model is under maintenance",
-        )
+    # # Model disabled temporarily?
+    # if (
+    #     await settings.redis_client.get(f"model_disabled:{request.state.chute_id}")
+    #     and current_user.user_id != "dff3e6bb-3a6b-5a2b-9c48-da3abcd5ca5f"
+    # ):
+    #     logger.warning(f"MODEL DISABLED: {request.state.chute_id}")
+    #     raise HTTPException(
+    #         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+    #         detail="model is under maintenance",
+    #     )
 
     return await _invoke(request, current_user)

@@ -1042,10 +1042,9 @@ async def invoke(
                 )
 
                 # Clear any consecutive failure flags.
-                try:
-                    await settings.redis_client.delete(f"consecutive_failures:{target.instance_id}")
-                except Exception as exc:
-                    logger.warning(f"Error clearing consecutive failures: {exc}")
+                asyncio.create_task(
+                    settings.redis_client.delete(f"consecutive_failures:{target.instance_id}")
+                )
 
                 # Update capacity tracking.
                 track_request_completed(chute.chute_id)
