@@ -138,9 +138,8 @@ UPDATE partitioned_invocations_{suffix} SET
 WHERE invocation_id = :invocation_id
 """
 
-UNIFIED_INVOCATION_INSERT = text(
-    """
-INSERT INTO invocations (
+BASE_UNIFIED_INVOCATION_INSERT = """
+INSERT INTO {table_name} (
     parent_invocation_id,
     invocation_id,
     chute_id,
@@ -176,14 +175,20 @@ INSERT INTO invocations (
     :compute_multiplier,
     :bounty,
     :metrics
-) RETURNING
+)
+ON CONFLICT (invocation_id, started_at)
+    DO UPDATE SET invocation_id = EXCLUDED.invocation_id
+RETURNING
     invocation_id,
     started_at,
     completed_at,
     CEIL(EXTRACT(EPOCH FROM (completed_at - started_at))) * compute_multiplier AS total_compute_units,
     EXTRACT(EPOCH FROM (completed_at - started_at)) AS actual_duration
 """
+UNIFIED_INVOCATION_INSERT_LEGACY = text(
+    BASE_UNIFIED_INVOCATION_INSERT.format(table_name="partitioned_invocations")
 )
+UNIFIED_INVOCATION_INSERT = text(BASE_UNIFIED_INVOCATION_INSERT.format(table_name="invocations"))
 
 
 async def store_invocation(
@@ -203,13 +208,13 @@ async def store_invocation(
     error_message: Optional[str] = None,
     bounty: Optional[int] = 0,
     metrics: Optional[dict] = {},
-    session_method=None,
+    legacy: Optional[bool] = True,
 ):
-    if not session_method:
-        session_method = get_inv_session
+    session_method = get_inv_session if legacy else get_session
+    insert_sql = UNIFIED_INVOCATION_INSERT if legacy else UNIFIED_INVOCATION_INSERT_LEGACY
     async with session_method() as session:
         result = await session.execute(
-            UNIFIED_INVOCATION_INSERT,
+            insert_sql,
             {
                 "parent_invocation_id": parent_invocation_id,
                 "invocation_id": invocation_id,
@@ -236,8 +241,8 @@ async def store_invocation(
 async def safe_store_invocation(*args, **kwargs):
     try:
         await store_invocation(*args, **kwargs)
-    except Exception:
-        logger.error("SAFE_STORE_INVOCATION: failed to insert new invocation record: {str(exc)}")
+    except Exception as exc:
+        logger.error(f"SAFE_STORE_INVOCATION: failed to insert new invocation record: {str(exc)}")
 
 
 async def get_miner_session(instance: Instance) -> aiohttp.ClientSession:
@@ -999,6 +1004,7 @@ async def invoke(
                 return
 
             invocation_id = str(uuid.uuid4())
+            started_at = time.time()
             multiplier = NodeSelector(**chute.node_selector).compute_multiplier
             if chute.boost:
                 multiplier *= chute.boost
@@ -1063,7 +1069,8 @@ async def invoke(
                     bounty = 0
 
                 # Store complete record in new invocations database, async.
-                duration = time.time() - request.state.started_at
+                # XXX this is a different started_at from global request started_at, for compute units
+                duration = time.time() - started_at
                 asyncio.create_task(
                     safe_store_invocation(
                         parent_invocation_id,
@@ -1287,7 +1294,7 @@ async def invoke(
                     error_message = "CLLMV_FAILURE"
 
                 # Store complete record in new invocations database, async.
-                duration = time.time() - request.state.started_at
+                duration = time.time() - started_at
                 asyncio.create_task(
                     safe_store_invocation(
                         parent_invocation_id,

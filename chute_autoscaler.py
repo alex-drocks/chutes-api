@@ -51,6 +51,7 @@ FAILSAFE = {
     "83ce50c4-6d3f-55a6-88a6-c5db187f2c70": 15,
     "b5326e54-8d9e-590e-bed4-f3db35d9d4cd": 15,
     "07cb1b3a-ec4d-594a-96c2-b547fddcadb0": 15,
+    "4bbc44e9-6bfc-5e21-a91d-129bff2fb6d4": 12,
     "1aec6931-3bb8-5f5e-a61c-b112276ed140": 10,
 }
 
