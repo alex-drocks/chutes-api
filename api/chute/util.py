@@ -124,12 +124,7 @@ INSERT INTO {table_name} (
 )
 """
 UNIFIED_INVOCATION_RV = """
-RETURNING
-    invocation_id,
-    started_at,
-    completed_at,
-    CEIL(EXTRACT(EPOCH FROM (completed_at - started_at))) * compute_multiplier AS total_compute_units,
-    EXTRACT(EPOCH FROM (completed_at - started_at)) AS actual_duration
+RETURNING CEIL(EXTRACT(EPOCH FROM (completed_at - started_at))) * compute_multiplier AS total_compute_units
 """
 
 UNIFIED_INVOCATION_INSERT_LEGACY = text(
