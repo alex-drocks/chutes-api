@@ -176,8 +176,8 @@ INSERT INTO {table_name} (
     :bounty,
     :metrics
 )
-ON CONFLICT (invocation_id, started_at)
-    DO UPDATE SET invocation_id = EXCLUDED.invocation_id
+"""
+UNIFIED_INVOCATION_RV = """
 RETURNING
     invocation_id,
     started_at,
@@ -185,10 +185,17 @@ RETURNING
     CEIL(EXTRACT(EPOCH FROM (completed_at - started_at))) * compute_multiplier AS total_compute_units,
     EXTRACT(EPOCH FROM (completed_at - started_at)) AS actual_duration
 """
+
 UNIFIED_INVOCATION_INSERT_LEGACY = text(
-    BASE_UNIFIED_INVOCATION_INSERT.format(table_name="partitioned_invocations")
+    f"""{BASE_UNIFIED_INVOCATION_INSERT}
+{UNIFIED_INVOCATION_RV}""".format(table_name="partitioned_invocations")
 )
-UNIFIED_INVOCATION_INSERT = text(BASE_UNIFIED_INVOCATION_INSERT.format(table_name="invocations"))
+UNIFIED_INVOCATION_INSERT = text(
+    f"""{BASE_UNIFIED_INVOCATION_INSERT}
+ON CONFLICT (invocation_id, started_at)
+    DO UPDATE SET invocation_id = EXCLUDED.invocation_id
+{UNIFIED_INVOCATION_RV}""".format(table_name="invocations")
+)
 
 
 async def store_invocation(
