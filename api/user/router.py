@@ -796,13 +796,16 @@ async def register(
         allowed_ip = await memcache_get(f"regtoken:{token}".encode())
         if allowed_ip:
             allowed_ip = allowed_ip.decode()
-    if actual_ip != allowed_ip:
+    if not allowed_ip:
         logger.warning(f"RTOK: token not found: {token=}")
         await memcache_delete(f"regtoken:{token}".encode())
-        logger.warning(f"RTOK: Expected IP {allowed_ip=} but got {actual_ip=}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid registration token, or registration token does not match expected IP address",
+        )
+    elif allowed_ip != actual_ip:
+        logger.warning(
+            f"RTOK: Expected IP {allowed_ip=} but got {actual_ip=}, allowing but probably should not..."
         )
 
     # Prevent duplicate hotkeys.

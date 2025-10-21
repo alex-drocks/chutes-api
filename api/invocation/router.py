@@ -923,7 +923,7 @@ async def hostname_invocation(
             payload["model"] = "NousResearch/Hermes-4-14B"
 
         # Migration of temp/test version of DeepSeek-R1 to "normal" one.
-        if model == "deepseek-ai/DeepSeek-R1-sgtest" and random.random() <= 0.25:
+        if model == "deepseek-ai/DeepSeek-R1-sgtest" and random.random() <= 0.2:
             payload["model"] = "deepseek-ai/DeepSeek-R1"
 
         # Header and/or model name options to enable thinking mode for various models.

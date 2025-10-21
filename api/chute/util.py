@@ -1301,11 +1301,6 @@ async def invoke(
                             logger.warning(
                                 f"CONSECUTIVE FAILURES: {target.instance_id}: {consecutive_failures=}"
                             )
-
-                        if (
-                            consecutive_failures
-                            and consecutive_failures >= settings.consecutive_failure_limit
-                        ):
                             delete_result = await session.execute(
                                 text("DELETE FROM instances WHERE instance_id = :instance_id"),
                                 {"instance_id": target.instance_id},

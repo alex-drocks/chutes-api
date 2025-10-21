@@ -92,7 +92,7 @@ async def verify_device_info_challenge(devices, challenge, response):
     """
     Verify a device info challenge.
     """
-    url = f"{settings.opencl_graval_url}/verify_device_challenge"
+    url = f"{settings.graval_url}/verify_device_challenge"
     logger.info(f"Verifying device info challenge hash with {url=}")
     async with aiohttp.ClientSession(raise_for_status=True) as session:
         async with session.post(
@@ -115,7 +115,7 @@ async def get_encryption_settings(
     """
     Determine the chute to use for encryption with validator infra fallback/option.
     """
-    url = f"{settings.opencl_graval_url}/encrypt"
+    url = f"{settings.graval_url}/encrypt"
     headers = {}
     payload = {
         "device_info": node.graval_dict(),
@@ -167,7 +167,7 @@ async def verify_proof(
     """
     Verify a miner's proof.
     """
-    url = f"{settings.opencl_graval_url}/check_proof"
+    url = f"{settings.graval_url}/check_proof"
     payload = {
         "device_info": node.graval_dict(),
         "seed": int(seed),
