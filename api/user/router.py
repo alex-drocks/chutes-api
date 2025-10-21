@@ -1452,8 +1452,9 @@ async def update_squad_access(
     return {"squad_enabled": user.squad_enabled}
 
 
-@router.get("/me/usage")
+@router.get("/{user_id}/usage")
 async def list_usage(
+    user_id: str,
     page: Optional[int] = 0,
     limit: Optional[int] = 24,
     per_chute: Optional[bool] = False,
@@ -1466,7 +1467,18 @@ async def list_usage(
     """
     List usage summary data.
     """
-    base_query = select(UsageData).where(UsageData.user_id == current_user.user_id)
+    if user_id == "me":
+        user_id = current_user.user_id
+    else:
+        if user_id != current_user.user_id and not current_user.has_role(
+            Permissioning.billing_admin
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This action can only be performed by billing admin accounts.",
+            )
+
+    base_query = select(UsageData).where(UsageData.user_id == user_id)
     if chute_id:
         base_query = base_query.where(UsageData.chute_id == chute_id)
     if start_date:
@@ -1501,7 +1513,7 @@ async def list_usage(
             UsageData.bucket,
             func.sum(UsageData.amount).label("amount"),
             func.sum(UsageData.count).label("count"),
-        ).where(UsageData.user_id == current_user.user_id)
+        ).where(UsageData.user_id == user_id)
 
         if chute_id:
             query = query.where(UsageData.chute_id == chute_id)
@@ -1512,7 +1524,7 @@ async def list_usage(
 
         query = query.group_by(UsageData.bucket)
 
-        count_subquery = select(UsageData.bucket).where(UsageData.user_id == current_user.user_id)
+        count_subquery = select(UsageData.bucket).where(UsageData.user_id == user_id)
         if chute_id:
             count_subquery = count_subquery.where(UsageData.chute_id == chute_id)
         if start_date:
