@@ -970,6 +970,16 @@ async def _deploy_chute(
                 detail='Must use image="chutes/sglang:nightly-2025101900" (or later dated versions) for affine deployments.',
             )
 
+    # Require min chutes version for turbovision.
+    if "turbovision" in chute_args.name.lower() and semcomp(image.chutes_version, "0.3.47") < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Unable to deploy turbovision chutes with chutes version < 0.3.47, please upgrade "
+                f"(or ask chutes team to upgrade) {image.name=} {image.image_id=} currently {image.chutes_version=}"
+            ),
+        )
+
     old_version = None
     if chute:
         # Create a rolling update object so we can gracefully restart/recreate.
