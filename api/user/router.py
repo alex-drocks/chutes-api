@@ -24,7 +24,13 @@ from api.user.schemas import (
     InvocationQuota,
     InvocationDiscount,
 )
-from api.util import memcache_get, memcache_set, memcache_delete, is_cloudflare_ip
+from api.util import (
+    memcache_get,
+    memcache_set,
+    memcache_delete,
+    is_cloudflare_ip,
+    has_minimum_balance_for_registration,
+)
 from api.user.response import RegistrationResponse, SelfResponse
 from api.user.service import get_current_user, bt_user_exists
 from api.user.events import generate_uid as generate_user_uid
@@ -39,6 +45,7 @@ from api.constants import (
     NONCE_HEADER,
     SIGNATURE_HEADER,
     AUTHORIZATION_HEADER,
+    MIN_REG_BALANCE,
 )
 from api.permissions import Permissioning
 from api.config import settings
@@ -817,6 +824,13 @@ async def register(
 
     # Validate the username
     await _validate_username(db, user_args.username)
+
+    # Check min balance.
+    if not await has_minimum_balance_for_registration(user_args.coldkey, hotkey):
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"You must have at least {MIN_REG_BALANCE} tao on your coldkey to register an account.",
+        )
 
     # Create.
     user, fingerprint = User.create(

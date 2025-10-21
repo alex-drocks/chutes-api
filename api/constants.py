@@ -9,6 +9,9 @@ MINER_HEADER = "X-Chutes-Miner"
 VALIDATOR_HEADER = "X-Chutes-Validator"
 ENCRYPTED_HEADER = "X-Chutes-Encrypted"
 
+# Min balance to register via the CLI (tao units)
+MIN_REG_BALANCE = 0.25
+
 # Price multiplier to convert compute unit pricing to per-million token pricing.
 # This is a bit tricky, since we allow different node selectors potentially for
 # any particular model, e.g. you could run a llama 8b on 1 node or 8, so the price

@@ -26,7 +26,7 @@ from api.config import settings
 from async_lru import alru_cache
 from urllib.parse import urlparse
 from sqlalchemy.future import select
-from api.constants import VLM_MAX_SIZE
+from api.constants import VLM_MAX_SIZE, MIN_REG_BALANCE
 from api.metasync import MetagraphNode
 from api.permissions import Permissioning
 from fastapi import status, HTTPException
@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives import padding, hashes
 from ipaddress import ip_address, IPv4Address, IPv6Address
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from scalecodec.utils.ss58 import is_valid_ss58_address, ss58_decode
+from async_substrate_interface.async_substrate import AsyncSubstrateInterface
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 ALLOWED_HOST_RE = re.compile(r"(?!-)[a-z\d-]{1,63}(?<!-)$")
@@ -803,3 +804,37 @@ async def validate_tool_call_arguments(body: dict) -> None:
                                 status_code=status.HTTP_400_BAD_REQUEST,
                                 detail="Invalid tool_calls.function.arguments value, expected JSON",
                             )
+
+
+async def has_minimum_balance_for_registration(
+    coldkey: str, hotkey: str = None, minimum: float = MIN_REG_BALANCE
+) -> bool:
+    substrate = None
+    try:
+        substrate = AsyncSubstrateInterface(url=settings.subtensor)
+        await substrate.initialize()
+        chain_head = await substrate.get_chain_head()
+        block = await substrate.get_block_number(chain_head)
+        block_hash = await substrate.get_block_hash(block)
+        result = await substrate.query(
+            module="System",
+            storage_function="Account",
+            params=[coldkey],
+            block_hash=block_hash,
+        )
+        rao = result["data"]["free"]
+        tao = rao / (10**9)
+        if tao < minimum:
+            logger.warning(f"MINREGBALANCE: {coldkey=} only has {tao=}, less than {minimum=}")
+            return False
+        logger.success(f"MINREGBALANCE: {coldkey=} has {tao=}, above {minimum=}")
+        return True
+    except Exception as exc:
+        logger.error(f"MINREGBALANCE: failed to check minimum registration balance: {str(exc)}")
+        return True
+    finally:
+        if substrate:
+            try:
+                await substrate.close()
+            except Exception:
+                ...
