@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Header, status, Request
 from fastapi.responses import HTMLResponse
 from api.database import get_db_session
+from api.chute.schemas import ChuteShare
 from api.user.schemas import (
     UserRequest,
     User,
@@ -110,6 +111,28 @@ async def get_user_growth(
     ]
     await memcache_set(cache_key, json.dumps(response), exptime=600)
     return response
+
+
+@router.get("/{user_id}/shares")
+async def list_chute_shares(
+    user_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user()),
+):
+    if user_id == "me":
+        user_id = current_user.user_id
+    if user_id != current_user.user_id and not current_user.has_role(Permissioning.billing_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action can only be performed by billing admin accounts.",
+        )
+    shares = (
+        (await db.execute(select(ChuteShare).where(ChuteShare.shared_by == user_id)))
+        .unique()
+        .scalars()
+        .all()
+    )
+    return shares
 
 
 @router.get("/user_id_lookup")
