@@ -38,6 +38,7 @@ class SelfResponse(UserResponse):
     payment_address: str
     permissions_bitmask: int
     balance: Optional[float]
+    netuids: Optional[list[int]]
 
     @computed_field
     @property

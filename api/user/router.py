@@ -39,6 +39,7 @@ from api.user.tokens import create_token
 from api.payment.schemas import AdminBalanceChange
 from api.logo.schemas import Logo
 from sqlalchemy import func, or_, and_
+from sqlalchemy.orm import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.constants import (
     HOTKEY_HEADER,
@@ -287,10 +288,11 @@ async def grant_subnet_role(
     # Enable the role (and netuid on the user if necessary).
     role = Permissioning.subnet_invoke if not args.admin else Permissioning.subnet_admin
     Permissioning.enable(user, role)
-    if not user.netuids:
-        user.netuids = []
-    if args.netuid not in user.netuids:
-        user.netuids.append(args.netuid)
+    netuids = user.netuids or []
+    if args.netuid not in netuids:
+        netuids.append(args.netuid)
+    user.netuids = netuids
+    flag_modified(user, "netuids")
     await db.commit()
     return {
         "status": f"Successfully enabled {role.description=} {role.bitmask=} for {user.user_id=} {user.username=} on {args.netuid=}"
