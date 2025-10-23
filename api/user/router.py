@@ -503,25 +503,6 @@ async def admin_enable_invoicing(
     return ur
 
 
-@router.get("/me", response_model=SelfResponse)
-async def me(
-    db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user(purpose="me")),
-):
-    """
-    Get a detailed response for the current user.
-    """
-    # Re-load with balance...
-    user = (
-        (await db.execute(select(User).where(User.user_id == current_user.user_id)))
-        .unique()
-        .scalar_one_or_none()
-    )
-    ur = SelfResponse.from_orm(user)
-    ur.balance = user.current_balance.effective_balance if user.current_balance else 0.0
-    return ur
-
-
 @router.get("/me/quotas")
 async def my_quotas(
     db: AsyncSession = Depends(get_db_session),
@@ -1596,3 +1577,37 @@ async def list_usage(
         "items": results,
     }
     return response
+
+
+@router.get("/{user_id}", response_model=SelfResponse)
+async def get_user_info(
+    user_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user(purpose="me")),
+):
+    """
+    Get user info.
+    """
+    if user_id == "me":
+        user_id = current_user.user_id
+    user = (
+        (
+            await db.execute(
+                select(User).where(or_(User.user_id == user_id, User.username == user_id))
+            )
+        )
+        .unique()
+        .scalar_one_or_none()
+    )
+    if not user or (
+        user.user_id != current_user.user_id
+        and not current_user.has_role(Permissioning.billing_admin)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action can only be performed by billing admin accounts.",
+        )
+
+    ur = SelfResponse.from_orm(user)
+    ur.balance = user.current_balance.effective_balance if user.current_balance else 0.0
+    return ur
