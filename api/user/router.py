@@ -39,8 +39,8 @@ from api.user.tokens import create_token
 from api.payment.schemas import AdminBalanceChange
 from api.logo.schemas import Logo
 from sqlalchemy import func, or_, and_
-from sqlalchemy.orm import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 from api.constants import (
     HOTKEY_HEADER,
     COLDKEY_HEADER,
