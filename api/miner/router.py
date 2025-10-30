@@ -56,6 +56,11 @@ def model_to_dict(obj):
         data["username"] = obj.user.username
     if isinstance(data.get("seed"), Decimal):
         data["seed"] = int(data["seed"])
+    data.pop("symmetric_key", None)
+    data.pop("host", None)
+    data.pop("inspecto", None)
+    data.pop("port_mappings", None)
+    data.pop("port", None)
     return data
 
 

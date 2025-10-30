@@ -620,7 +620,7 @@ async def get_chute_code(
             )
         )
         or "/affine" in chute.name.lower()
-        or subnet_role_accessible(chute, current_user, admin=True)
+        or (current_user and subnet_role_accessible(chute, current_user, admin=True))
     ):
         authorized = True
     if not authorized:

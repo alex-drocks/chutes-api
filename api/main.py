@@ -9,7 +9,6 @@ import fickling
 import hashlib
 from urllib.parse import quote
 from contextlib import asynccontextmanager
-from loguru import logger
 from fastapi import FastAPI, Request, APIRouter, HTTPException, status, Response
 from fastapi.responses import ORJSONResponse
 from fastapi_cache import FastAPICache
@@ -80,37 +79,37 @@ async def lifespan(_: FastAPI):
         yield
         return
 
-    # Run the migrations.
-    process = await asyncio.create_subprocess_exec(
-        "dbmate",
-        "--url",
-        db_url,
-        "--migrations-dir",
-        "api/migrations",
-        "migrate",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    ## Run the migrations.
+    # process = await asyncio.create_subprocess_exec(
+    #    "dbmate",
+    #    "--url",
+    #    db_url,
+    #    "--migrations-dir",
+    #    "api/migrations",
+    #    "migrate",
+    #    stdout=asyncio.subprocess.PIPE,
+    #    stderr=asyncio.subprocess.PIPE,
+    # )
 
-    async def log_migrations(stream, name):
-        log_method = logger.info if name == "stdout" else logger.warning
-        while True:
-            line = await stream.readline()
-            if line:
-                decoded_line = line.decode().strip()
-                log_method(decoded_line)
-            else:
-                break
+    # async def log_migrations(stream, name):
+    #    log_method = logger.info if name == "stdout" else logger.warning
+    #    while True:
+    #        line = await stream.readline()
+    #        if line:
+    #            decoded_line = line.decode().strip()
+    #            log_method(decoded_line)
+    #        else:
+    #            break
 
-    await asyncio.gather(
-        log_migrations(process.stdout, "stdout"),
-        log_migrations(process.stderr, "stderr"),
-        process.wait(),
-    )
-    if process.returncode == 0:
-        logger.success("successfull applied all DB migrations")
-    else:
-        logger.error(f"failed to run db migrations returncode={process.returncode}")
+    # await asyncio.gather(
+    #    log_migrations(process.stdout, "stdout"),
+    #    log_migrations(process.stderr, "stderr"),
+    #    process.wait(),
+    # )
+    # if process.returncode == 0:
+    #    logger.success("successfull applied all DB migrations")
+    # else:
+    #    logger.error(f"failed to run db migrations returncode={process.returncode}")
 
     # Start a background task to keep the prom gauges updated.
     from api.metrics.util import keep_gauges_fresh

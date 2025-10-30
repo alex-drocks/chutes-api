@@ -57,6 +57,7 @@ class LaunchConfigArgs(BaseModel):
     env: str
     code: str
     fsv: Optional[str] = None
+    protecto: Optional[str] = None
 
 
 class Instance(Base):
