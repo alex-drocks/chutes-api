@@ -44,10 +44,10 @@ LLM_MIN_PRICE_OUT = 0.01
 DIFFUSION_PRICE_MULT_PER_STEP = 0.005
 
 # Minimum utilization of a chute before additional instances can be added.
-UTILIZATION_SCALE_UP = 0.3
+UTILIZATION_SCALE_UP = 0.6
 
 # Cap on number of instances for an underutilized chute.
-UNDERUTILIZED_CAP = 5
+UNDERUTILIZED_CAP = 2
 
 # Percentage of requests being rate limited to allow scaling up.
 RATE_LIMIT_SCALE_UP = 0.02
