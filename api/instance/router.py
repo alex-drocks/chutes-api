@@ -15,7 +15,7 @@ from loguru import logger
 from typing import Optional
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
-from sqlalchemy import select, text, func, update
+from sqlalchemy import select, text, func, update, and_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -150,19 +150,6 @@ async def _check_scalable(db, chute, hotkey):
         raise HTTPException(
             status_code=status.HTTP_423_LOCKED,
             detail=f"Chute {chute_id} has reached its target capacity of {target_count} instances.",
-        )
-
-    # Prevent monopolizing capped chutes.
-    remaining_slots = target_count - active_count
-    if remaining_slots <= 2 and hotkey_count == active_count:
-        logger.warning(
-            f"SCALELOCK: chute {chute_id=} {chute.name} - miner {hotkey} already has {hotkey_count} instances, "
-            f"only {remaining_slots} slots remaining"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_423_LOCKED,
-            detail=f"Chute {chute_id} is near capacity with only {remaining_slots} slots remaining. "
-            f"You already have {hotkey_count} instance(s).",
         )
 
 
@@ -444,10 +431,32 @@ async def claim_launch_config(
     # IP matches?
     x_forwarded_for = request.headers.get("X-Forwarded-For")
     actual_ip = x_forwarded_for.split(",")[0] if x_forwarded_for else request.client.host
-    if launch_config.job_id and actual_ip != args.host:
+    if actual_ip != args.host:
+        logger.warning(
+            f"Instance with {launch_config.config_id=} {launch_config.miner_hotkey=} EGRESS INGRESS mismatch!: {actual_ip=} {args.host=}"
+        )
+        if launch_config.job_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Egress and ingress IPs much match for jobs: {actual_ip} vs {args.host}",
+            )
+
+    # Uniqueness of host/miner_hotkey.
+    result = await db.scalar(
+        select(Instance).where(
+            and_(
+                Instance.host == launch_config.host,
+                Instance.miner_hotkey != launch_config.miner_hotkey,
+            )
+        )
+    )
+    if result:
+        logger.warning(
+            f"{launch_config.config_id=} {launch_config.miner_hotkey=} attempted to use host already used by another miner!"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Egress and ingress IPs much match for jobs: {actual_ip} vs {args.host}",
+            detail=f"Host {launch_config.host} is already assigned to at least one other miner_hotkey.",
         )
 
     # Verify, decrypt, parse the envdump payload.

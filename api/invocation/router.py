@@ -318,8 +318,48 @@ async def _invoke(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No matching chute found!"
         )
+
+    quota_date = date.today()
     if chute.discount == 1.0:
         request.state.free_invocation = True
+
+        # Limit free model usage independently of quota.
+        if current_user.permissions_bitmask == 0:
+            effective_balance = (
+                current_user.current_balance.effective_balance
+                if current_user.current_balance
+                else 0.0
+            )
+            unlimited = False
+            if effective_balance >= 10:
+                unlimited = True
+            else:
+                quota = await InvocationQuota.get(current_user.user_id, "__anychute__")
+                if quota > 2000:
+                    unlimited = True
+            if not unlimited:
+                free_usage = 0
+                try:
+                    qkey = f"free_usage:{quota_date}:{current_user.user_id}"
+                    free_usage = await settings.quota_client.incr(qkey)
+                    if free_usage == 1:
+                        tomorrow = datetime.combine(quota_date, datetime.min.time()) + timedelta(
+                            days=1
+                        )
+                        exp = max(int((tomorrow - datetime.now()).total_seconds()), 1)
+                        await settings.quota_client.expire(qkey, exp)
+                except Exception as exc:
+                    logger.warning(
+                        f"Error checking free usage for {current_user.user_id=}: {str(exc)}"
+                    )
+                if free_usage > 100:
+                    logger.warning(
+                        f"{current_user.user_id=} {current_user.username=} has hit daily free limit: {chute.name=} {effective_balance=}"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail="Free models limit reached for today - maintain >= $10 balance or upgrade subscription to pro to unlock more.",
+                    )
 
     # Check account balance.
     origin_ip = request.headers.get("x-forwarded-for", "").split(",")[0]
@@ -924,6 +964,12 @@ async def hostname_invocation(
         # Migration of temp/test version of DeepSeek-R1 to "normal" one.
         if model == "deepseek-ai/DeepSeek-R1-sgtest":
             payload["model"] = "deepseek-ai/DeepSeek-R1"
+
+        # Turbo consolidation.
+        if model in ("zai-org/GLM-4.6-turbo", "zai-org/GLM-4.6-FP8"):
+            payload["model"] = "zai-org/GLM-4.6"
+        if model in ("zai-org/GLM-4.5-turbo", "zai-org/GLM-4.5-FP8"):
+            payload["model"] = "zai-org/GLM-4.5"
 
         # Header and/or model name options to enable thinking mode for various models.
         enable_thinking = False
