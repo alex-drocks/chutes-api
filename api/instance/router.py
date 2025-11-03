@@ -5,11 +5,13 @@ Routes for instances.
 import os
 import uuid
 import base64
+import ctypes
 import traceback
 import random
 import socket
 import secrets
 import asyncio
+import orjson as json  # noqa
 import api.miner_client as miner_client
 from loguru import logger
 from typing import Optional
@@ -32,6 +34,7 @@ from api.payment.util import decrypt_secret
 from api.node.util import get_node_by_id
 from api.chute.schemas import Chute, NodeSelector
 from api.secret.schemas import Secret
+from api.image.schemas import Image  # noqa
 from api.instance.schemas import (
     Instance,
     instance_nodes,
@@ -58,15 +61,23 @@ from api.util import (
     notify_deleted,
     notify_verified,
     notify_activated,
+    load_shared_object,
     has_legacy_private_billing,
 )
 from api.bounty.util import check_bounty_exists, delete_bounty
 from starlette.responses import StreamingResponse
 from api.graval_worker import graval_encrypt, verify_proof, generate_fs_hash
 from watchtower import is_kubernetes_env, verify_expected_command
-from log_prober import check_instance_logging_server
 
 router = APIRouter()
+
+INSPECTO = load_shared_object("chutes", "chutes-inspecto.so")
+INSPECTO.verify_hash.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+INSPECTO.verify_hash.restype = ctypes.c_char_p
+
+NETNANNY = load_shared_object("chutes", "chutes-netnanny.so")
+NETNANNY.verify.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
+NETNANNY.verify.restype = ctypes.c_int
 
 
 async def _load_chute(db, chute_id: str):
@@ -194,10 +205,7 @@ async def _check_scalable_private(db, chute, miner):
     public_result = (
         (await db.execute(public_chute_query, {"miner_hotkey": miner.hotkey})).mappings().first()
     )
-    if (
-        public_result["public_instance_count"] < 4
-        or public_result["public_instance_gpu_count"] < 32
-    ):
+    if public_result["public_instance_count"] < 1 or public_result["public_instance_gpu_count"] < 8:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Miner {miner.hotkey} insufficient public chutes/GPUs to deploy private chutes.",
@@ -509,9 +517,112 @@ async def claim_launch_config(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=launch_config.verification_error,
             )
-
     else:
         logger.warning("Unable to perform extended validation, skipping...")
+
+    if semcomp(chute.chutes_version, "0.3.50") >= 0:
+        if not args.run_path or (
+            chute.standard_template == "vllm"
+            and os.path.dirname(args.run_path)
+            != "/usr/local/lib/python3.12/dist-packages/chutes/entrypoint"
+        ):
+            logger.error(f"{log_prefix} has tampered with paths!")
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "Env tampering detected!"
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=launch_config.verification_error,
+            )
+
+        # NetNanny (match egress config and hash).
+        nn_valid = True
+        if chute.allow_external_egress != args.egress or not args.netnanny_hash:
+            nn_valid = False
+        else:
+            if not NETNANNY.verify(
+                launch_config.config_id.encode(),
+                args.netnanny_hash.encode(),
+                1,
+            ):
+                logger.error(
+                    f"{log_prefix} netnanny hash mismatch for {launch_config.config_id=} and {chute.allow_external_egress=}"
+                )
+                nn_valid = False
+            else:
+                logger.success(
+                    f"{log_prefix} netnanny hash challenge success: for {launch_config.config_id=} and {chute.allow_external_egress=} {args.netnanny_hash=}"
+                )
+        if not nn_valid:
+            logger.error(
+                f"{log_prefix} has tampered with netnanny? {args.netnanny_hash=} {args.egress=} {chute.allow_external_egress=}"
+            )
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "Failed netnanny validation."
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=launch_config.verification_error,
+            )
+
+        # Inspecto
+        if not args.inspecto:
+            logger.error(f"{log_prefix} no inspecto hash provided")
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "Failed inspecto environment/lib verification."
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=launch_config.verification_error,
+            )
+
+        enforce_inspecto = "PS_OP" in os.environ
+        inspecto_valid = True
+        fail_reason = None
+        if enforce_inspecto:
+            inspecto_hash = (
+                (await db.execute(select(Image.inspecto).where(Image.image_id == chute.image_id)))
+                .unique()
+                .scalar_one_or_none()
+            )
+            if not inspecto_hash:
+                logger.info(f"INSPECTO: image_id={chute.image_id} has no inspecto hash; allowing.")
+                inspecto_valid = True
+            else:
+                if not args.inspecto:
+                    inspecto_valid = False
+                    fail_reason = "missing args.inspecto hash!"
+                else:
+                    raw = INSPECTO.verify_hash(
+                        inspecto_hash.encode("utf-8"),
+                        launch_config.config_id.encode("utf-8"),
+                        args.inspecto.encode("utf-8"),
+                    )
+                    logger.info(
+                        f"INSPECTO: verify_hash({inspecto_hash=}, {launch_config.config_id=}, {args.inspecto=}) -> {raw=}",
+                    )
+                    if not raw:
+                        inspecto_valid = False
+                        fail_reason = "inspecto returned NULL"
+                    else:
+                        try:
+                            payload = json.loads(raw.decode("utf-8"))
+                        except Exception as e:
+                            inspecto_valid = False
+                            fail_reason = f"inspecto returned non-JSON: {e}"
+                        else:
+                            if not payload.get("verified"):
+                                inspecto_valid = False
+                                fail_reason = f"inspecto verification failed: {payload}"
+        if not inspecto_valid:
+            logger.error(f"{log_prefix} has invalid inspecto verification: {fail_reason}")
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "Failed inspecto environment/lib verification."
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=launch_config.verification_error,
+            )
 
     # Valid filesystem/integrity?
     if semcomp(chute.chutes_version, "0.3.1") >= 0:
@@ -594,6 +705,8 @@ async def claim_launch_config(
         compute_multiplier=node_selector.compute_multiplier,
         billed_to=None,
         hourly_rate=(await node_selector.current_estimated_price())["usd"]["hour"],
+        inspecto=args.inspecto,
+        env_creation=args.model_dump(),
     )
     if launch_config.job_id or (
         not chute.public
@@ -602,19 +715,6 @@ async def claim_launch_config(
     ):
         instance.compute_multiplier *= PRIVATE_INSTANCE_MULTIPLIER
         instance.billed_to = chute.user_id
-
-    # Verify the logging server is running.
-    if not await check_instance_logging_server(instance):
-        logger.error(
-            f"Instance failed logging server probe: {instance.instance_id=} {instance.miner_hotkey=}"
-        )
-        # raise HTTPException(
-        #     status_code=status.HTTP_403_FORBIDDEN,
-        #     detail=(
-        #         "Failed logging server scan! Be sure to expose ALL services for all chutes, "
-        #         "particularly port 8000 (standard chute port) and 8001 (logging port)"
-        #     ),
-        # )
 
     db.add(instance)
 
@@ -798,6 +898,29 @@ async def activate_launch_config_instance(
 
     # Activate the instance (and trigger tentative billing stop time).
     if not instance.active:
+        # Verify egress.
+        net_success = True
+        if semcomp(chute.chutes_version, "0.3.50") >= 0:
+            from conn_prober import check_instance_connectivity
+
+            _, net_success = await check_instance_connectivity(instance, delete_on_failure=False)
+        if not net_success:
+            reason = "Instance has failed network connectivity probes, based on allow_external_egress flag"
+            logger.warning(reason)
+            # XXX TODO
+            # await db.delete(instance)
+            # await asyncio.create_task(notify_deleted(instance))
+            # await db.execute(
+            #    text(
+            #        "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
+            #    ),
+            #    {"instance_id": instance.instance_id, "reason": reason},
+            # )
+            # raise HTTPException(
+            #    status_code=status.HTTP_403_FORBIDDEN,
+            #    detail=reason,
+            # )
+
         instance.active = True
         instance.activated_at = func.now()
         if launch_config.job_id or (

@@ -182,9 +182,12 @@ async def build_and_push_image(image, build_dir):
         logger.info(f"Stage 2: Building filesystem verification image as {verification_tag}")
         fsv_dockerfile_content = f"""FROM {original_tag}
 ARG CFSV_OP
+ARG PS_OP
 COPY cfsv /cfsv
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv collect / /tmp/chutesfs.index /tmp/chutesfs.data
+RUN rm -rf does_not_exist.py does_not_exist
+RUN PS_OP="${{PS_OP}}" chutes run does_not_exist:chute --generate-inspecto-hash > /tmp/inspecto.hash
 RUN ls -la /tmp/chutesfs.*
 """
         fsv_dockerfile_path = os.path.join(build_dir, "Dockerfile.fsv")
@@ -198,6 +201,8 @@ RUN ls -la /tmp/chutesfs.*
             "chroot",
             "--build-arg",
             f"CFSV_OP={os.getenv('CFSV_OP', str(uuid.uuid4()))}",
+            "--build-arg",
+            f"PS_OP={os.getenv('PS_OP', str(uuid.uuid4()))}",
             "--storage-driver",
             storage_driver,
             "--layers",
@@ -226,9 +231,10 @@ RUN ls -la /tmp/chutesfs.*
             raise BuildFailure("Build of filesystem verification image failed!")
 
         # Extract the data file from the verification image
-        data_file_path = await extract_cfsv_data_from_verification_image(
+        data_file_path, inspecto_hash = await extract_cfsv_data_from_verification_image(
             verification_tag, build_dir
         )
+        image.inspecto = inspecto_hash
         await upload_filesystem_verification_data(image, data_file_path)
 
         # Stage 3: Build final image that combines original + index file
@@ -598,12 +604,16 @@ async def extract_cfsv_data_from_verification_image(verification_tag: str, build
                 logger.warning(f"Files in /tmp: {files}")
             raise Exception(f"Data file not found at {source_path}")
 
+        # Load inspecto hash.
+        with open(os.path.join(mount_path, "tmp", "inspecto.hash")) as infile:
+            inspecto_hash = infile.readlines()[-1].strip()
+            assert inspecto_hash
+
         # Use shutil to copy the file
         shutil.copy2(source_path, data_file_path)
-        shutil.copy2(os.path.join(mount_path, "tmp", "chutesfs.index"), "/tmp/NEW.index")
         logger.info(f"Successfully copied data file from {source_path} to {data_file_path}")
 
-        return data_file_path
+        return data_file_path, inspecto_hash
     finally:
         # Unmount if we mounted
         if mount_path and container_id:
@@ -663,6 +673,7 @@ async def forge(image_id: str):
     # Download the build context
     short_tag = None
     error_message = None
+    inspecto_hash = None
     with tempfile.TemporaryDirectory() as build_dir:
         context_path = os.path.join(build_dir, "chute.zip")
         dockerfile_path = os.path.join(build_dir, "Dockerfile")
@@ -681,6 +692,7 @@ async def forge(image_id: str):
             os.chdir(build_dir)
             safe_extract(context_path)
             short_tag = await build_and_push_image(image, build_dir)
+            inspecto_hash = image.inspecto
         except Exception as exc:
             logger.error(f"Error building {image_id=}: {exc}\n{traceback.format_exc()}")
             error_message = str(exc)
@@ -704,6 +716,7 @@ async def forge(image_id: str):
         if short_tag:
             image.status = "built and pushed"
             image.short_tag = short_tag
+            image.inspecto = inspecto_hash
             image.build_completed_at = func.now()
         else:
             image.status = f"error: {error_message}"
@@ -797,6 +810,7 @@ async def update_chutes_lib(image_id: str, chutes_version: str, force: bool = Fa
 USER root
 RUN rm -f /etc/chutesfs.index
 USER chutes
+ENV LD_PRELOAD=""
 RUN pip install chutes=={chutes_version}
 RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-netnanny.so"))') /usr/local/lib/chutes-netnanny.so
 ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so
@@ -849,9 +863,12 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so
 
             fsv_dockerfile_content = f"""FROM {updated_tag}
 ARG CFSV_OP
+ARG PS_OP
 COPY cfsv /cfsv
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv collect / /tmp/chutesfs.index /tmp/chutesfs.data
+RUN rm -rf does_not_exist.py does_not_exist
+RUN PS_OP="${{PS_OP}}" chutes run does_not_exist:chute --generate-inspecto-hash > /tmp/inspecto.hash
 RUN ls -la /tmp/chutesfs.*
 """
             fsv_dockerfile_path = os.path.join(build_dir, "Dockerfile.fsv")
@@ -865,6 +882,8 @@ RUN ls -la /tmp/chutesfs.*
                 "chroot",
                 "--build-arg",
                 f"CFSV_OP={os.getenv('CFSV_OP', str(uuid.uuid4()))}",
+                "--build-arg",
+                f"PS_OP={os.getenv('PS_OP', str(uuid.uuid4()))}",
                 "--storage-driver",
                 storage_driver,
                 "--layers",
@@ -900,7 +919,7 @@ RUN ls -la /tmp/chutesfs.*
                 raise BuildFailure("Failed to build filesystem verification image!")
 
             # Extract and upload data file
-            data_file_path = await extract_cfsv_data_from_verification_image(
+            data_file_path, inspecto_hash = await extract_cfsv_data_from_verification_image(
                 verification_tag, build_dir
             )
             s3_key = f"image_hash_blobs/{image_id}/{patch_version}.data"
@@ -1016,6 +1035,7 @@ COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
                 image.patch_version = patch_version
                 image.chutes_version = chutes_version
                 image.short_tag = target_tag
+                image.inspecto = inspecto_hash
                 await session.commit()
                 await session.refresh(image)
                 logger.success(

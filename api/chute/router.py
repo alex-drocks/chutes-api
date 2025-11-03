@@ -860,12 +860,16 @@ async def _deploy_chute(
         )
 
     # Default for external egress.
-    allow_egress = True
+    allow_egress = chute_args.allow_external_egress
     if (
-        chute_args.allow_external_egress is None
+        allow_egress is None
         and chute_args.standard_template in ("vllm", "embedding")
         and semcomp(image.chutes_version, "0.3.45") >= 0
     ):
+        allow_egress = False
+    elif allow_egress is None:
+        allow_egress = False
+    if "affine" in chute_args.name.lower() or "turbovision" in chute_args.name.lower():
         allow_egress = False
 
     if not chute_args.node_selector:
@@ -963,20 +967,20 @@ async def _deploy_chute(
     # Only allow newer SGLang versions for affine.
     if "/affine" in chute_args.name.lower():
         if (
-            not image_supports_cllmv(image, min_version=2025102603)
+            not image_supports_cllmv(image, min_version=2025110304)
             or image.user_id != await chutes_user_id()
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Must use image="chutes/sglang:2025102603" (or more recent dated versions) for affine deployments.',
+                detail='Must use image="chutes/sglang:2025110304" (or more recent dated versions) for affine deployments.',
             )
 
     # Require min chutes version for turbovision.
-    if "turbovision" in chute_args.name.lower() and semcomp(image.chutes_version, "0.3.47") < 0:
+    if "turbovision" in chute_args.name.lower() and semcomp(image.chutes_version, "0.3.50") < 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Unable to deploy turbovision chutes with chutes version < 0.3.47, please upgrade "
+                "Unable to deploy turbovision chutes with chutes version < 0.3.50, please upgrade "
                 f"(or ask chutes team to upgrade) {image.name=} {image.image_id=} currently {image.chutes_version=}"
             ),
         )
