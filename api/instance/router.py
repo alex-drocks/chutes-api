@@ -900,7 +900,7 @@ async def activate_launch_config_instance(
     if not instance.active:
         # Verify egress.
         net_success = True
-        if semcomp(chute.chutes_version, "0.3.50") >= 0:
+        if semcomp(chute.chutes_version, "0.3.56") >= 0:
             from conn_prober import check_instance_connectivity
 
             _, net_success = await check_instance_connectivity(instance, delete_on_failure=False)

@@ -605,9 +605,7 @@ async def _invoke(
         prompt_dump = None
         if "messages" in body_target:
             try:
-                prompt_dump = "::".join(
-                    [f"{m['role']}: {m['content']}" for m in body_target["messages"]]
-                )
+                prompt_dump = "::".join([json.dumps(m).decode() for m in body_target["messages"]])
             except Exception as exc:
                 logger.warning(f"Error generating prompt key for dupe tracking: {exc}")
         elif "prompt" in body_target and isinstance(body_target, str):

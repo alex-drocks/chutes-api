@@ -955,35 +955,25 @@ async def _deploy_chute(
         )
 
     # Prevent deploying images with old chutes SDK versions.
-    if not image.chutes_version or semcomp(image.chutes_version, "0.3.31") < 0:
+    if not image.chutes_version or semcomp(image.chutes_version, "0.3.56") < 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Unable to deploy chutes with legacy images (chutes SDK < 0.3.31.rc1), please upgrade "
-                f"(or ask chutes team to upgrade) {image.name=} {image.image_id=} currently {image.chutes_version}"
+                "Unable to deploy chutes with chutes version < 0.3.56, please upgrade "
+                f"(or ask chutes team to upgrade) {image.name=} {image.image_id=} currently {image.chutes_version=}"
             ),
         )
 
     # Only allow newer SGLang versions for affine.
     if "/affine" in chute_args.name.lower():
         if (
-            not image_supports_cllmv(image, min_version=2025110304)
+            not image_supports_cllmv(image, min_version=2025110402)
             or image.user_id != await chutes_user_id()
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Must use image="chutes/sglang:2025110304" (or more recent dated versions) for affine deployments.',
+                detail='Must use image="chutes/sglang:2025110402" (or more recent dated versions) for affine deployments.',
             )
-
-    # Require min chutes version for turbovision.
-    if "turbovision" in chute_args.name.lower() and semcomp(image.chutes_version, "0.3.50") < 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Unable to deploy turbovision chutes with chutes version < 0.3.50, please upgrade "
-                f"(or ask chutes team to upgrade) {image.name=} {image.image_id=} currently {image.chutes_version=}"
-            ),
-        )
 
     old_version = None
     if chute:

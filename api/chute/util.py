@@ -537,10 +537,6 @@ async def _invoke_one(
                             f"BAD_RESPONSE {target.instance_id=} {chute.name} returned invalid chunk (model name)"
                         )
 
-                    # Error in response?
-                    if isinstance(data, dict) and data.get("error"):
-                        logger.warning(f"Chunk included an error response: {data['error']=}")
-
                     # CLLMV check.
                     if (
                         (random.random() <= 0.05 or chunk_idx <= 5)
