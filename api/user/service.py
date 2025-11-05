@@ -46,8 +46,10 @@ def get_current_user(
         Helper to authenticate requests.
         """
 
+        if (hotkey or signature or nonce) and (not hotkey or not signature or not nonce):
+            hotkey, signature, nonce = None, None, None
         use_hotkey_auth = registered_to is not None or (hotkey and signature)
-        if registered_to is not None:
+        if registered_to is not None and raise_not_found:
             if not hotkey or not signature or not nonce:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,

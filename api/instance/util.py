@@ -479,6 +479,7 @@ def create_launch_jwt(launch_config, disk_gb: int = None) -> str:
     payload = {
         "exp": int(expires_at.timestamp()),
         "sub": launch_config.config_id,
+        "chute_id": launch_config.chute_id,
         "iat": int(now.timestamp()),
         "url": f"https://api.{settings.base_domain}/instances/launch_config/{launch_config.config_id}",
         "env_key": launch_config.env_key,
