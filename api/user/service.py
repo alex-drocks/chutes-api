@@ -46,7 +46,14 @@ def get_current_user(
         Helper to authenticate requests.
         """
 
-        use_hotkey_auth = hotkey and signature
+        use_hotkey_auth = registered_to is not None or (hotkey and signature)
+        if registered_to is not None:
+            if not hotkey or not signature or not nonce:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid BT Auth.",
+                )
+
         # If not using hotkey auth, then just use the API key
         if not use_hotkey_auth:
             # API key validation.

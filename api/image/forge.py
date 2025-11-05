@@ -809,6 +809,9 @@ async def update_chutes_lib(image_id: str, chutes_version: str, force: bool = Fa
             dockerfile_content = f"""FROM {full_source_tag}
 USER root
 RUN rm -f /etc/chutesfs.index
+RUN usermod -aG root chutes || true
+RUN chmod g+rwx /usr/local/lib /usr/local/bin /usr/local/share /usr/local/share/man
+RUN chmod g+rwx /usr/local/lib/python3.12/dist-packages || true
 USER chutes
 ENV LD_PRELOAD=""
 RUN pip install chutes=={chutes_version}

@@ -1,15 +1,17 @@
 import uuid
 import orjson as json
 import asyncio
+import aiohttp
 import random
 import traceback
 import ctypes
 from typing import Any, Dict, List, Tuple
 from loguru import logger
-from sqlalchemy import select, text
+from sqlalchemy import select, text, exists
 import api.database.orms  # noqa
 import api.miner_client as miner_client
 from api.config import settings
+from api.chute.schemas import RollingUpdate
 from api.database import get_session
 from api.instance.schemas import Instance
 from api.instance.util import invalidate_instance_cache
@@ -50,22 +52,16 @@ async def _post_netnanny_challenge(instance: Instance, challenge: str) -> Dict[s
         instance.miner_hotkey,
         url,
         payload,
-        timeout=10.0,
+        timeout=15.0,
     ) as resp:
         resp.raise_for_status()
         return await resp.json()
 
 
-def _has_enetunreach(err: str | None) -> bool:
-    if not err:
-        return False
-    return ENETUNREACH_TOKEN in err.upper()
-
-
 def _pick_random_connect_test() -> str:
     candidates = list(getattr(settings, "conntest_urls", []) or [])
     if not candidates:
-        candidates = ["https://ifconfig.co", "https://www.google.com/"]
+        candidates = ["https://icanhazip.com", "https://www.google.com/"]
     return random.choice(candidates)
 
 
@@ -74,6 +70,9 @@ async def _hard_delete_instance(session, instance: Instance, reason: str) -> Non
         f"🛑 HARD FAIL (egress policy violation): deleting {instance.instance_id=} "
         f"{instance.miner_hotkey=} {instance.chute_id=}. Reason: {reason}"
     )
+    # XXX
+    return
+
     await session.delete(instance)
     await session.execute(
         text(
@@ -197,16 +196,9 @@ async def check_instance_connectivity(
             for target in disallowed:
                 res = await _post_connectivity(instance, target)
                 conn = bool(res.get("connection_established"))
-                err = res.get("error")
                 if conn:
                     bad_violation_reason = (
                         f"Egress disabled but connection_established is True for {target}"
-                    )
-                    break
-                if not _has_enetunreach(err):
-                    bad_violation_reason = (
-                        f"Egress disabled and connection failed for {target}, "
-                        f"but error is not ENETUNREACH (error={err})"
                     )
                     break
             if bad_violation_reason:
@@ -235,6 +227,19 @@ async def check_instance_connectivity(
 
 
 async def check_connectivity_all(max_concurrent: int = 32) -> None:
+    # Make sure we can do the tests...
+    smoke_tests = [
+        PROXY_URL,
+        LBPING_URL,
+        "https://icanhazip.com",
+        "https://www.google.com",
+    ]
+    for url in smoke_tests:
+        async with aiohttp.ClientSession(raise_for_status=True) as session:
+            async with session.get(url) as resp:
+                assert resp.ok
+                logger.success(f"Successfully pinged {url=} in smoke test.")
+
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def guarded(instance: Instance):
@@ -242,7 +247,14 @@ async def check_connectivity_all(max_concurrent: int = 32) -> None:
             return await check_instance_connectivity(instance)
 
     async with get_session() as session:
-        q = select(Instance).where(Instance.active.is_(True))
+        q = select(Instance).where(
+            Instance.active.is_(True),
+            ~exists(
+                select(1)
+                .select_from(RollingUpdate)
+                .where(RollingUpdate.chute_id == Instance.chute_id)
+            ),
+        )
         stream = await session.stream(q)
         instances: List[Instance] = []
         async for row in stream.unique():

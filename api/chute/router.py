@@ -955,7 +955,9 @@ async def _deploy_chute(
         )
 
     # Prevent deploying images with old chutes SDK versions.
-    if not image.chutes_version or semcomp(image.chutes_version, "0.3.56") < 0:
+    if current_user.user_id != await chutes_user_id() and (
+        not image.chutes_version or semcomp(image.chutes_version, "0.3.56") < 0
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
