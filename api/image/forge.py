@@ -91,7 +91,7 @@ async def build_and_push_image(image, build_dir):
     """
     Perform the actual image build via buildah.
     """
-    base_tag = f"{image.user.username}/{image.name}:{image.tag}"
+    base_tag = f"{image.user.username}/{image.name}:{image.tag}".lower()
     if image.patch_version and image.patch_version != "initial":
         short_tag = f"{base_tag}-{image.patch_version}"
     else:

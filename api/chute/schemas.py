@@ -224,7 +224,7 @@ class Chute(Base):
     max_instances = Column(Integer, nullable=True)
     scaling_threshold = Column(Float, nullable=True)
     shutdown_after_seconds = Column(Integer, nullable=True)
-    allow_external_egress = Column(Boolean, default=True)
+    allow_external_egress = Column(Boolean, default=False)
 
     # Stats for sorting.
     invocation_count = Column(BigInteger, default=0)

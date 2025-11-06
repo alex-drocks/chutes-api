@@ -11,7 +11,7 @@ from sqlalchemy import select, text, exists
 import api.database.orms  # noqa
 import api.miner_client as miner_client
 from api.config import settings
-from api.chute.schemas import RollingUpdate
+from api.chute.schemas import RollingUpdate, Chute
 from api.database import get_session
 from api.instance.schemas import Instance
 from api.instance.util import invalidate_instance_cache
@@ -66,12 +66,25 @@ def _pick_random_connect_test() -> str:
 
 
 async def _hard_delete_instance(session, instance: Instance, reason: str) -> None:
+    chute = (
+        (await session.execute(select(Chute).where(Chute.chute_id == instance.chute_id)))
+        .unique()
+        .scalar_one_or_none()
+    )
+    if "too many requests" in reason.lower():
+        if semcomp(instance.chutes_version or "0.0.0", "0.3.58") < 0:
+            logger.warning("Ignoring 429 from older chutes version...")
+            return
+        else:
+            logger.error(
+                f"Hmmm, why 429?: {instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=} {chute.name=} {chute.chute_id=}"
+            )
     logger.error(
         f"🛑 HARD FAIL (egress policy violation): deleting {instance.instance_id=} "
-        f"{instance.miner_hotkey=} {instance.chute_id=}. Reason: {reason}"
+        f"{instance.miner_hotkey=} {instance.chute_id=} {chute.name=} {chute.chute_id=}. Reason: {reason}"
     )
-    # XXX
-    return
+    if "turbovision" not in chute.name.lower():
+        return
 
     await session.delete(instance)
     await session.execute(
@@ -143,7 +156,9 @@ async def check_instance_connectivity(
         await _verify_netnanny(instance, allow_egress)
         logger.success(f"🔒 netnanny challenge verified for {instance.instance_id=}")
     except Exception as exc:
-        logger.error(f"❌ netnanny verification failed for {instance.instance_id=}: {exc}")
+        logger.error(
+            f"❌ netnanny verification failed for {instance.instance_id=}: {str(exc)}\n{traceback.format_exc()}"
+        )
         if delete_on_failure:
             async with get_session() as session:
                 # Treat as hard violation: miner is misreporting or hash invalid.

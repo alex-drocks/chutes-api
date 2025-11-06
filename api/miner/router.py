@@ -208,7 +208,6 @@ async def get_full_inventory(
 @router.get("/metrics/")
 async def metrics(
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
-    _: User = Depends(get_current_user(purpose="miner", registered_to=settings.netuid)),
 ):
     async def _stream():
         async for metric in gather_metrics():
