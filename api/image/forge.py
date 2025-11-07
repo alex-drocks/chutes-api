@@ -816,7 +816,8 @@ USER chutes
 ENV LD_PRELOAD=""
 RUN pip install chutes=={chutes_version}
 RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-netnanny.so"))') /usr/local/lib/chutes-netnanny.so
-ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so
+RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-logintercept.so"))') /usr/local/lib/chutes-logintercept.so
+ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-logintercept.so
 """
             dockerfile_path = os.path.join(build_dir, "Dockerfile.update")
             with open(dockerfile_path, "w") as f:
