@@ -45,6 +45,7 @@ from api.exceptions import (
 from api.util import (
     sse,
     now_str,
+    semcomp,
     aes_encrypt,
     aes_decrypt,
     use_encryption_v2,
@@ -195,13 +196,13 @@ async def safe_store_invocation(*args, **kwargs):
         logger.error(f"SAFE_STORE_INVOCATION: failed to insert new invocation record: {str(exc)}")
 
 
-async def get_miner_session(instance: Instance) -> aiohttp.ClientSession:
+async def get_miner_session(instance: Instance, timeout: int = 600) -> aiohttp.ClientSession:
     """
     Get or create an aiohttp session for an instance.
     """
     return aiohttp.ClientSession(
         base_url=f"http://{instance.host}:{instance.port}",
-        timeout=aiohttp.ClientTimeout(connect=5.0, total=600.0),
+        timeout=aiohttp.ClientTimeout(connect=5.0, total=timeout),
         read_bufsize=8 * 1024 * 1024,
     )
 
@@ -458,8 +459,9 @@ async def _invoke_one(
         path = encrypted_path
 
     session, response = None, None
+    timeout = 600 if semcomp(target.chutes_version or "0.0.0", "0.3.59") < 0 else 900
     try:
-        session = await get_miner_session(target)
+        session = await get_miner_session(target, timeout=timeout)
         headers, payload_string = sign_request(miner_ss58=target.miner_hotkey, payload=payload)
         if iv:
             headers["X-Chutes-Serialized"] = "true"
@@ -1403,7 +1405,7 @@ async def load_llm_details(chute, target):
         iv = bytes.fromhex(payload[:32])
 
     async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(connect=5.0, total=600.0),
+        timeout=aiohttp.ClientTimeout(connect=5.0, total=60.0),
         read_bufsize=8 * 1024 * 1024,
         raise_for_status=True,
     ) as session:
