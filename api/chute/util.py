@@ -162,29 +162,30 @@ async def store_invocation(
     session_method = get_session if legacy else get_inv_session
     insert_sql = UNIFIED_INVOCATION_INSERT_LEGACY if legacy else UNIFIED_INVOCATION_INSERT
     async with session_method() as session:
-        result = await session.execute(
-            insert_sql,
-            {
-                "parent_invocation_id": parent_invocation_id,
-                "invocation_id": invocation_id,
-                "chute_id": chute_id,
-                "chute_user_id": chute_user_id,
-                "function_name": function_name,
-                "user_id": user_id,
-                "image_id": image_id,
-                "image_user_id": image_user_id,
-                "instance_id": instance_id,
-                "miner_uid": miner_uid,
-                "miner_hotkey": miner_hotkey,
-                "duration": duration,
-                "error_message": error_message,
-                "compute_multiplier": compute_multiplier,
-                "bounty": bounty,
-                "metrics": json.dumps(metrics).decode(),
-            },
-        )
-        row = result.first()
-        return row
+        async with session.begin():
+            result = await session.execute(
+                insert_sql,
+                {
+                    "parent_invocation_id": parent_invocation_id,
+                    "invocation_id": invocation_id,
+                    "chute_id": chute_id,
+                    "chute_user_id": chute_user_id,
+                    "function_name": function_name,
+                    "user_id": user_id,
+                    "image_id": image_id,
+                    "image_user_id": image_user_id,
+                    "instance_id": instance_id,
+                    "miner_uid": miner_uid,
+                    "miner_hotkey": miner_hotkey,
+                    "duration": duration,
+                    "error_message": error_message,
+                    "compute_multiplier": compute_multiplier,
+                    "bounty": bounty,
+                    "metrics": json.dumps(metrics).decode(),
+                },
+            )
+            row = result.first()
+            return row
 
 
 async def safe_store_invocation(*args, **kwargs):
@@ -1038,25 +1039,32 @@ async def invoke(
                 )
 
                 # Track in the legacy DB.
-                store_result = await store_invocation(
-                    parent_invocation_id,
-                    invocation_id,
-                    chute.chute_id,
-                    chute.user_id,
-                    function,
-                    user_id,
-                    chute.image_id,
-                    chute.image.user_id,
-                    target.instance_id,
-                    target.miner_uid,
-                    target.miner_hotkey,
-                    duration,
-                    multiplier,
-                    error_message=None,
-                    bounty=bounty,
-                    metrics=metrics,
-                    legacy=True,
-                )
+                compute_units = 0.0
+                try:
+                    store_result = await asyncio.shield(
+                        store_invocation(
+                            parent_invocation_id,
+                            invocation_id,
+                            chute.chute_id,
+                            chute.user_id,
+                            function,
+                            user_id,
+                            chute.image_id,
+                            chute.image.user_id,
+                            target.instance_id,
+                            target.miner_uid,
+                            target.miner_hotkey,
+                            duration,
+                            multiplier,
+                            error_message=None,
+                            bounty=bounty,
+                            metrics=metrics,
+                            legacy=True,
+                        )
+                    )
+                    compute_units = store_result.total_compute_units if store_result else 0
+                except asyncio.CancelledError:
+                    logger.warning("Request task cancelled after legacy store; continuing cleanup.")
 
                 # Clear any consecutive failure flags.
                 asyncio.create_task(
@@ -1069,7 +1077,6 @@ async def invoke(
                 # Calculate the credits used and deduct from user's balance asynchronously.
                 # For LLMs and Diffusion chutes, we use custom per token/image step pricing,
                 # otherwise it's just based on time used.
-                compute_units = store_result.total_compute_units
                 balance_used = 0.0
                 override_applied = False
                 if compute_units and not request.state.free_invocation:
