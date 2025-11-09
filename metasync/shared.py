@@ -246,7 +246,7 @@ async def get_scoring_data(interval: str = SCORING_INTERVAL):
             f"{bounty_c:<10.6f} "
         )
 
-    return raw_values, final_scores
+    return {"raw_values": raw_values, "final_scores": final_scores}
 
 
 if __name__ == "__main__":
