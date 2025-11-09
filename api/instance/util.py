@@ -473,6 +473,50 @@ async def get_instance_by_chute_and_id(db, instance_id, chute_id, hotkey):
     return result.unique().scalar_one_or_none()
 
 
+def _get_es256_verify_key():
+    if getattr(settings, "launch_config_public_key_bytes", None):
+        return settings.launch_config_public_key_bytes
+    if getattr(settings, "launch_config_private_key", None):
+        try:
+            return settings.launch_config_private_key.public_key()
+        except Exception:
+            pass
+    if getattr(settings, "launch_config_private_key_bytes", None):
+        return settings.launch_config_private_key_bytes
+    raise RuntimeError("No ES256 verification key configured")
+
+
+def _decode_chutes_jwt(token: str, *, require_exp: bool) -> dict:
+    """
+    Decode either the legacy or new asymmetric JWT.
+    """
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception:
+        raise jwt.InvalidTokenError("Malformed JWT header")
+    alg = header.get("alg")
+    if alg not in ("HS256", "ES256"):
+        raise jwt.InvalidTokenError("Unsupported JWT alg")
+    if alg == "HS256":
+        key = settings.launch_config_key
+    else:  # ES256
+        key = _get_es256_verify_key()
+    options = {
+        "verify_signature": True,
+        "verify_exp": require_exp,
+        "verify_iat": True,
+        "verify_iss": True,
+        "require": ["iat", "iss"] + (["exp"] if require_exp else []),
+    }
+    return jwt.decode(
+        token,
+        key,
+        algorithms=[alg],
+        issuer="chutes",
+        options=options,
+    )
+
+
 def create_launch_jwt_v2(launch_config, disk_gb: int = None, egress: bool = False) -> str:
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=2)
@@ -549,19 +593,7 @@ async def load_launch_config_from_jwt(
 ) -> str:
     detail = "Missing or invalid launch config JWT"
     try:
-        payload = jwt.decode(
-            token,
-            settings.launch_config_key,
-            options={
-                "verify_signature": True,
-                "verify_exp": True,
-                "verify_iat": True,
-                "verify_iss": True,
-                "require": ["exp", "iat", "iss"],
-            },
-            issuer="chutes",
-            algorithms=["HS256"],
-        )
+        payload = _decode_chutes_jwt(token, require_exp=True)
         if config_id == payload["sub"]:
             config = (
                 (await db.execute(select(LaunchConfig).where(LaunchConfig.config_id == config_id)))
@@ -598,19 +630,7 @@ async def load_job_from_jwt(db, job_id: str, token: str, filename: str = None) -
     """
     detail = "Missing or invalid JWT"
     try:
-        payload = jwt.decode(
-            token,
-            settings.launch_config_key,
-            options={
-                "verify_signature": True,
-                "verify_exp": False,
-                "verify_iat": True,
-                "verify_iss": True,
-                "require": ["iat", "iss"],
-            },
-            issuer="chutes",
-            algorithms=["HS256"],
-        )
+        payload = _decode_chutes_jwt(token, require_exp=False)
         assert job_id == payload["sub"], "Job ID in JWT does not match!"
         if filename:
             assert filename == payload["filename"], "Filename mismatch!"

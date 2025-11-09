@@ -55,7 +55,7 @@ class LaunchConfigArgs(BaseModel):
     host: str
     port_mappings: list[PortMap]
     env: str
-    code: str
+    code: Optional[str] = None
     fsv: Optional[str] = None
     inspecto: Optional[str] = None
     egress: Optional[bool] = None

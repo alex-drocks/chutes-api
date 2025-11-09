@@ -177,6 +177,7 @@ async def build_and_push_image(image, build_dir):
         fsv_dockerfile_content = f"""FROM {original_tag}
 ARG CFSV_OP
 ARG PS_OP
+ENV LD_PRELOAD=""
 COPY cfsv /cfsv
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv collect / /tmp/chutesfs.index /tmp/chutesfs.data
@@ -861,6 +862,7 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-loginterc
             fsv_dockerfile_content = f"""FROM {updated_tag}
 ARG CFSV_OP
 ARG PS_OP
+ENV LD_PRELOAD=""
 COPY cfsv /cfsv
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv collect / /tmp/chutesfs.index /tmp/chutesfs.data
@@ -1122,7 +1124,7 @@ async def main():
                 (
                     await session.execute(
                         select(Image.image_id)
-                        .where(Image.status == "pending")
+                        .where(Image.status == "pending build")
                         .order_by(Image.created_at.asc())
                         .limit(1)
                     )
