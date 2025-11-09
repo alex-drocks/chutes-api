@@ -198,17 +198,14 @@ RUN ls -la /tmp/chutesfs.*
             f"CFSV_OP={os.getenv('CFSV_OP', str(uuid.uuid4()))}",
             "--build-arg",
             f"PS_OP={os.getenv('PS_OP', str(uuid.uuid4()))}",
-            "--storage-driver",
-            storage_driver,
-            "--layers",
+            "--layers=false",
+            "--storage-opt",
+            "overlay.mountopt=metacopy=on",
             "--tag",
             verification_tag,
             "-f",
             fsv_dockerfile_path,
         ]
-        if storage_driver == "overlay" and storage_opts:
-            for opt in storage_opts.split(","):
-                build_cmd.extend(["--storage-opt", opt.strip()])
         if settings.registry_insecure:
             build_cmd.extend(["--tls-verify=false"])
         build_cmd.append(build_dir)
@@ -226,6 +223,7 @@ RUN ls -la /tmp/chutesfs.*
             raise BuildFailure("Build of filesystem verification image failed!")
 
         # Extract the data file from the verification image
+
         data_file_path, inspecto_hash = await extract_cfsv_data_from_verification_image(
             verification_tag, build_dir
         )
@@ -248,9 +246,9 @@ COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
             "build",
             "--isolation",
             "chroot",
-            "--storage-driver",
-            storage_driver,
-            "--layers",
+            "--layers=false",
+            "--storage-opt",
+            "overlay.mountopt=metacopy=on",
             "--tag",
             full_image_tag,
             "--tag",
@@ -258,9 +256,6 @@ COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
             "-f",
             final_dockerfile_path,
         ]
-        if storage_driver == "overlay" and storage_opts:
-            for opt in storage_opts.split(","):
-                build_cmd.extend(["--storage-opt", opt.strip()])
         if settings.registry_insecure:
             build_cmd.extend(["--tls-verify=false"])
         build_cmd.append(build_dir)
@@ -303,6 +298,7 @@ COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
         await settings.redis_client.xadd(f"forge:{image.image_id}:stream", {"data": "DONE"})
         process.kill()
         await process.communicate()
+
         raise BuildTimeout(message)
 
     # Scan with trivy
@@ -651,7 +647,7 @@ async def forge(image_id: str):
     """
     Build an image and push it to the registry.
     """
-    os.system("bash /usr/local/bin/buildah_cleanup.sh")
+    # os.system("bash /usr/local/bin/buildah_cleanup.sh")
     async with get_session() as session:
         result = await session.execute(select(Image).where(Image.image_id == image_id).limit(1))
         image = result.scalar_one_or_none()
@@ -711,6 +707,7 @@ async def forge(image_id: str):
         if short_tag:
             image.status = "built and pushed"
             image.short_tag = short_tag
+
             image.inspecto = inspecto_hash
             image.build_completed_at = func.now()
         else:
@@ -731,7 +728,8 @@ async def forge(image_id: str):
     )
 
     # Cleanup
-    os.system("bash /usr/local/bin/buildah_cleanup.sh")
+
+    # os.system("bash /usr/local/bin/buildah_cleanup.sh")
 
 
 async def update_chutes_lib(image_id: str, chutes_version: str, force: bool = False):
@@ -822,17 +820,14 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-loginterc
                 "build",
                 "--isolation",
                 "chroot",
-                "--storage-driver",
-                storage_driver,
-                "--layers",
+                "--layers=false",
+                "--storage-opt",
+                "overlay.mountopt=metacopy=on",
                 "--tag",
                 updated_tag,
                 "-f",
                 dockerfile_path,
             ]
-            if storage_driver == "overlay" and storage_opts:
-                for opt in storage_opts.split(","):
-                    build_cmd.extend(["--storage-opt", opt.strip()])
             if settings.registry_insecure:
                 build_cmd.extend(["--tls-verify=false"])
             build_cmd.append(build_dir)
@@ -883,17 +878,14 @@ RUN ls -la /tmp/chutesfs.*
                 f"CFSV_OP={os.getenv('CFSV_OP', str(uuid.uuid4()))}",
                 "--build-arg",
                 f"PS_OP={os.getenv('PS_OP', str(uuid.uuid4()))}",
-                "--storage-driver",
-                storage_driver,
-                "--layers",
+                "--layers=false",
+                "--storage-opt",
+                "overlay.mountopt=metacopy=on",
                 "--tag",
                 verification_tag,
                 "-f",
                 fsv_dockerfile_path,
             ]
-            if storage_driver == "overlay" and storage_opts:
-                for opt in storage_opts.split(","):
-                    build_cmd.extend(["--storage-opt", opt.strip()])
             if settings.registry_insecure:
                 build_cmd.extend(["--tls-verify=false"])
             build_cmd.append(build_dir)
@@ -1112,7 +1104,7 @@ COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
         logger.error(f"Failed to update chutes lib for image {image_id}: {error_message}")
 
     # Cleanup
-    os.system("bash /usr/local/bin/buildah_cleanup.sh")
+    # os.system("bash /usr/local/bin/buildah_cleanup.sh")
 
 
 async def main():
