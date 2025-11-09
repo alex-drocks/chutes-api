@@ -31,13 +31,9 @@ from api.chute.schemas import Chute, RollingUpdate
 from sqlalchemy import func, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.future import select
-from taskiq_redis import ListQueueBroker, RedisAsyncResultBackend
 from api.database import orms  # noqa
 from api.graval_worker import handle_rolling_update
 
-broker = ListQueueBroker(url=settings.redis_url, queue_name="forge").with_result_backend(
-    RedisAsyncResultBackend(redis_url=settings.redis_url, result_ex_time=3600)
-)
 CFSV_PATH = os.path.join(os.path.dirname(chutes.__file__), "cfsv")
 
 
@@ -1138,3 +1134,7 @@ async def main():
                 await asyncio.sleep(10)
                 continue
             await forge(image_id)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
