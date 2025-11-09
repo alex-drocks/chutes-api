@@ -88,6 +88,7 @@ LLM_PATHS = {"chat_stream", "completion_stream", "chat", "completion"}
 
 BASE_UNIFIED_INVOCATION_INSERT = """
 INSERT INTO {table_name} (
+    bounty,
     parent_invocation_id,
     invocation_id,
     chute_id,
@@ -105,6 +106,7 @@ INSERT INTO {table_name} (
     compute_multiplier,
     metrics
 ) VALUES (
+    0,
     :parent_invocation_id,
     :invocation_id,
     :chute_id,
