@@ -236,6 +236,7 @@ RUN ls -la /tmp/chutesfs.*
         final_dockerfile_content = f"""FROM {verification_tag} as fsv
 FROM {original_tag} as base
 COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
+ENTRYPOINT []
 """
         final_dockerfile_path = os.path.join(build_dir, "Dockerfile.final")
         with open(final_dockerfile_path, "w") as f:
@@ -924,6 +925,7 @@ RUN ls -la /tmp/chutesfs.*
             final_dockerfile_content = f"""FROM {verification_tag} as fsv
 FROM {updated_tag} as base
 COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
+ENTRYPOINT []
 """
             final_dockerfile_path = os.path.join(build_dir, "Dockerfile.final")
             with open(final_dockerfile_path, "w") as f:
@@ -1124,10 +1126,10 @@ async def main():
                 .unique()
                 .scalar_one_or_none()
             )
-            if not image_id:
-                await asyncio.sleep(10)
-                continue
-            await forge(image_id)
+        if not image_id:
+            await asyncio.sleep(10)
+            continue
+        await forge(image_id)
 
 
 if __name__ == "__main__":

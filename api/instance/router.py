@@ -37,6 +37,7 @@ from api.node.util import get_node_by_id
 from api.chute.schemas import Chute, NodeSelector
 from api.secret.schemas import Secret
 from api.image.schemas import Image  # noqa
+from api.image.util import get_inspecto_hash
 from api.instance.schemas import (
     Instance,
     instance_nodes,
@@ -603,11 +604,7 @@ async def claim_launch_config(
         inspecto_valid = True
         fail_reason = None
         if enforce_inspecto:
-            inspecto_hash = (
-                (await db.execute(select(Image.inspecto).where(Image.image_id == chute.image_id)))
-                .unique()
-                .scalar_one_or_none()
-            )
+            inspecto_hash = await get_inspecto_hash(chute.image_id)
             if not inspecto_hash:
                 logger.info(f"INSPECTO: image_id={chute.image_id} has no inspecto hash; allowing.")
                 inspecto_valid = True
