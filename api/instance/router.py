@@ -196,55 +196,6 @@ async def _check_scalable_private(db, chute, miner):
             detail=f"Private chute {chute_id} has reached its target capacity of {target_count} instances.",
         )
 
-    public_chute_query = text("""
-    WITH miner_age AS (
-      SELECT
-        MIN(ia.activated_at) AS first_activated_at
-      FROM instance_audit ia
-      WHERE ia.miner_hotkey = :miner_hotkey
-        AND ia.activated_at IS NOT NULL
-    ),
-    counts AS (
-      SELECT
-        COUNT(DISTINCT i.instance_id) AS public_instance_count,
-        COUNT(DISTINCT nn.node_id) FILTER (
-          WHERE n.name IN ('NVIDIA H200', 'NVIDIA B200')
-            AND n.created_at <= NOW() - INTERVAL '7 days'
-        ) AS public_instance_gpu_count
-      FROM instances i
-      JOIN instance_nodes nn ON nn.instance_id = i.instance_id
-      LEFT JOIN nodes n ON n.uuid = nn.node_id
-      JOIN chutes c ON i.chute_id = c.chute_id
-      WHERE i.miner_hotkey = :miner_hotkey
-        AND i.activated_at IS NOT NULL
-        AND c.public IS TRUE
-    )
-    SELECT
-      counts.public_instance_count,
-      counts.public_instance_gpu_count,
-      ma.first_activated_at,
-      (NOW() - ma.first_activated_at) AS miner_age_interval,
-      EXTRACT(EPOCH FROM (NOW() - ma.first_activated_at)) / 86400.0 AS miner_age_days
-    FROM counts
-    CROSS JOIN miner_age ma
-    """)
-    public_result = (
-        (await db.execute(public_chute_query, {"miner_hotkey": miner.hotkey})).mappings().first()
-    )
-    too_few_public_instances = (public_result["public_instance_count"] or 0) < 1
-    too_few_public_gpus = (public_result["public_instance_gpu_count"] or 0) < 8
-    miner_age_days = public_result.get("miner_age_days")
-    miner_too_new = miner_age_days is None or miner_age_days < 7
-    if too_few_public_instances or too_few_public_gpus or miner_too_new:
-        detail = (
-            f"Miner {miner.hotkey} insufficient to deploy private chutes: "
-            f"public_instances={public_result['public_instance_count']}, "
-            f"public_gpus_7d={public_result['public_instance_gpu_count']}, "
-            f"miner_age_days={0 if miner_age_days is None else round(miner_age_days, 2)}."
-        )
-        logger.warning(detail)
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
-
 
 async def _validate_node(db, chute, node_id: str, hotkey: str):
     node = await get_node_by_id(node_id, db, hotkey)
