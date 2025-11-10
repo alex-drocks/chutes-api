@@ -42,7 +42,7 @@ def model_to_dict(obj):
         if isinstance(getattr(value, "decorator_info", None), ComputedFieldInfo):
             data[name] = getattr(obj, name)
     if isinstance(obj, Chute):
-        data["image"] = f"{obj.image.user.username}/{obj.image.name}:{obj.image.tag}"
+        data["image"] = f"{obj.image.user.username}/{obj.image.name}:{obj.image.tag}".lower()
         if obj.image.patch_version not in (None, "initial"):
             data["image"] += f"-{obj.image.patch_version}"
         ns = NodeSelector(**obj.node_selector)

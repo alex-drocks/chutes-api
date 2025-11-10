@@ -800,12 +800,12 @@ async def update_chutes_lib(image_id: str, chutes_version: str, force: bool = Fa
 
             dockerfile_content = f"""FROM {full_source_tag}
 USER root
+ENV LD_PRELOAD=""
 RUN rm -f /etc/chutesfs.index
 RUN usermod -aG root chutes || true
 RUN chmod g+rwx /usr/local/lib /usr/local/bin /usr/local/share /usr/local/share/man
 RUN chmod g+rwx /usr/local/lib/python3.12/dist-packages || true
 USER chutes
-ENV LD_PRELOAD=""
 RUN pip install chutes=={chutes_version}
 RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-netnanny.so"))') /usr/local/lib/chutes-netnanny.so
 RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-logintercept.so"))') /usr/local/lib/chutes-logintercept.so
