@@ -1135,6 +1135,14 @@ async def invoke(
                     if user_discount:
                         balance_used -= balance_used * user_discount
 
+                # Don't charge for private instances.
+                if (
+                    not chute.public
+                    and not has_legacy_private_billing(chute)
+                    and chute.user_id != await chutes_user_id()
+                ):
+                    balance_used = 0
+
                 # Ship the data over to usage tracker which actually deducts/aggregates balance/etc.
                 try:
                     pipeline = settings.redis_client.pipeline()
