@@ -1217,12 +1217,12 @@ async def verify_launch_config_instance(
         "chute_id": launch_config.chute_id,
         "instance_id": instance.instance_id,
         "verified_at": launch_config.verified_at.isoformat(),
-        "fs_key": generate_fs_key(launch_config),
     }
     if semcomp(instance.chutes_version or "0.0.0", "0.3.61") >= 0:
         return_value["code"] = instance.chute.code
-        if not instance.chute.public:
-            return_value["fs_key"] = generate_fs_key(launch_config)
+        return_value["fs_key"] = generate_fs_key(launch_config)
+        if instance.chute.encrypted_fs:
+            return_value["efs"] = True
     if job:
         job_token = create_job_jwt(job.job_id)
         return_value.update(
