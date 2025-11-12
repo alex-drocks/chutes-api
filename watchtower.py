@@ -757,7 +757,14 @@ def is_kubernetes_env(
 
     # Lib overrides.
     if standard_template:
-        exclude = {"UV_SYSTEM_PYTHON", "PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONWARNINGS"}
+        exclude = {
+            "UV_SYSTEM_PYTHON",
+            "PYTHONUNBUFFERED",
+            "PYTHONIOENCODING",
+            "PYTHONWARNINGS",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+        }
         bad = [key for key in dump["env"] if "python" in key.lower() and key.upper() not in exclude]
         if bad:
             logger.warning(f"{log_prefix} Invalid environment found: PYTHON env override(s): {bad}")

@@ -891,8 +891,15 @@ async def _deploy_chute(
         allow_egress = False
     if "affine" in chute_args.name.lower() or "turbovision" in chute_args.name.lower():
         allow_egress = False
+
+    # Cache encryption, currently not fully function so disabled.
     if chute_args.encrypted_fs is None:
         chute_args.encrypted_fs = False
+    if chute_args.encrypted_fs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encrypted /cache directory is not available (yet)",
+        )
 
     if not chute_args.node_selector:
         chute_args.node_selector = {"gpu_count": 1}
