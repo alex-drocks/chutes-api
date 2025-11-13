@@ -56,7 +56,7 @@ RATE_LIMIT_SCALE_UP = 0.02
 VLM_MAX_SIZE = 100 * 1024 * 1024
 
 # Private instance compute multiplier bonus.
-PRIVATE_INSTANCE_BONUS = 4
+PRIVATE_INSTANCE_BONUS = 16
 
 # Subnet integrations.
 INTEGRATED_SUBNETS = {
