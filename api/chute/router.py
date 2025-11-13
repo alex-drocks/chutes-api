@@ -39,7 +39,7 @@ from api.chute.templates import (
     build_diffusion_code,
     build_tei_code,
 )
-from api.gpu import SUPPORTED_GPUS
+from api.gpu import ALLOW_INCLUDE, SUPPORTED_GPUS
 from api.chute.response import ChuteResponse
 from api.chute.util import (
     selector_hourly_price,
@@ -895,16 +895,23 @@ async def _deploy_chute(
     # Cache encryption, currently not fully function so disabled.
     if chute_args.encrypted_fs is None:
         chute_args.encrypted_fs = False
-    if chute_args.encrypted_fs:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encrypted /cache directory is not available (yet)",
-        )
 
     if not chute_args.node_selector:
         chute_args.node_selector = {"gpu_count": 1}
     if isinstance(chute_args.node_selector, dict):
         chute_args.node_selector = NodeSelector(**chute_args.node_selector)
+    for gpu in chute_args.node_selector.include or []:
+        if gpu not in ALLOW_INCLUDE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Only these GPUs can be specified in the `include` field: {ALLOW_INCLUDE}",
+            )
+    if len(chute_args.node_selector.exclude or []) > 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Maximum of 4 GPUs can be included in the `exclude` field",
+        )
+
     allowed_gpus = set(chute_args.node_selector.supported_gpus)
     if not allowed_gpus - set(["5090", "3090", "4090"]):
         raise HTTPException(
