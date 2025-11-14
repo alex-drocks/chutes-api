@@ -54,6 +54,7 @@ def model_to_dict(obj):
         )
         if semcomp(obj.chutes_version or "0.0.0", "0.3.61") >= 0:
             data["code"] = "print('legacy placeholder')"
+        data["preemptible"] = obj.preemptible
     if isinstance(obj, Image):
         data["username"] = obj.user.username
     if isinstance(data.get("seed"), Decimal):
