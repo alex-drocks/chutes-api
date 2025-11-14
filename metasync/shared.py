@@ -6,6 +6,7 @@ from api.config import settings
 from api.database import get_session
 from loguru import logger
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from sqlalchemy import Column, String, DateTime, Integer, Float, text
 from metasync.constants import (
     BONUS,
@@ -49,6 +50,8 @@ def create_metagraph_node_class(base):
         real_port = Column(Integer)
         synced_at = Column(DateTime, server_default=func.now())
         blacklist_reason = Column(String)
+
+        servers = relationship("Server", back_populates="miner")
 
     return MetagraphNode
 
