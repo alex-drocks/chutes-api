@@ -57,7 +57,11 @@ from api.instance.util import (
     load_launch_config_from_jwt,
     invalidate_instance_cache,
 )
-from api.server.service import check_server_ownership, validate_and_consume_nonce, validate_request_nonce, verify_gpu_evidence
+from api.server.service import (
+    check_server_ownership,
+    validate_request_nonce,
+    verify_gpu_evidence,
+)
 from api.user.schemas import User
 from api.user.service import get_current_user, chutes_user_id, subnet_role_accessible
 from api.metasync import get_miner_by_hotkey
@@ -201,6 +205,7 @@ async def _check_scalable_private(db, chute, miner):
             detail=f"Private chute {chute_id} has reached its target capacity of {target_count} instances.",
         )
 
+
 async def _validate_node(db, chute, node_id: str, hotkey: str) -> Node:
     node = await get_node_by_id(node_id, db, hotkey)
     if not node:
@@ -239,7 +244,9 @@ async def _validate_node(db, chute, node_id: str, hotkey: str) -> Node:
     return node
 
 
-async def _validate_nodes(db, chute, node_ids: list[str], hotkey: str, instance: Instance) -> list[Node]:
+async def _validate_nodes(
+    db, chute, node_ids: list[str], hotkey: str, instance: Instance
+) -> list[Node]:
     host = instance.host
     gpu_count = chute.node_selector.get("gpu_count", 1)
     if len(set(node_ids)) != gpu_count:
@@ -303,7 +310,8 @@ async def _validate_host_port(db, host, port):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid instance host: {host}",
         )
-    
+
+
 @router.get("/reconciliation_csv")
 async def get_instance_reconciliation_csv(
     db: AsyncSession = Depends(get_db_session),
@@ -330,14 +338,16 @@ async def get_instance_reconciliation_csv(
         headers={"Content-Disposition": 'attachment; filename="audit-reconciliation.csv"'},
     )
 
+
 async def _validate_launch_config_env(
     db: AsyncSession,
     launch_config: LaunchConfig,
     chute: Chute,
     args: GravalLaunchConfigArgs,
-    log_prefix: str
+    log_prefix: str,
 ):
     from chutes.envdump import DUMPER
+
     # Verify, decrypt, parse the envdump payload.
     if "ENVDUMP_UNLOCK" in os.environ:
         code = None
@@ -368,7 +378,9 @@ async def _validate_launch_config_env(
             if semcomp(chute.chutes_version or "0.0.0", "0.3.61") < 0:
                 assert code == chute.code, f"Incorrect code:\n{code=}\n{chute.code=}"
         except AssertionError as exc:
-            logger.error(f"Attempt to claim {launch_config.config_id=} failed, invalid command: {exc}")
+            logger.error(
+                f"Attempt to claim {launch_config.config_id=} failed, invalid command: {exc}"
+            )
             launch_config.failed_at = func.now()
             launch_config.verification_error = f"Invalid command: {exc}"
             await db.commit()
@@ -391,13 +403,14 @@ async def _validate_launch_config_env(
             )
     else:
         logger.warning("Unable to perform extended validation, skipping...")
-        
+
+
 async def _validate_launch_config_inspecto(
     db: AsyncSession,
     launch_config: LaunchConfig,
     chute: Chute,
     args: GravalLaunchConfigArgs,
-    log_prefix: str
+    log_prefix: str,
 ):
     if semcomp(chute.chutes_version, "0.3.50") >= 0:
         # Inspecto
@@ -454,12 +467,10 @@ async def _validate_launch_config_inspecto(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=launch_config.verification_error,
             )
-        
+
+
 async def _validate_launch_config_filesystem(
-    db: AsyncSession,
-    launch_config: LaunchConfig,
-    chute: Chute,
-    args: GravalLaunchConfigArgs
+    db: AsyncSession, launch_config: LaunchConfig, chute: Chute, args: GravalLaunchConfigArgs
 ):
     # Valid filesystem/integrity?
     if semcomp(chute.chutes_version, "0.3.1") >= 0:
@@ -492,15 +503,15 @@ async def _validate_launch_config_filesystem(
         else:
             logger.warning("Extended filesystem verification disabled, skipping...")
 
+
 async def _validate_launch_config_instance(
     db: AsyncSession,
     request: Request,
     args: LaunchConfigArgs,
     launch_config: LaunchConfig,
     chute: Chute,
-    log_prefix: str
+    log_prefix: str,
 ) -> Tuple[LaunchConfig, list[Node], Instance]:
-
     miner = await _check_blacklisted(db, launch_config.miner_hotkey)
 
     config_id = launch_config.config_id
@@ -595,9 +606,7 @@ async def _validate_launch_config_instance(
                 detail=launch_config.verification_error,
             )
 
-    await _validate_launch_config_filesystem(
-        db, launch_config, chute, args
-    )
+    await _validate_launch_config_filesystem(db, launch_config, chute, args)
 
     # Assign the job to this launch config.
     if launch_config.job_id:
@@ -731,6 +740,7 @@ async def _validate_launch_config_instance(
 
     return launch_config, nodes, instance
 
+
 async def _validate_graval_launch_config_instance(
     config_id: str,
     args: GravalLaunchConfigArgs,
@@ -738,7 +748,6 @@ async def _validate_graval_launch_config_instance(
     db: AsyncSession,
     authorization: str,
 ) -> Tuple[LaunchConfig, list[Node], Instance]:
-
     token = authorization.strip().split(" ")[-1]
     launch_config = await load_launch_config_from_jwt(db, config_id, token)
     chute = await _load_chute(db, launch_config.chute_id)
@@ -746,17 +755,14 @@ async def _validate_graval_launch_config_instance(
 
     # This does change order from previous graval only implementation
     # If want to preserve order need to split up final shared config check
-    await _validate_launch_config_env(
-        db, launch_config, chute, args, log_prefix    
-    )
+    await _validate_launch_config_env(db, launch_config, chute, args, log_prefix)
 
-    await _validate_launch_config_inspecto(
-        db, launch_config, chute, args, log_prefix
-    )
+    await _validate_launch_config_inspecto(db, launch_config, chute, args, log_prefix)
 
     return await _validate_launch_config_instance(
         db, request, args, launch_config, chute, log_prefix
     )
+
 
 async def _validate_tee_launch_config_instance(
     config_id: str,
@@ -765,7 +771,6 @@ async def _validate_tee_launch_config_instance(
     db: AsyncSession,
     authorization: str,
 ) -> Tuple[LaunchConfig, list[Node], Instance]:
-    
     token = authorization.strip().split(" ")[-1]
     launch_config = await load_launch_config_from_jwt(db, config_id, token)
     chute = await _load_chute(db, launch_config.chute_id)
@@ -843,7 +848,9 @@ async def get_launch_config(
         server = await check_server_ownership(db, server_id, hotkey)
 
         if not server:
-            logger.error(f"Server {server_id} does not exist or does not belong to miner {hotkey=}.")
+            logger.error(
+                f"Server {server_id} does not exist or does not belong to miner {hotkey=}."
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Your hotkey does not own server {server_id=} or server does not exist.",
@@ -856,9 +863,8 @@ async def get_launch_config(
     if chute.tee and env_type != "tee":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Can not deploy TEE chute to non TEE node."
+            detail="Can not deploy TEE chute to non TEE node.",
         )
-
 
     # Create the launch config and JWT.
     try:
@@ -881,7 +887,7 @@ async def get_launch_config(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Launch config conflict/unique constraint error: {exc}",
         )
-    
+
     # Generate the JWT.
     token = None
     if semcomp(chute.chutes_version or "0.0.0", "0.3.61") >= 0:
@@ -890,7 +896,6 @@ async def get_launch_config(
         )
     else:
         token = create_launch_jwt(launch_config, disk_gb=disk_gb)
-
 
     return {
         "token": token,
@@ -905,7 +910,7 @@ async def validate_tee_launch_config_instance(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
     authorization: str = Header(None, alias=AUTHORIZATION_HEADER),
-    expected_nonce: str = Depends(validate_request_nonce())
+    expected_nonce: str = Depends(validate_request_nonce()),
 ):
     launch_config, nodes, instance = await _validate_tee_launch_config_instance(
         config_id, args, request, db, authorization
@@ -934,13 +939,12 @@ async def validate_tee_launch_config_instance(
     request_body = await request.json()
 
     # Reload instance with chute relationship for filesystem validation
-    # Lazy load fails 
+    # Lazy load fails
     stmt = (
         select(Instance)
         .where(Instance.instance_id == instance.instance_id)
         .options(
-            joinedload(Instance.chute).
-            joinedload(Chute.image),
+            joinedload(Instance.chute).joinedload(Chute.image),
             joinedload(Instance.job),
         )
     )
@@ -959,6 +963,7 @@ async def validate_tee_launch_config_instance(
     await db.refresh(instance)
     asyncio.create_task(notify_verified(instance))
     return return_value
+
 
 @router.post("/launch_config/{config_id}")
 async def claim_launch_config(
@@ -1173,6 +1178,7 @@ async def verify_port_map(instance, port_map):
         logger.error(f"Port verification failed for {port_map}: {e}")
         return False
 
+
 def _validate_launch_config_not_expired(launch_config):
     # Validate the launch config.
     config_id = launch_config.config_id
@@ -1190,7 +1196,8 @@ def _validate_launch_config_not_expired(launch_config):
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Launch config failed verification: {launch_config.failed_at=} {launch_config.verification_error=}",
         )
-    
+
+
 async def _validate_legacy_filesystem(
     db: AsyncSession, instance: Instance, launch_config: LaunchConfig, response_body
 ):
@@ -1233,6 +1240,7 @@ async def _validate_legacy_filesystem(
         else:
             logger.warning("Extended filesystem verification disabled, skipping...")
 
+
 async def _verify_job_ports(db: AsyncSession, instance: Instance):
     job = instance.job
     if job:
@@ -1259,7 +1267,10 @@ async def _verify_job_ports(db: AsyncSession, instance: Instance):
         job.started_at = func.now()
         await db.refresh(job)
 
-async def _mark_instance_verified(db: AsyncSession, instance: Instance, launch_config: LaunchConfig):
+
+async def _mark_instance_verified(
+    db: AsyncSession, instance: Instance, launch_config: LaunchConfig
+):
     # Can't do this via the instance attrs directly, circular dependency :/
     await db.execute(
         text(
@@ -1271,10 +1282,10 @@ async def _mark_instance_verified(db: AsyncSession, instance: Instance, launch_c
     await db.commit()
     await db.refresh(launch_config)
 
+
 async def _build_launch_config_verified_response(
     db: AsyncSession, instance: Instance, launch_config: LaunchConfig
 ):
-    
     return_value = {
         "chute_id": launch_config.chute_id,
         "instance_id": instance.instance_id,
@@ -1315,6 +1326,7 @@ async def _build_launch_config_verified_response(
 
     return return_value
 
+
 @router.put("/launch_config/{config_id}")
 async def verify_launch_config_instance(
     config_id: str,
@@ -1337,7 +1349,7 @@ async def verify_launch_config_instance(
             joinedload(Instance.nodes),
             joinedload(Instance.job),
             joinedload(Instance.chute),
-        ) 
+        )
     )
     instance = (await db.execute(query)).unique().scalar_one_or_none()
     if not instance:
@@ -1438,7 +1450,6 @@ async def verify_launch_config_instance(
     await _verify_job_ports(db, instance)
     await _mark_instance_verified(db, instance, launch_config)
     return_value = await _build_launch_config_verified_response(db, instance, launch_config)
-    
 
     await db.refresh(instance)
     asyncio.create_task(notify_verified(instance))

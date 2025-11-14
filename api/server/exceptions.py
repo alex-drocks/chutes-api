@@ -11,17 +11,20 @@ class AttestationError(HTTPException):
     def __init__(self, detail: str, status_code: int = status.HTTP_403_FORBIDDEN):
         super().__init__(status_code=status_code, detail=detail)
 
+
 class NoClientCertError(AttestationError):
     """Raised when attestation is performed without mTLS."""
 
     def __init__(self, detail: str = "No client certificate found."):
         super().__init__(detail=detail)
 
+
 class NoServerCertError(Exception):
     """Raised when attestation is performed without TLS."""
 
     def __init__(self, detail: str = "No server certificate found."):
         super().__init__(detail=detail)
+
 
 class InvalidClientCertError(AttestationError):
     """Raised when attestation is performed without mTLS."""
@@ -71,10 +74,11 @@ class NonceError(AttestationError):
     def __init__(self, detail: str = "Invalid or expired nonce"):
         super().__init__(detail=detail, status_code=status.HTTP_400_BAD_REQUEST)
 
-class GetEvidenceError(Exception):
 
+class GetEvidenceError(Exception):
     def __init__(self, detail: str = "Failed to get evidence for attestation."):
         super().__init__(detail)
+
 
 class ServerNotFoundError(HTTPException):
     """Raised when server is not found."""
@@ -90,6 +94,7 @@ class ServerRegistrationError(HTTPException):
 
     def __init__(self, detail: str = "Server registration failed"):
         super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
 
 class InvalidTdxConfiguration(HTTPException):
     """Raised if invalid configuration is encouted during TDX validation."""

@@ -60,14 +60,17 @@ class LaunchConfigArgs(BaseModel):
     run_path: Optional[str] = None
     py_dirs: Optional[list[str]] = None
 
+
 class GravalLaunchConfigArgs(LaunchConfigArgs):
     env: str
     code: Optional[str] = None
     run_code: Optional[str] = None
     inspecto: Optional[str] = None
 
+
 class TeeLaunchConfigArgs(LaunchConfigArgs):
     gpu_evidence: list[dict]
+
 
 class Instance(Base):
     __tablename__ = "instances"

@@ -3,18 +3,9 @@ ORM definitions for servers and TDX attestations.
 """
 
 from pydantic import BaseModel, Field
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
-from sqlalchemy import (
-    Column,
-    String,
-    DateTime,
-    Boolean,
-    ForeignKey,
-    Text,
-    Index
-)
+from sqlalchemy import Column, String, DateTime, Boolean, ForeignKey, Text, Index
 from typing import Dict, Any
 from api.database import Base, generate_uuid
 from api.node.schemas import NodeArgs
@@ -97,26 +88,20 @@ class Server(Base):
 
     server_id = Column(String, primary_key=True)
     ip = Column(String, nullable=False, unique=True)  # Links to boot attestations
-    miner_hotkey = Column(
-        String, ForeignKey("metagraph_nodes.hotkey"), nullable=False
-    )
+    miner_hotkey = Column(String, ForeignKey("metagraph_nodes.hotkey"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     is_tee = Column(Boolean, default=False)
 
     # Relationships
-    nodes = relationship(
-        "Node", back_populates="server", cascade="all, delete-orphan"
-    )
+    nodes = relationship("Node", back_populates="server", cascade="all, delete-orphan")
     runtime_attestations = relationship(
         "ServerAttestation", back_populates="server", cascade="all, delete-orphan"
     )
     miner = relationship("MetagraphNode", back_populates="servers")
 
-    __table_args__ = (
-        Index("idx_server_miner", "miner_hotkey"),
-    )
+    __table_args__ = (Index("idx_server_miner", "miner_hotkey"),)
 
 
 class ServerAttestation(Base):

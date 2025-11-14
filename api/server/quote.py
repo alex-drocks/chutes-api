@@ -113,14 +113,16 @@ class TdxQuote(ABC):
                 rtmr2=rtmr2,
                 rtmr3=rtmr3,
                 report_data=report_data,  # TD report's report_data (nonce)
-                user_data=user_data,      # Header's user_data
+                user_data=user_data,  # Header's user_data
                 platform_id=platform_id,  # First 16 bytes of user_data
                 raw_quote_size=len(quote_bytes),
                 raw_bytes=quote_bytes,
                 parsed_at=datetime.now(timezone.utc).isoformat(),
             )
 
-            logger.success(f"Successfully parsed TDX quote: MRTD={quote.mrtd[:16]}..., Platform ID={quote.platform_id[:16]}...")
+            logger.success(
+                f"Successfully parsed TDX quote: MRTD={quote.mrtd[:16]}..., Platform ID={quote.platform_id[:16]}..."
+            )
             return quote
 
         except struct.error as e:

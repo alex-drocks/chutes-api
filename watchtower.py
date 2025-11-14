@@ -207,7 +207,7 @@ async def load_chute_instances(chute_id):
                 Instance.chute_id == chute_id,
                 Instance.active.is_(True),
                 Instance.verified.is_(True),
-                LaunchConfig.env_type != 'tee' # Exclude TEE
+                LaunchConfig.env_type != "tee",  # Exclude TEE
             )
             .options(joinedload(Instance.nodes))
         )

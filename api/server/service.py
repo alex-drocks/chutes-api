@@ -7,17 +7,15 @@ import base64
 from datetime import datetime, timezone, timedelta
 import json
 import tempfile
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 from fastapi import HTTPException, Header, Request, status
 from loguru import logger
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
-from taskiq_redis import ListQueueBroker, RedisAsyncResultBackend
 
 from api.config import settings
 from api.constants import NONCE_HEADER
-from api.database import get_session
 from api.gpu import SUPPORTED_GPUS
 from api.node.util import _track_nodes
 from api.server.client import TeeServerClient
@@ -46,13 +44,13 @@ from api.server.util import (
     _track_server,
     extract_report_data,
     verify_measurements,
-    get_luks_passphrase,
     generate_nonce,
     get_nonce_expiry_seconds,
     verify_quote_signature,
     verify_result,
 )
 from api.util import extract_ip
+
 
 async def create_nonce(server_ip: str) -> Dict[str, str]:
     """
@@ -141,15 +139,16 @@ def validate_request_nonce():
     return _validate_request_nonce
 
 
-async def verify_quote(quote: TdxQuote, expected_nonce: str, expected_cert_hash: str) -> TdxVerificationResult:
+async def verify_quote(
+    quote: TdxQuote, expected_nonce: str, expected_cert_hash: str
+) -> TdxVerificationResult:
     # Validate nonce
     nonce, cert_hash = extract_report_data(quote)
-
 
     if nonce != expected_nonce:
         logger.info(f"Nonce error:  {nonce} =/= {expected_nonce}")
         raise NonceError("Quote nonce does not match expected nonce.")
-    
+
     if cert_hash != expected_cert_hash:
         raise InvalidClientCertError()
 
@@ -233,7 +232,7 @@ async def process_boot_attestation(
             quote_data=args.quote,
             server_ip=server_ip,
             verification_error=str(e.detail),
-            created_at=func.now()
+            created_at=func.now(),
         )
 
         db.add(boot_attestation)
@@ -242,8 +241,8 @@ async def process_boot_attestation(
         logger.error(f"Boot attestation failed: {str(e)}")
         raise
 
-async def register_server(db: AsyncSession, args: ServerArgs, miner_hotkey: str):
 
+async def register_server(db: AsyncSession, args: ServerArgs, miner_hotkey: str):
     try:
         server = await _track_server(db, args.id, args.host, miner_hotkey, is_tee=True)
 
@@ -259,7 +258,7 @@ async def register_server(db: AsyncSession, args: ServerArgs, miner_hotkey: str)
         # Track nodes once verified
         await _track_nodes(db, miner_hotkey, server.server_id, args.gpus, "0", func.now())
 
-    except AttestationError as e:
+    except AttestationError:
         logger.error(f"Attestation failed for server {args.host}")
         raise ServerRegistrationError("Server registration failed - attestation failed.")
     except IntegrityError as e:
@@ -270,11 +269,9 @@ async def register_server(db: AsyncSession, args: ServerArgs, miner_hotkey: str)
         await db.rollback()
         logger.error(f"Unexpected error during server registration: {str(e)}")
         raise ServerRegistrationError(f"Server registration failed: {str(e)}")
-    
 
-async def verify_server(
-    db: AsyncSession, server: Server, miner_hotkey: str
-) -> None:
+
+async def verify_server(db: AsyncSession, server: Server, miner_hotkey: str) -> None:
     """
     Register a new server.
 
@@ -291,7 +288,6 @@ async def verify_server(
     """
     failure_reason = ""
     try:
-            
         client = TeeServerClient(server)
 
         nonce = generate_nonce()
@@ -321,19 +317,19 @@ async def verify_server(
         raise e
     except (InvalidQuoteError, MeasurementMismatchError) as e:
         logger.error(f"Server verification failed for {server.ip}:\n{e}")
-        failure_reason = f"Server verification failed: invalid quote"
+        failure_reason = "Server verification failed: invalid quote"
         raise e
     except InvalidGpuEvidenceError as e:
         logger.error(f"Failed to verify GPU evidence for {server.ip}.  Invalid GPU evidence.")
-        failure_reason = f"Server verification failed: invalid GPU evidence"
+        failure_reason = "Server verification failed: invalid GPU evidence"
         raise e
     except GpuEvidenceError as e:
         logger.error(f"Failed to verify GPU evidence for {server.ip}")
-        failure_reason = f"Server verification failed: Failed to verify GPU evidence"
+        failure_reason = "Server verification failed: Failed to verify GPU evidence"
         raise e
     except Exception as e:
         logger.error(f"Unexpected error during server verification for {server.ip}: {str(e)}")
-        failure_reason = f"Unexpected error during server verification."
+        failure_reason = "Unexpected error during server verification."
         raise e
     finally:
         if failure_reason:
@@ -342,13 +338,12 @@ async def verify_server(
                 quote_data=base64.b64encode(quote.raw_bytes) if quote else None,
                 server_id=server.server_id,
                 verification_error=failure_reason,
-                created_at=func.now()
+                created_at=func.now(),
             )
 
             db.add(server_attestation)
             await db.commit()
             await db.refresh(server_attestation)
-
 
 
 async def check_server_ownership(db: AsyncSession, server_id: str, miner_hotkey: str) -> Server:
@@ -384,7 +379,7 @@ async def process_runtime_attestation(
     args: RuntimeAttestationArgs,
     miner_hotkey: str,
     expected_nonce: str,
-    expected_cert_hash: str
+    expected_cert_hash: str,
 ) -> Dict[str, str]:
     """
     Process a runtime attestation request.
@@ -474,7 +469,7 @@ async def get_server_attestation_status(
         Dictionary containing attestation status
     """
     # Verify server ownership
-    server = await check_server_ownership(db, server_id, miner_hotkey)
+    _ = await check_server_ownership(db, server_id, miner_hotkey)
 
     # Get latest attestation
     query = (

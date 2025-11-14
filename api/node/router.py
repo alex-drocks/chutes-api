@@ -150,7 +150,6 @@ async def create_nodes(
             detail=reason,
         )
 
-
     # If we got here, the authorization succeeded, meaning it's from a registered hotkey.
     nodes_args = args.nodes
 
@@ -210,9 +209,11 @@ async def create_nodes(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="One or more invalid verification_hosts provided.",
         )
-    
+
     try:
-        await _track_server(db, args.server_id, args.nodes[0].verification_host, hotkey, is_tee=False)
+        await _track_server(
+            db, args.server_id, args.nodes[0].verification_host, hotkey, is_tee=False
+        )
         nodes = await _track_nodes(db, hotkey, args.server_id, args.nodes, seed, verified_at)
     except ValueError as exc:
         raise HTTPException(

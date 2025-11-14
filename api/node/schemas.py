@@ -86,7 +86,7 @@ class Node(Base):
         lazy="joined",
         uselist=False,
     )
-    
+
     server = relationship("Server", back_populates="nodes")
 
     def __init__(self, **kwargs):

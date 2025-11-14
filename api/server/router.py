@@ -6,7 +6,6 @@ from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
-from taskiq_redis.exceptions import ResultIsMissingError
 
 from api.database import get_db_session
 from api.config import settings
@@ -32,7 +31,7 @@ from api.server.service import (
     get_server_attestation_status,
     list_servers,
     delete_server,
-    validate_request_nonce
+    validate_request_nonce,
 )
 from api.server.util import extract_client_cert_hash, get_luks_passphrase
 from api.server.exceptions import (
@@ -76,7 +75,7 @@ async def verify_boot_attestation(
     args: BootAttestationArgs,
     db: AsyncSession = Depends(get_db_session),
     nonce=Depends(validate_request_nonce()),
-    expected_cert_hash=Depends(extract_client_cert_hash())
+    expected_cert_hash=Depends(extract_client_cert_hash()),
 ):
     """
     Verify boot attestation and return LUKS passphrase.
@@ -88,9 +87,7 @@ async def verify_boot_attestation(
         server_ip = extract_ip(request)
         await process_boot_attestation(db, server_ip, args, nonce, expected_cert_hash)
 
-        return BootAttestationResponse(
-            key=get_luks_passphrase()
-        )
+        return BootAttestationResponse(key=get_luks_passphrase())
     except NonceError as e:
         logger.warning(f"Boot attestation nonce error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -126,7 +123,7 @@ async def create_server(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=reason,
             )
-    
+
         gpu_uuids = [gpu.uuid for gpu in args.gpus]
         existing_nodes = await check_node_inventory(db, gpu_uuids)
         if existing_nodes:
@@ -134,7 +131,7 @@ async def create_server(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Nodes already exist in inventory, please contact chutes team to resolve: {existing_nodes}",
             )
-        
+
         valid_host = await is_valid_host(args.host)
         if not valid_host:
             raise HTTPException(
@@ -155,12 +152,15 @@ async def create_server(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Server registration failed"
         )
 
+
 # ToDo: Maybe don't need to expose this
 @router.get("/", response_model=List[Dict[str, Any]])
 async def list_user_servers(
     db: AsyncSession = Depends(get_db_session),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
-    _: User = Depends(get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)),
+    _: User = Depends(
+        get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)
+    ),
 ):
     """
     List all servers for the authenticated miner.
@@ -190,7 +190,9 @@ async def get_server_details(
     server_id: str,
     db: AsyncSession = Depends(get_db_session),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
-    _: User = Depends(get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)),
+    _: User = Depends(
+        get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)
+    ),
 ):
     """
     Get details for a specific server.
@@ -219,7 +221,9 @@ async def remove_server(
     server_id: str,
     db: AsyncSession = Depends(get_db_session),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
-    _: User = Depends(get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)),
+    _: User = Depends(
+        get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)
+    ),
 ):
     """
     Remove a server.
@@ -247,7 +251,9 @@ async def get_runtime_nonce(
     server_id: str,
     db: AsyncSession = Depends(get_db_session),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
-    _: User = Depends(get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)),
+    _: User = Depends(
+        get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)
+    ),
 ):
     """
     Generate a nonce for runtime attestation.
@@ -280,16 +286,20 @@ async def verify_runtime_attestation(
     args: RuntimeAttestationArgs,
     db: AsyncSession = Depends(get_db_session),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
-    _: User = Depends(get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)),
+    _: User = Depends(
+        get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)
+    ),
     nonce=Depends(validate_request_nonce()),
-    expected_cert_hash=Depends(extract_client_cert_hash())
+    expected_cert_hash=Depends(extract_client_cert_hash()),
 ):
     """
     Verify runtime attestation with full measurement validation.
     """
     try:
         actual_ip = extract_ip(request)
-        result = await process_runtime_attestation(db, server_id, actual_ip, args, hotkey, nonce, expected_cert_hash)
+        result = await process_runtime_attestation(
+            db, server_id, actual_ip, args, hotkey, nonce, expected_cert_hash
+        )
 
         return RuntimeAttestationResponse(
             attestation_id=result["attestation_id"],
@@ -318,7 +328,9 @@ async def get_attestation_status(
     server_id: str,
     db: AsyncSession = Depends(get_db_session),
     hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
-    _: User = Depends(get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)),
+    _: User = Depends(
+        get_current_user(purpose="tee", raise_not_found=False, registered_to=settings.netuid)
+    ),
 ):
     """
     Get current attestation status for a server.
