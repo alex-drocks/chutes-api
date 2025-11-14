@@ -1282,7 +1282,7 @@ async def _build_launch_config_verified_response(
     }
     if semcomp(instance.chutes_version or "0.0.0", "0.3.61") >= 0:
         return_value["code"] = instance.chute.code
-        return_value["fs_key"] = generate_fs_key(launch_config),
+        return_value["fs_key"] = generate_fs_key(launch_config)
         if instance.chute.encrypted_fs:
             return_value["efs"] = True
     if instance.job:
