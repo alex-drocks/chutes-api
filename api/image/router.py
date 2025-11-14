@@ -267,7 +267,7 @@ async def create_image(
     chutes_sdk_version = request.headers.get("X-Chutes-Version", "0.0.0").lower()
     if (
         not chutes_sdk_version
-        or not re.match(r"^[0-9]+\.[0-9]+\.[0-9](\.|$)")
+        or not re.match(r"^[0-9]+\.[0-9]+\.[0-9](\.|$)", chutes_sdk_version)
         or semcomp(chutes_sdk_version, "0.3.61") < 0
     ):
         raise HTTPException(
