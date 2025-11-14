@@ -3,7 +3,6 @@ Routes for images.
 """
 
 import io
-import re
 import uuid
 import asyncio
 import orjson as json
@@ -264,12 +263,11 @@ async def create_image(
     await limit_images(db, current_user)
 
     # Check for legacy versions.
-    chutes_sdk_version = request.headers.get("X-Chutes-Version", "0.0.0").lower()
-    if (
-        not chutes_sdk_version
-        or not re.match(r"^[0-9]+\.[0-9]+\.[0-9](\.|$)", chutes_sdk_version)
-        or semcomp(chutes_sdk_version, "0.3.61") < 0
-    ):
+    chutes_sdk_version = request.headers.get("X-Chutes-Version", "0.0.0").lower() or "0.0.0"
+    logger.warning(
+        f"Attempt to build image with: {chutes_sdk_version=} from {current_user.username=} {current_user.user_id=}"
+    )
+    if semcomp(chutes_sdk_version, "0.3.61") < 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Please upgrade your local chutes lib to version >= 0.3.61, e.g. `pip3 install chutes==0.3.61` and try again",

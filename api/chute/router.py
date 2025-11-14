@@ -1002,13 +1002,16 @@ async def _deploy_chute(
             )
 
     # Prevent deploying images with old chutes SDK versions.
+    min_version = "0.3.56"
+    if "turbovision" in chute_args.name.lower() or "babelbit" in chute_args.name.lower():
+        min_version = "0.3.61"
     if current_user.user_id != await chutes_user_id() and (
-        not image.chutes_version or semcomp(image.chutes_version, "0.3.56") < 0
+        not image.chutes_version or semcomp(image.chutes_version, min_version) < 0
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Unable to deploy chutes with chutes version < 0.3.56, please upgrade "
+                f"Unable to deploy chutes with chutes version < {min_version}, please upgrade "
                 f"(or ask chutes team to upgrade) {image.name=} {image.image_id=} currently {image.chutes_version=}"
             ),
         )
