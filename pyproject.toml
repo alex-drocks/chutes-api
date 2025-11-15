@@ -2,7 +2,7 @@
 name = "chutes-api"
 version = "0.0.1"
 description = "chutes.ai API/validator"
-authors = ["Jon Durbin <jon@jondurbin.com>", "namoray <namoray@rayonlabs.ai>"]
+authors = ["Chutes Global Corp <dev@chutes.ai>"]
 license = "MIT"
 readme = "README.md"
 
