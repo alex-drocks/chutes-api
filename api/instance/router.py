@@ -32,6 +32,8 @@ from api.constants import (
     HOTKEY_HEADER,
     AUTHORIZATION_HEADER,
     PRIVATE_INSTANCE_BONUS,
+    INTEGRATED_SUBNETS,
+    INTEGRATED_SUBNET_BONUS,
 )
 from api.node.schemas import Node
 from api.payment.util import decrypt_secret
@@ -666,7 +668,18 @@ async def _validate_launch_config_instance(
         and not has_legacy_private_billing(chute)
         and chute.user_id != await chutes_user_id()
     ):
-        instance.compute_multiplier *= PRIVATE_INSTANCE_BONUS
+        # Integrated subnet?
+        integrated = False
+        for config in INTEGRATED_SUBNETS.values():
+            if config["model_substring"] in chute.name.lower():
+                integrated = True
+                break
+        bonus = PRIVATE_INSTANCE_BONUS if not integrated else INTEGRATED_SUBNET_BONUS
+        instance.compute_multiplier *= bonus
+        logger.info(
+            f"Adding private instance bonus value {bonus=} to {instance.instance_id} "
+            f"for total {instance.compute_multiplier=} for {chute.name=} {chute.chute_id=} {integrated=}"
+        )
         instance.billed_to = chute.user_id
 
     # Add chute boost.
