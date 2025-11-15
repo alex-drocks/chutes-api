@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     validator_ss58: Optional[str] = os.getenv("VALIDATOR_SS58")
     storage_bucket: str = os.getenv("STORAGE_BUCKET", "REPLACEME")
     redis_url: str = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-    memcached_host: str = os.getenv("MEMCACHED", "memcached")
+    memcached_host: str = os.getenv("MEMCACHED", "memcached.chutes.svc.cluster.local")
 
     _redis_client: Optional[redis.Redis] = None
     _cm_redis_clients: Optional[list[redis.Redis]] = None
