@@ -303,16 +303,6 @@ async def create_image(
             detail=f"Image with {name=} and {tag=} aready exists",
         )
 
-    # Force installation of chutes with the specified version.
-    dockerfile += "\n\n" + "\n".join(
-        [
-            f"RUN pip install chutes=={settings.chutes_version}",
-            "RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), \"chutes-netnanny.so\"))') /usr/local/lib/chutes-netnanny.so",
-            "RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), \"chutes-logintercept.so\"))') /usr/local/lib/chutes-logintercept.so",
-            "ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-logintercept.so",
-        ]
-    )
-
     # Upload the build context to our S3-compatible storage backend.
     for obj, destination in (
         (build_context, f"forge/{current_user.user_id}/{image_id}.zip"),

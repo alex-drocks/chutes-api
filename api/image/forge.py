@@ -171,10 +171,65 @@ async def build_and_push_image(image, build_dir):
         if process.returncode != 0:
             raise BuildFailure("Build of original image failed!")
 
-        # Stage 2: Build filesystem verification image from the original
+        # Inject chutes.
+        chutes_tag = f"{original_tag}-chutes"
+        chutes_dockerfile_content = f"""FROM {original_tag}
+USER root
+ENV LD_PRELOAD=""
+RUN rm -f /etc/chutesfs.index
+RUN usermod -aG root chutes || true
+RUN chmod g+rwx /usr/local/lib /usr/local/bin /usr/local/share /usr/local/share/man
+RUN chmod g+rwx /usr/local/lib/python3.12/dist-packages || true
+USER chutes
+RUN pip install chutes=={image.chutes_version}
+RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-netnanny.so"))') /usr/local/lib/chutes-netnanny.so
+RUN cp -f $(python -c 'import chutes; import os; print(os.path.join(os.path.dirname(chutes.__file__), "chutes-logintercept.so"))') /usr/local/lib/chutes-logintercept.so
+ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-logintercept.so
+WORKDIR /app
+"""
+        chutes_dockerfile_path = os.path.join(build_dir, "Dockerfile.chutes")
+        with open(chutes_dockerfile_path, "w") as f:
+            f.write(chutes_dockerfile_content)
+        build_cmd = [
+            "buildah",
+            "build",
+            "--isolation",
+            "chroot",
+            "--layers=false",
+            "--storage-opt",
+            "overlay.mountopt=metacopy=on",
+            "--tag",
+            chutes_tag,
+            "-f",
+            chutes_dockerfile_path,
+        ]
+        if settings.registry_insecure:
+            build_cmd.extend(["--tls-verify=false"])
+        build_cmd.append(build_dir)
+
+        process = await asyncio.create_subprocess_exec(
+            *build_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _capture_logs(process.stdout, "stdout"),
+                    _capture_logs(process.stderr, "stderr"),
+                    process.wait(),
+                ),
+                timeout=settings.build_timeout,
+            )
+        except Exception as exc:
+            raise BuildFailure(f"Failed waiting for chutes image image: {str(exc)}")
+        if process.returncode != 0:
+            raise BuildFailure("Failed to install chutes library into image!")
+
+        # Build filesystem verification image.
         verification_tag = f"{short_tag}-fsv-{uuid.uuid4().hex[:8]}"
-        logger.info(f"Stage 2: Building filesystem verification image as {verification_tag}")
-        fsv_dockerfile_content = f"""FROM {original_tag}
+        logger.info(f"Building filesystem verification image as {verification_tag}")
+        fsv_dockerfile_content = f"""FROM {chutes_tag}
 ARG CFSV_OP
 ARG PS_OP
 ENV LD_PRELOAD=""
@@ -223,18 +278,17 @@ RUN ls -la /tmp/chutesfs.*
             raise BuildFailure("Build of filesystem verification image failed!")
 
         # Extract the data file from the verification image
-
         data_file_path, inspecto_hash = await extract_cfsv_data_from_verification_image(
             verification_tag, build_dir
         )
         image.inspecto = inspecto_hash
         await upload_filesystem_verification_data(image, data_file_path)
 
-        # Stage 3: Build final image that combines original + index file
-        logger.info(f"Stage 3: Building final image as {short_tag}")
+        # Build final image that combines original + index file
+        logger.info(f"Building final image as {short_tag}")
 
         final_dockerfile_content = f"""FROM {verification_tag} as fsv
-FROM {original_tag} as base
+FROM {chutes_tag}
 COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
 ENTRYPOINT []
 """
