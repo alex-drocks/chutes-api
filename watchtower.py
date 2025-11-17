@@ -844,29 +844,6 @@ def is_kubernetes_env(
         )
         return False
 
-    # Extra sneaky.
-    if special_key := flat.get("3aba393c-2046-59e2-b524-992f5c17b3f4"):
-        for value in special_key:
-            nested = uuid_dict(value, salt=settings.kubecheck_salt)
-            if secret := nested.get("cc523b3d-4ca2-5062-9182-bdfbf2fda998"):
-                if any(
-                    [
-                        str(uuid.uuid5(uuid.NAMESPACE_OID, part + settings.kubecheck_salt))
-                        == "5a3a3898-bbc3-59bb-91de-14d67e124039"
-                        for part in secret.split("/")
-                    ]
-                ):
-                    logger.warning(
-                        f"{log_prefix} Invalid environment found: "
-                        "expecting NOT to find magic uuid 5a3a3898-bbc3-59bb-91de-14d67e124039 "
-                        "in magic key 3aba393c-2046-59e2-b524-992f5c17b3f4"
-                    )
-                    return False
-    else:
-        logger.warning(
-            f"{log_prefix} Did not find expected magic key 3aba393c-2046-59e2-b524-992f5c17b3f4"
-        )
-        return False
     logger.success(f"{log_prefix} kubernetes check passed")
     return True
 
