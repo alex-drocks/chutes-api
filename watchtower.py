@@ -771,10 +771,10 @@ def is_kubernetes_env(
         if bad:
             logger.warning(f"{log_prefix} Invalid environment found: PYTHON env override(s): {bad}")
             return False
-    if semcomp(instance.chutes_version or "0.0.0", "0.3.49") >= 0:
-        if not re.match(
-            r"^[^:]+/chutes-logintercept.so:/usr/local/lib/chutes-netnanny.so",
-            dump["env"].get("LD_PRELOAD"),
+    if semcomp(instance.chutes_version or "0.0.0", "0.3.61") >= 0:
+        if (
+            dump["env"].get("LD_PRELOAD")
+            != "/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-logintercept.so"
         ):
             logger.warning(f"{log_prefix} Invalid environment found: LD_PRELOAD tampering")
             return False
@@ -892,7 +892,8 @@ async def check_sglang(instance_id: str, chute: Chute, dump: dict, log_prefix: s
     found_sglang = False
     sglang_process = None
     for process in processes:
-        clean_exe = re.sub(r"([^ ]+/)?python3?(\.[0-9]+)?", "python", process["exe"].strip())
+        target_exe = process["exe"] if process["exe"].strip() else process["cmdline"].split(" ")[0]
+        clean_exe = re.sub(r"([^ ]+/)?python3?(\.[0-9]+)?", "python", target_exe)
         if (
             clean_exe in ["python", "python3.10", "python3.11", "python3.12"]
             and process["username"] == "chutes"
@@ -920,7 +921,7 @@ async def check_sglang(instance_id: str, chute: Chute, dump: dict, log_prefix: s
                 break
 
     if not found_sglang:
-        logger.error(f"{log_prefix} did not find SGLang process, bad...")
+        logger.error(f"{log_prefix} did not find SGLang process, bad: {processes=}")
         return False
 
     # Track the process.
