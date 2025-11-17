@@ -947,11 +947,6 @@ async def hostname_invocation(
         if model in ("moonshotai/Kimi-K2-Instruct", "moonshotai/Kimi-K2-Instruct-75k"):
             payload["model"] = "moonshotai/Kimi-K2-Instruct-0905"
 
-        # XXX Temp workaround to force strict tool use for kimi-k2-thinking.
-        if model == "moonshotai/Kimi-K2-Thinking":
-            if payload.get("tools") and not payload.get("tool_choice"):
-                payload["tool_choice"] = "required"
-
         # GLM-4.5V
         if model.lower() == "zai-org/glm-4.5v-fp8":
             payload["model"] = "zai-org/GLM-4.5V"
