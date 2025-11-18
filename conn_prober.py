@@ -37,7 +37,7 @@ async def _post_connectivity(instance: Instance, endpoint: str) -> Dict[str, Any
         instance.miner_hotkey,
         url,
         payload,
-        timeout=15.0,
+        timeout=30.0,
     ) as resp:
         resp.raise_for_status()
         return await resp.json()
@@ -88,6 +88,7 @@ async def _hard_delete_instance(session, instance: Instance, reason: str) -> Non
         f"🛑 HARD FAIL (egress policy violation): deleting {instance.instance_id=} "
         f"{instance.miner_hotkey=} {instance.chute_id=} {chute.name=} {chute.chute_id=}. Reason: {reason}"
     )
+    return
     await session.delete(instance)
     await session.execute(
         text(
