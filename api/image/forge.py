@@ -727,7 +727,6 @@ async def get_target_image_id() -> str | None:
             )
             .values(
                 status="building",
-                updated_at=func.now(),
             )
             .returning(Image.image_id)
             .execution_options(synchronize_session=False)
@@ -1209,8 +1208,8 @@ async def main():
         image_id = None
         try:
             image_id = await asyncio.wait_for(get_target_image_id(), 10)
-        except Exception:
-            ...
+        except Exception as exc:
+            logger.error(f"Failed to fetch image: {str(exc)}\n{traceback.format_exc()}")
         if not image_id:
             await asyncio.sleep(10)
             continue
