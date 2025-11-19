@@ -871,27 +871,26 @@ async def check_sglang(instance_id: str, chute: Chute, dump: dict, log_prefix: s
     for process in processes:
         target_exe = process["exe"] if process["exe"].strip() else process["cmdline"].split(" ")[0]
         clean_exe = re.sub(r"([^ ]+/)?python3?(\.[0-9]+)?", "python", target_exe)
+        cmdline = re.sub(r"([^ ]+/)?python3?(\.[0-9]+)?", "python", process["cmdline"])
         if (
             clean_exe in ["python", "python3.10", "python3.11", "python3.12"]
             and process["username"] == "chutes"
-            and process["cmdline"].startswith(
+            and cmdline.startswith(
                 f"python -m sglang.launch_server --host 127.0.0.1 --port 10101 --model-path {model_name}"
             )
         ):
             if semcomp(chute.chutes_version or "0.0.0", "0.3.48") >= 0:
-                if "--enable-cache-report" not in process["cmdline"]:
-                    logger.warning(f"Cache report not enabled: {process['cmdline']}")
-                elif "--enable-return-hidden-states" not in process["cmdline"]:
-                    logger.warning(f"Hidden states return not enabled: {process['cmdline']}")
+                if "--enable-cache-report" not in cmdline:
+                    logger.warning(f"Cache report not enabled: {cmdline}")
+                elif "--enable-return-hidden-states" not in cmdline:
+                    logger.warning(f"Hidden states return not enabled: {cmdline}")
                 else:
                     found_sglang = True
             else:
                 found_sglang = True
-            if revision and revision not in process["cmdline"]:
+            if revision and revision not in cmdline:
                 found_sglang = False
-                logger.warning(
-                    f"Did not find model revision in SGLang command: {process['cmdline']}"
-                )
+                logger.warning(f"Did not find model revision in SGLang command: {cmdline}")
             if found_sglang:
                 logger.success(f"{log_prefix} found valid SGLang chute: {process=}")
                 sglang_process = process
