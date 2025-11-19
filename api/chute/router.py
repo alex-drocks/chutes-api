@@ -993,12 +993,12 @@ async def _deploy_chute(
     # Only allow newer SGLang versions for affine.
     if "/affine" in chute_args.name.lower():
         if (
-            not image_supports_cllmv(image, min_version=2025111500)
+            not image_supports_cllmv(image, min_version=2025111900)
             or image.user_id != await chutes_user_id()
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Must use image="chutes/sglang:nightly-2025111500" (or more recent dated versions) for affine deployments.',
+                detail='Must use image="chutes/sglang:nightly-2025111900" (or more recent dated versions) for affine deployments.',
             )
 
     # Prevent deploying images with old chutes SDK versions.
