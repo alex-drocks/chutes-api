@@ -28,7 +28,7 @@ from api.exceptions import (
 )
 from api.image.schemas import Image
 from api.chute.schemas import Chute, RollingUpdate
-from sqlalchemy import func, text
+from sqlalchemy import func, text, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.future import select
 from api.database import orms  # noqa
@@ -707,6 +707,37 @@ async def upload_filesystem_verification_data(image, data_file_path: str):
     logger.success(f"Uploaded filesystem verification data to {s3_key}")
 
 
+async def get_target_image_id() -> str | None:
+    """
+    Get the image_id to build, ensuring no other processes can lock this same image_id.
+    """
+    async with get_session() as session:
+        subquery = (
+            select(Image.image_id)
+            .where(Image.status == "pending build")
+            .order_by(Image.created_at.asc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        stmt = (
+            update(Image)
+            .where(
+                Image.image_id == subquery,
+                Image.status == "pending build",
+            )
+            .values(
+                status="building",
+                updated_at=func.now(),
+            )
+            .returning(Image.image_id)
+            .execution_options(synchronize_session=False)
+        )
+        result = await session.execute(stmt)
+        image_id = result.scalar_one_or_none()
+        await session.commit()
+        return image_id
+
+
 async def forge(image_id: str):
     """
     Build an image and push it to the registry.
@@ -1175,19 +1206,11 @@ async def main():
     await initialize()
 
     while True:
-        async with get_session() as session:
-            image_id = (
-                (
-                    await session.execute(
-                        select(Image.image_id)
-                        .where(Image.status == "pending build")
-                        .order_by(Image.created_at.asc())
-                        .limit(1)
-                    )
-                )
-                .unique()
-                .scalar_one_or_none()
-            )
+        image_id = None
+        try:
+            image_id = await asyncio.wait_for(get_target_image_id(), 10)
+        except Exception:
+            ...
         if not image_id:
             await asyncio.sleep(10)
             continue

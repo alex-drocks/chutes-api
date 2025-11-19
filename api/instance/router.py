@@ -1575,13 +1575,37 @@ async def delete_instance(
         job.miner_terminated = True
         job.finished_at = func.now()
 
+    # Bounties are negated if an instance of a public chute is deleted with no other active instanes.
+    negate_bounty = False
+    if not instance.billed_to:
+        active_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(Instance)
+                .where(
+                    Instance.chute_id == instance.chute_id,
+                    Instance.instance_id != instance.instance_id,
+                    Instance.active.is_(True),
+                )
+            )
+        ).scalar_one()
+        if active_count == 0:
+            logger.warning(
+                f"Instance {instance.instance_id=} of {instance.miner_hotkey=} terminated without any other active instances, negating bounty!"
+            )
+            negate_bounty = True
+
     await db.delete(instance)
-    await db.execute(
-        text(
-            "UPDATE instance_audit SET deletion_reason = 'miner initialized' WHERE instance_id = :instance_id"
-        ),
-        {"instance_id": instance_id},
-    )
+
+    # Update instance audit table.
+    params = {"instance_id": instance_id}
+    sql = "UPDATE instance_audit SET deletion_reason = 'miner initialized'"
+    if negate_bounty:
+        sql += ", bounty = :bounty"
+        params["bounty"] = False
+    sql += " WHERE instance_id = :instance_id"
+    await db.execute(text(sql), params)
+
     await db.commit()
     await notify_deleted(instance)
 
