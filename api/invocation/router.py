@@ -383,13 +383,9 @@ async def _invoke(
             )
         request.state.free_invocation = True
 
-    # Check account quotas if not free/invoiced.
+    # Check account quotas if not free.
     quota_date = date.today()
-    if not (
-        current_user.has_role(Permissioning.free_account)
-        or current_user.has_role(Permissioning.invoice_billing)
-        or request.state.free_invocation
-    ):
+    if not (current_user.has_role(Permissioning.free_account) or request.state.free_invocation):
         quota = await InvocationQuota.get(current_user.user_id, chute.chute_id)
         key = await InvocationQuota.quota_key(current_user.user_id, chute.chute_id)
         cached = await settings.quota_client.get(key)

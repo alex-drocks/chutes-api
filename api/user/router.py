@@ -513,9 +513,7 @@ async def my_quotas(
     """
     Load quotas for the current user.
     """
-    if current_user.has_role(Permissioning.free_account) or current_user.has_role(
-        Permissioning.invoice_billing
-    ):
+    if current_user.has_role(Permissioning.free_account):
         return {}
     quotas = (
         (
@@ -644,9 +642,7 @@ async def chute_quota_usage(
     """
     Check the current quota usage for a chute.
     """
-    if current_user.has_role(Permissioning.free_account) or current_user.has_role(
-        Permissioning.invoice_billing
-    ):
+    if current_user.has_role(Permissioning.free_account):
         return {"quota": "unlimited", "used": 0}
     quota = await InvocationQuota.get(current_user.user_id, chute_id)
     key = await InvocationQuota.quota_key(current_user.user_id, chute_id)
