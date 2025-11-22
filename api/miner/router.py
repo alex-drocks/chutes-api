@@ -56,7 +56,9 @@ def model_to_dict(obj):
             data["code"] = "print('legacy placeholder')"
         data["preemptible"] = obj.preemptible
     if isinstance(obj, Image):
-        data["username"] = obj.user.username
+        data["username"] = obj.user.username.lower()
+        data["name"] = obj.name.lower()
+        data["tag"] = obj.tag.lower()
     if isinstance(data.get("seed"), Decimal):
         data["seed"] = int(data["seed"])
     data.pop("symmetric_key", None)

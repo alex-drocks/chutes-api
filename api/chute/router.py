@@ -719,7 +719,7 @@ async def get_chute_utilization(request: Request):
             item = dict(row)
             scale_value = await settings.redis_client.get(f"scale:{item['chute_id']}")
             target_count = int(scale_value) if scale_value else item.get("target_count", 0)
-            current_count = item.get("total_instance_count", 0)
+            current_count = item.get("active_instance_count", 0)
             item["scalable"] = current_count < target_count
             item["scale_allowance"] = max(0, target_count - current_count)
             item["avg_busy_ratio"] = item.get("utilization_1h", 0)
