@@ -258,5 +258,8 @@ class Settings(BaseSettings):
     # Nonce expiration (minutes)
     attestation_nonce_expiry: int = int(os.getenv("ATTESTATION_NONCE_EXPIRY", "10"))
 
+    # OpenRouter free usage settings.
+    or_free_user_id: str = os.getenv("OR_FREE_USER_ID", "replaceme")
+
 
 settings = Settings()

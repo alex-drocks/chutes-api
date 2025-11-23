@@ -359,6 +359,18 @@ async def _invoke(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                         detail="Free models limit reached for today - maintain >= $10 balance or upgrade subscription to pro to unlock more.",
                     )
+    elif current_user.user_id == settings.or_free_user_id:
+        if chute.chute_id not in [
+            "4fa0c7f5-82f7-59d1-8996-661bb778893d",
+            "aef797d4-f375-5beb-9986-3ad245947469",
+        ]:
+            logger.warning(
+                f"Attempt to invoke {chute.chute_id=} {chute.name=} from openrouter free account."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Invalid free model, please select from {settings.or_free_models} or chute with 100% discount.",
+            )
 
     # Check account balance.
     origin_ip = request.headers.get("x-forwarded-for", "").split(",")[0]

@@ -438,8 +438,10 @@ async def perform_autoscale(dry_run: bool = False):
             continue
 
         # XXX Manual configurations, just in case, e.g. here kimi-k2-tools on vllm with b200s.
-        if chute_id in LIMIT_OVERRIDES:
-            limit = LIMIT_OVERRIDES[chute_id]
+        if chute_id in LIMIT_OVERRIDES or (
+            info.public and info.max_instances and info.max_instances > 1
+        ):
+            limit = LIMIT_OVERRIDES.get(chute_id, info.max_instances)
             logger.warning(f"Setting manual override value to {chute_id=}: {limit=}")
             await settings.redis_client.set(f"scale:{chute_id}", limit, ex=3700)
             chute_target_counts[chute_id] = limit
