@@ -2,7 +2,7 @@
 Safer response class for user.
 """
 
-from typing import Optional
+from typing import Optional, Any
 from pydantic import BaseModel, computed_field
 from datetime import datetime
 from api.api_key.response import APIKeyCreationResponse
@@ -39,6 +39,7 @@ class SelfResponse(UserResponse):
     permissions_bitmask: int
     balance: Optional[float]
     netuids: Optional[list[int]]
+    quotas: Optional[list[dict[str, Any]]] = None
 
     @computed_field
     @property

@@ -13,6 +13,7 @@ from loguru import logger
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel
+from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Header, status, Request
 from fastapi.responses import HTMLResponse
 from api.database import get_db_session
@@ -213,6 +214,85 @@ async def admin_invoiced_user_list(
     for user in result.unique().scalars().all():
         ur = SelfResponse.from_orm(user)
         ur.balance = user.current_balance.effective_balance if user.current_balance else 0.0
+        users.append(ur)
+    return users
+
+
+@router.post("/batch_user_lookup")
+async def admin_batch_user_lookup(
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user()),
+):
+    if not current_user.has_role(Permissioning.billing_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action can only be performed by billing admin accounts.",
+        )
+    body = await request.json()
+    user_ids = body.get("user_ids") or []
+    if not isinstance(user_ids, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="`user_ids` must be a list.",
+        )
+    if not user_ids:
+        return []
+
+    # Fetch all requested users
+    user_query = select(User).where(User.user_id.in_(user_ids))
+    result = await db.execute(user_query)
+    db_users = result.unique().scalars().all()
+    if not db_users:
+        return []
+    users_by_id = {u.user_id: u for u in db_users}
+    ordered_users = [users_by_id[uid] for uid in user_ids if uid in users_by_id]
+    quota_query = select(InvocationQuota).where(
+        InvocationQuota.user_id.in_([u.user_id for u in db_users])
+    )
+    quota_result = await db.execute(quota_query)
+    all_quotas = quota_result.scalars().all()
+    quotas_by_user = defaultdict(list)
+    for q in all_quotas:
+        quotas_by_user[q.user_id].append(q)
+
+    users = []
+    for user in ordered_users:
+        ur = SelfResponse.from_orm(user)
+        ur.balance = (
+            user.current_balance.effective_balance
+            if getattr(user, "current_balance", None)
+            else 0.0
+        )
+        user_quota_entries = []
+        if user.has_role(Permissioning.free_account) or user.has_role(
+            Permissioning.invoice_billing
+        ):
+            user_quota_entries.append(
+                {
+                    "chute_id": None,
+                    "quota": "unlimited",
+                    "used": 0.0,
+                }
+            )
+        else:
+            for quota in quotas_by_user.get(user.user_id, []):
+                key = await InvocationQuota.quota_key(user.user_id, quota.chute_id)
+                used_raw = await settings.quota_client.get(key)
+                used = 0.0
+                try:
+                    used = float(used_raw or "0.0")
+                except (TypeError, ValueError):
+                    if used_raw is not None:
+                        await settings.quota_client.delete(key)
+                user_quota_entries.append(
+                    {
+                        "chute_id": quota.chute_id,
+                        "quota": quota.quota,
+                        "used": used,
+                    }
+                )
+        ur.quotas = user_quota_entries
         users.append(ur)
     return users
 

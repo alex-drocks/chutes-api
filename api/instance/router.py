@@ -1081,6 +1081,8 @@ async def activate_launch_config_instance(
                 status_code=status.HTTP_423_LOCKED,
                 detail=reason,
             )
+    elif chute.public:
+        await _check_scalable(db, chute, launch_config.miner_hotkey)
 
     # Activate the instance (and trigger tentative billing stop time).
     if not instance.active:

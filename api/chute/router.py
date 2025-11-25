@@ -904,12 +904,15 @@ async def _deploy_chute(
         if gpu not in ALLOW_INCLUDE:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Only these GPUs can be specified in the `include` field: {ALLOW_INCLUDE}",
+                detail=(
+                    f"Only these GPUs can be explicitly required in the `include` field: {ALLOW_INCLUDE}"
+                    "\nPlease remove the include field or update the list to be an allowed GPU"
+                ),
             )
-    if len(chute_args.node_selector.exclude or []) > 4:
+    if len(chute_args.node_selector.exclude or []) > 5:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Maximum of 4 GPUs can be included in the `exclude` field",
+            detail="Maximum of 5 GPUs can be included in the `exclude` field",
         )
 
     allowed_gpus = set(chute_args.node_selector.supported_gpus)
@@ -993,12 +996,12 @@ async def _deploy_chute(
     # Only allow newer SGLang versions for affine.
     if "/affine" in chute_args.name.lower():
         if (
-            not image_supports_cllmv(image, min_version=2025111900)
+            not image_supports_cllmv(image, min_version=2025111902)
             or image.user_id != await chutes_user_id()
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Must use image="chutes/sglang:nightly-2025111900" (or more recent dated versions) for affine deployments.',
+                detail='Must use image="chutes/sglang:nightly-2025111902" (or more recent dated versions) for affine deployments.',
             )
 
     # Prevent deploying images with old chutes SDK versions.
