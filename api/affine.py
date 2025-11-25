@@ -2,6 +2,7 @@
 Affine validation, to an extent anyways...
 """
 
+import re
 import ast
 
 # Super excessive limits.
@@ -456,6 +457,12 @@ def check_affine_code(code: str) -> tuple[bool, str]:
                                             return (
                                                 False,
                                                 "engine_args string cannot contain 'trust_remote_code' or 'trust-remote-code'",
+                                            )
+                                        space_re = re.search(r"(?<=\S)--", keyword.value.value)
+                                        if space_re:
+                                            return (
+                                                False,
+                                                f"engine_args appears to contain concatenated flags, please ensure there is a space added before {space_re.group(0)}",
                                             )
                             else:
                                 return (
