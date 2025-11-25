@@ -284,7 +284,7 @@ async def create_image(
                 detail="You must have a balance of >= $50 to create images.",
             )
 
-    image_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{username.lower()}/{name}:{tag}"))
+    image_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{username.lower()}/{name}:{tag}".lower()))
     query = select(
         exists().where(
             or_(
