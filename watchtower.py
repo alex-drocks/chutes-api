@@ -766,6 +766,7 @@ def is_kubernetes_env(
             "PYTHONWARNINGS",
             "HTTP_PROXY",
             "HTTPS_PROXY",
+            "HF_HUB_DISABLE_SSL_VERIFY",
         }
         bad = [key for key in dump["env"] if "python" in key.lower() and key.upper() not in exclude]
         if bad:
