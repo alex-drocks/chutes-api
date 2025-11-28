@@ -363,13 +363,14 @@ async def _invoke(
         if chute.chute_id not in [
             "4fa0c7f5-82f7-59d1-8996-661bb778893d",
             "aef797d4-f375-5beb-9986-3ad245947469",
+            "689d2caa-01c1-5de1-ba69-39c5398be0c6",
         ]:
             logger.warning(
                 f"Attempt to invoke {chute.chute_id=} {chute.name=} from openrouter free account."
             )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Invalid free model, please select from {settings.or_free_models} or chute with 100% discount.",
+                detail="Invalid free model, please select from the updated list of current chutes free models",
             )
 
     # Check account balance.
@@ -918,6 +919,7 @@ async def _invoke(
 async def hostname_invocation(
     request: Request,
     current_user: User = Depends(get_current_user(raise_not_found=False)),
+    include_in_schema=False,
 ):
     request.state.started_at = time.time()
 
