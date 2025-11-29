@@ -48,6 +48,7 @@ class PortMap(BaseModel):
     internal_port: int = Field(..., ge=22, le=65535)
     external_port: int = Field(..., ge=22, le=65535)
     proto: str = constr(pattern=r"^(tcp|udp|http)$")
+    default: Optional[bool] = Field(default=None)
 
 
 class LaunchConfigArgs(BaseModel):

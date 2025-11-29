@@ -61,6 +61,7 @@ class DiffusionInput(BaseModel):
     image_b64: Optional[list[str]] = Field(
         default=None, description="Base64 encoded images for image-to-image pipelines."
     )
+    true_cfg_scale: Optional[float] = Field(default=None, ge=0.0, le=10.0)
 
     class Config:
         extra = "forbid"

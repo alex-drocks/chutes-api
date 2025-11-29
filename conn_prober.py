@@ -88,7 +88,6 @@ async def _hard_delete_instance(session, instance: Instance, reason: str) -> Non
         f"🛑 HARD FAIL (egress policy violation): deleting {instance.instance_id=} "
         f"{instance.miner_hotkey=} {instance.chute_id=} {chute.name=} {chute.chute_id=}. Reason: {reason}"
     )
-    return
     await session.delete(instance)
     await session.execute(
         text(
@@ -158,18 +157,28 @@ async def check_instance_connectivity(
     try:
         await _verify_netnanny(instance, allow_egress)
         logger.success(f"🔒 netnanny challenge verified for {instance.instance_id=}")
-    except Exception as exc:
+    except RuntimeError as exc:
+        # RuntimeError means actual verification failure (hash mismatch, wrong egress setting, etc.)
+        # This is a hard fail - the miner is misreporting or tampering
         logger.error(
-            f"❌ netnanny verification failed for {instance.instance_id=}: {str(exc)}\n{traceback.format_exc()}"
+            f"❌ netnanny verification FAILED for {instance.instance_id=}: {str(exc)}\n{traceback.format_exc()}"
         )
         if delete_on_failure:
             async with get_session() as session:
-                # Treat as hard violation: miner is misreporting or hash invalid.
                 await _hard_delete_instance(
                     session,
                     instance,
                     f"Netnanny verification failed: {exc}",
                 )
+        return instance.instance_id, False
+    except Exception as exc:
+        # Other exceptions (timeouts, connection errors, etc.) are soft failures
+        logger.error(
+            f"❌ netnanny probe failed (connection/timeout) for {instance.instance_id=}: {str(exc)}\n{traceback.format_exc()}"
+        )
+        if delete_on_failure:
+            async with get_session() as session:
+                await _record_failure_or_delete(session, instance, hard_reason=None)
         return instance.instance_id, False
 
     random_test = _pick_random_connect_test()
@@ -201,7 +210,9 @@ async def check_instance_connectivity(
                     await _record_failure_or_delete(session, instance, hard_reason=None)
             return instance.instance_id, False
     else:
+        # Egress is supposed to be BLOCKED
         try:
+            # First verify proxy works (required connectivity)
             proxy_res = await _post_connectivity(instance, PROXY_URL)
             if not proxy_res.get("connection_established") or proxy_res.get("status_code") != 200:
                 raise RuntimeError(
@@ -209,21 +220,27 @@ async def check_instance_connectivity(
                     f"{proxy_res.get('connection_established')} status_code={proxy_res.get('status_code')} "
                     f"error={proxy_res.get('error')}"
                 )
+
+            # Now check that direct egress is properly blocked
+            # This is the ONLY case that should be a hard fail - if egress works when it shouldn't
             disallowed = [LBPING_URL, random_test]
-            bad_violation_reason = None
             for target in disallowed:
                 res = await _post_connectivity(instance, target)
                 conn = bool(res.get("connection_established"))
                 if conn:
+                    # THIS is an actual egress policy violation - hard fail immediately
                     bad_violation_reason = (
                         f"Egress disabled but connection_established is True for {target}"
                     )
-                    break
-            if bad_violation_reason:
-                if delete_on_failure:
-                    async with get_session() as session:
-                        await _hard_delete_instance(session, instance, bad_violation_reason)
-                return instance.instance_id, False
+                    logger.error(
+                        f"🚨 EGRESS POLICY VIOLATION: {instance.instance_id=} connected to {target} "
+                        f"when egress should be blocked"
+                    )
+                    if delete_on_failure:
+                        async with get_session() as session:
+                            await _hard_delete_instance(session, instance, bad_violation_reason)
+                    return instance.instance_id, False
+
             logger.success(
                 f"✅ egress blocked & verified for {instance.instance_id=} "
                 f"(proxy ok, direct outbound blocked with ENETUNREACH)"
@@ -235,12 +252,16 @@ async def check_instance_connectivity(
             return instance.instance_id, True
 
         except Exception as exc:
+            # Connection failures, timeouts, etc. are SOFT failures - not policy violations
+            # The instance might just be having network issues
             logger.error(
                 f"❌ egress-blocked probe failed for {instance.instance_id=}: {exc}\n"
                 f"{traceback.format_exc()}"
             )
-            async with get_session() as session:
-                await _record_failure_or_delete(session, instance, hard_reason=None)
+            if delete_on_failure:
+                async with get_session() as session:
+                    # Use soft failure with retry limit, NOT hard delete
+                    await _record_failure_or_delete(session, instance, hard_reason=None)
             return instance.instance_id, False
 
 

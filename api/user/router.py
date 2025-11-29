@@ -834,7 +834,9 @@ def _registration_response(user, fingerprint):
 
 
 @router.get("/name_check")
-async def check_username(username: str, db: AsyncSession = Depends(get_db_session)):
+async def check_username(
+    username: str, readonly: Optional[bool] = None, db: AsyncSession = Depends(get_db_session)
+):
     """
     Check if a username is valid and available.
     """
