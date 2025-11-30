@@ -93,7 +93,7 @@ async def _hard_delete_instance(session, instance: Instance, reason: str) -> Non
         text(
             "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
         ),
-        {"instance_id": instance.instance_id, "reason": reason},
+        {"instance_id": instance.instance_id, "reason": f"CONNPROBE: {reason}"},
     )
     await notify_deleted(instance, message=reason)
     await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)

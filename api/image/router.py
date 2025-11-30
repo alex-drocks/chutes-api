@@ -33,7 +33,7 @@ from api.config import settings
 from api.image.response import ImageResponse
 from api.image.util import get_image_by_id_or_name
 from api.pagination import PaginatedResponse
-from api.util import limit_images, semcomp
+from api.util import limit_images, semcomp, is_registered_to_integrated_subnet
 from api.permissions import Permissioning
 
 router = APIRouter()
@@ -275,14 +275,17 @@ async def create_image(
 
     # Make sure user has reasonable balance before allowing image creation.
     if not current_user.has_role(Permissioning.unlimited_dev):
-        effective_balance = (
-            current_user.current_balance.effective_balance if current_user.current_balance else 0.0
-        )
-        if effective_balance < 50.0:
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail="You must have a balance of >= $50 to create images.",
+        if not await is_registered_to_integrated_subnet(db, current_user):
+            effective_balance = (
+                current_user.current_balance.effective_balance
+                if current_user.current_balance
+                else 0.0
             )
+            if effective_balance < 50.0:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail="You must have a balance of >= $50 to create images.",
+                )
 
     image_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{username.lower()}/{name}:{tag}".lower()))
     query = select(

@@ -29,7 +29,7 @@ from api.config import settings
 from async_lru import alru_cache
 from urllib.parse import urlparse
 from sqlalchemy.future import select
-from api.constants import VLM_MAX_SIZE, MIN_REG_BALANCE
+from api.constants import VLM_MAX_SIZE, MIN_REG_BALANCE, INTEGRATED_SUBNETS
 from api.metasync import MetagraphNode
 from api.permissions import Permissioning
 from fastapi import Request, status, HTTPException
@@ -190,6 +190,27 @@ async def is_registered_to_subnet(session, user, netuid):
         )
     )
     return result.scalar()
+
+
+async def is_registered_to_integrated_subnet(session, user):
+    """
+    Check if a user is registered to an integrated subnet.
+    """
+    integrated_netuids = [info["netuid"] for info in INTEGRATED_SUBNETS.values()]
+    if not integrated_netuids:
+        return False
+    query = await session.execute(
+        select(
+            exists(
+                select(1).where(
+                    MetagraphNode.netuid.in_(integrated_netuids),
+                    MetagraphNode.hotkey == user.hotkey,
+                )
+            )
+        )
+    )
+    result = await session.execute(query)
+    return bool(result.scalar_one())
 
 
 async def _limit_dev_activity(session, user, maximum, clazz):
