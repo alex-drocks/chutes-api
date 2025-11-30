@@ -10,6 +10,7 @@ import time
 import orjson as json
 import aiohttp
 from loguru import logger
+from pydantic import Field
 from slugify import slugify
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -19,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert
-from typing import Optional
+from typing import Optional, Annotated
 from api.chute.schemas import (
     Chute,
     ChuteArgs,
@@ -74,7 +75,6 @@ from api.util import (
     image_supports_cllmv,
 )
 from api.affine import check_affine_code
-from api.util import memcache_get, memcache_set
 from api.guesser import guesser
 from api.graval_worker import handle_rolling_update
 
@@ -343,8 +343,9 @@ async def list_chutes(
     exclude: Optional[str] = None,
     image: Optional[str] = None,
     slug: Optional[str] = None,
-    page: Optional[int] = 0,
-    limit: Optional[int] = 25,
+    page: Annotated[int, Field(ge=0, le=100)] = 0,
+    limit: Annotated[int, Field(ge=1, le=5000)] = 25,
+    offset: Annotated[int, Field(ge=0, le=5000)] = 0,
     include_schemas: Optional[bool] = False,
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user(purpose="chutes", raise_not_found=False)),
@@ -352,29 +353,12 @@ async def list_chutes(
     """
     List (and optionally filter/paginate) chutes.
     """
-    cache_key = str(
-        uuid.uuid5(
-            uuid.NAMESPACE_OID,
-            ":".join(
-                [
-                    "chutes_list",
-                    f"template:{template}",
-                    f"image:{image}",
-                    f"slug:{slug}",
-                    f"page:{page}",
-                    f"limit:{limit}",
-                    f"name:{name}",
-                    f"exclude:{exclude}",
-                    f"include_public:{include_public}",
-                    f"include_schemas:{include_schemas}",
-                    f"user:{current_user.user_id if current_user else None}",
-                ]
-            ),
+    if page and offset:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot specify both page and offset, select <= 1 of these.",
         )
-    ).encode()
-    cached = await memcache_get(cache_key)
-    if cached:
-        return json.loads(cached)
+
     query = select(Chute).options(selectinload(Chute.instances))
 
     # Filter by public and/or only the user's chutes.
@@ -419,12 +403,11 @@ async def list_chutes(
     total = total_result.scalar() or 0
 
     # Pagination.
-    query = (
-        query.order_by(Chute.invocation_count.desc())
-        .offset((page or 0) * (limit or 25))
-        .limit((limit or 25))
-    )
-
+    if not limit:
+        limit = 25
+    if not offset:
+        offset = (page or 0) * limit
+    query = query.order_by(Chute.invocation_count.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
     responses = []
     cord_refs = {}
@@ -452,7 +435,6 @@ async def list_chutes(
         "items": [item.model_dump() for item in responses],
         "cord_refs": cord_refs,
     }
-    await memcache_set(cache_key, json.dumps(result), exptime=60)
     return result
 
 
