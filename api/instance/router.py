@@ -39,6 +39,7 @@ from api.node.schemas import Node
 from api.payment.util import decrypt_secret
 from api.node.util import get_node_by_id
 from api.chute.schemas import Chute, NodeSelector
+from api.chute.util import is_shared
 from api.secret.schemas import Secret
 from api.image.schemas import Image  # noqa
 from api.instance.schemas import (
@@ -1491,7 +1492,10 @@ async def stream_logs(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Instance not found.",
         )
-    if instance.chute.user_id != current_user.user_id or instance.chute.public:
+    if (
+        instance.chute.user_id != current_user.user_id
+        and not await is_shared(instance.chute.chute_id, current_user.user_id)
+    ) or instance.chute.public:
         if not subnet_role_accessible(instance.chute, current_user, admin=True):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
