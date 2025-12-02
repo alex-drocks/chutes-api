@@ -462,9 +462,6 @@ async def _validate_launch_config_inspecto(
                                 fail_reason = f"inspecto verification failed: {payload}"
         if not inspecto_valid:
             logger.error(f"{log_prefix} has invalid inspecto verification: {fail_reason}")
-            if semcomp(chute.chutes_version, "0.4.0") >= 0:
-                logger.error(f"{log_prefix} skipping dev inspecto hash")
-                return
             launch_config.failed_at = func.now()
             launch_config.verification_error = "Failed inspecto environment/lib verification."
             await db.commit()
