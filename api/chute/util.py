@@ -312,15 +312,23 @@ async def get_chute_by_id_or_name(chute_id_or_name, db, current_user, load_insta
     return result.unique().scalar_one_or_none()
 
 
-@alru_cache(maxsize=100, ttl=30)
+@alru_cache(maxsize=100, ttl=60)
 async def chute_id_by_slug(slug: str):
     """
     Check if a chute exists with the specified slug (which is a subdomain for standard apps).
     """
+    cache_key = f"idbyslug:{slug}".lower()
+    cached = await memcache_get(cache_key)
+    if cached:
+        if isinstance(cached, bytes):
+            return cached.decode()
+        return cached
+
     async with get_session() as session:
         if chute_id := (
             await session.execute(select(Chute.chute_id).where(Chute.slug == slug))
         ).scalar_one_or_none():
+            await memcache_set(cache_key, chute_id, exptime=900)
             return chute_id
     return None
 

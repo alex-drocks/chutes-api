@@ -878,6 +878,10 @@ async def _deploy_chute(
     if chute_args.encrypted_fs is None:
         chute_args.encrypted_fs = False
 
+    # TEE mode.
+    if chute_args.tee is None:
+        chute_args.tee = False
+
     if not chute_args.node_selector:
         chute_args.node_selector = {"gpu_count": 1}
     if isinstance(chute_args.node_selector, dict):
@@ -1062,6 +1066,7 @@ async def _deploy_chute(
             else (chute_args.scaling_threshold or 0.75)
         )
         chute.allow_external_egress = allow_egress
+        chute.tee = chute_args.tee
         chute.encrypted_fs = chute.encrypted_fs and chute_args.encrypted_fs  # XX prevent changing
     else:
         try:
@@ -1106,6 +1111,7 @@ async def _deploy_chute(
                 else (chute_args.shutdown_after_seconds or 300),
                 allow_external_egress=allow_egress,
                 encrypted_fs=chute_args.encrypted_fs,
+                tee=chute_args.tee,
             )
         except ValueError as exc:
             raise HTTPException(

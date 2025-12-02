@@ -187,6 +187,7 @@ class ChuteArgs(BaseModel):
     shutdown_after_seconds: Optional[int] = Field(default=300, ge=60, le=604800)
     allow_external_egress: Optional[bool] = Field(default=False)
     encrypted_fs: Optional[bool] = Field(default=False)
+    tee: Optional[bool] = Field(default=False)
 
 
 class InvocationArgs(BaseModel):

@@ -43,7 +43,7 @@ async def load_chute_target_ids(chute_id: str, nonce: int) -> list[str]:
             cached = cached.decode()
         if not cached:
             return []
-        return cached.decode().split("|")
+        return cached.split("|")
 
     query = (
         select(Instance.instance_id)
@@ -702,6 +702,7 @@ RETURNING instances.instance_id;
         async with get_session() as session:
             await session.execute(text("SET LOCAL lock_timeout = '1s'"))
             await session.execute(text(query), {"instance_id": instance_id})
+            logger.success(f"Updated instance shutdown timestamp: {instance_id=}")
     except Exception as exc:
         logger.warning(f"Failed to push back instance shutdown time for {instance_id=}: {str(exc)}")
 
