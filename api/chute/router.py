@@ -907,7 +907,7 @@ async def _deploy_chute(
     # Fee estimate, as an error, if the user hasn't used the confirmed param.
     estimate = await chute_args.node_selector.current_estimated_price()
     deployment_fee = (
-        chute_args.node_selector.gpu_count * estimate["usd"]["hour"] * 3
+        estimate["usd"]["hour"] * 3
         if not current_user.has_role(Permissioning.free_account) and not chute
         else 0
     )

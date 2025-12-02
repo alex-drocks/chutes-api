@@ -192,25 +192,23 @@ async def is_registered_to_subnet(session, user, netuid):
     return result.scalar()
 
 
-async def is_registered_to_integrated_subnet(session, user):
+async def is_registered_to_integrated_subnet(session, user) -> bool:
     """
     Check if a user is registered to an integrated subnet.
     """
+    if not user or not getattr(user, "hotkey", None):
+        return False
     integrated_netuids = [info["netuid"] for info in INTEGRATED_SUBNETS.values()]
     if not integrated_netuids:
         return False
-    query = await session.execute(
-        select(
-            exists(
-                select(1).where(
-                    MetagraphNode.netuid.in_(integrated_netuids),
-                    MetagraphNode.hotkey == user.hotkey,
-                )
-            )
+    stmt = select(
+        exists().where(
+            MetagraphNode.netuid.in_(integrated_netuids),
+            MetagraphNode.hotkey == user.hotkey,
         )
     )
-    result = await session.execute(query)
-    return bool(result.scalar_one())
+    result = await session.execute(stmt)
+    return bool(result.scalar())
 
 
 async def _limit_dev_activity(session, user, maximum, clazz):

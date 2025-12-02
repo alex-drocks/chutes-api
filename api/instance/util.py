@@ -34,8 +34,17 @@ from cryptography.hazmat.primitives.asymmetric import ec
 InstanceAlias = aliased(Instance)
 
 
-@alru_cache(maxsize=1000, ttl=60)
+@alru_cache(maxsize=1000, ttl=30)
 async def load_chute_target_ids(chute_id: str, nonce: int) -> list[str]:
+    cache_key = f"inst_ids:{chute_id}:{nonce}"
+    cached = await memcache_get(cache_key)
+    if cached is not None:
+        if isinstance(cached, bytes):
+            cached = cached.decode()
+        if not cached:
+            return []
+        return cached.decode().split("|")
+
     query = (
         select(Instance.instance_id)
         .where(Instance.active.is_(True))
@@ -44,7 +53,9 @@ async def load_chute_target_ids(chute_id: str, nonce: int) -> list[str]:
     )
     async with get_session() as session:
         result = await session.execute(query)
-        return [row[0] for row in result.all()]
+        instance_ids = [row[0] for row in result.all()]
+        await memcache_set(cache_key, "|".join(instance_ids), exptime=60)
+        return instance_ids
 
 
 @alru_cache(maxsize=5000, ttl=300)
@@ -106,6 +117,7 @@ async def invalidate_instance_cache(chute_id, instance_id: str = None):
     load_chute_target_ids.cache_invalidate(chute_id, nonce=0)
     load_chute_targets.cache_invalidate(chute_id, nonce=0)
     load_chute_target.cache_invalidate(instance_id)
+    await memcache_delete(f"inst_ids:{chute_id}:0".encode())
     await memcache_delete(f"instance:{instance_id}".encode())
 
 
@@ -671,7 +683,7 @@ async def load_job_from_jwt(db, job_id: str, token: str, filename: str = None) -
     )
 
 
-async def update_shutdown_timestamp(instance_id: str):
+async def _update_shutdown_timestamp(instance_id: str):
     query = """
 WITH target AS (
     SELECT i.instance_id, COALESCE(c.shutdown_after_seconds, 300) AS shutdown_after_seconds
@@ -692,3 +704,18 @@ RETURNING instances.instance_id;
             await session.execute(text(query), {"instance_id": instance_id})
     except Exception as exc:
         logger.warning(f"Failed to push back instance shutdown time for {instance_id=}: {str(exc)}")
+
+
+async def update_shutdown_timestamp(instance_id: str):
+    key = f"shutdownlock:{instance_id}"
+    try:
+        acquired = await settings.redis_client.set(key, b"1", nx=True, ex=60)
+        if not acquired:
+            return
+        await _update_shutdown_timestamp(instance_id)
+    except Exception as exc:
+        logger.warning(f"Failed to push back instance shutdown time for {instance_id=}: {exc}")
+        try:
+            await settings.redis_client.delete(key)
+        except Exception:
+            pass
