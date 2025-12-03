@@ -29,6 +29,7 @@ from api.gpu import SUPPORTED_GPUS
 from api.database import get_db_session, generate_uuid, get_session
 from api.config import settings
 from api.constants import (
+    TEE_BONUS,
     HOTKEY_HEADER,
     AUTHORIZATION_HEADER,
     PRIVATE_INSTANCE_BONUS,
@@ -685,6 +686,14 @@ async def _validate_launch_config_instance(
     # Add chute boost.
     if chute.boost is not None and chute.boost > 0 and chute.boost <= 20:
         instance.compute_multiplier *= chute.boost
+
+    # Add TEE boost.
+    if chute.tee:
+        instance.compute_muliplier *= TEE_BONUS
+        logger.info(
+            f"Adding TEE instance bonus value {TEE_BONUS} to {instance.instance_id} "
+            f"for total {instance.compute_multiplier=} for {chute.name=} {chute.chute_id=}"
+        )
 
     db.add(instance)
 
