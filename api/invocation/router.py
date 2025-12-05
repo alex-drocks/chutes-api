@@ -1031,7 +1031,10 @@ async def hostname_invocation(
                 and model == "deepseek-ai/DeepSeek-V3.2-Speciale"
             ):
                 payload["chat_template_kwargs"]["thinking"] = True
-        elif model == "deepseek-ai/DeepSeek-V3.2-Speciale":
+        elif model in (
+            "deepseek-ai/DeepSeek-V3.2-Speciale",
+            "deepseek-ai/DeepSeek-V3.2-Speciale-TEE",
+        ):
             payload["chat_template_kwargs"] = {"thinking": True}
 
         # Auto tool choice default.
