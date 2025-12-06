@@ -116,9 +116,9 @@ class Settings(BaseSettings):
     )
     redis_password: str = str(os.getenv("REDIS_PASSWORD", "password"))
     redis_db: int = int(os.getenv("REDIS_DB", "0"))
-    redis_max_connections: int = int(os.getenv("REDIS_MAX_CONNECTIONS", 128))
+    redis_max_connections: int = int(os.getenv("REDIS_MAX_CONNECTIONS", 256))
     redis_connect_timeout: float = float(os.getenv("REDIS_CONNECT_TIMEOUT", "0.5"))
-    redis_socket_timeout: float = float(os.getenv("REDIS_SOCKET_TIMEOUT", "1.0"))
+    redis_socket_timeout: float = float(os.getenv("REDIS_SOCKET_TIMEOUT", "1.5"))
 
     _redis_client: Optional[redis.Redis] = None
     _cm_redis_clients: Optional[list[redis.Redis]] = None
@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     cm_redis_shard_count: int = int(os.getenv("CM_REDIS_SHARD_COUNT", "5"))
     cm_redis_start_port: int = int(os.getenv("CM_REDIS_START_PORT", "1700"))
     cm_redis_socket_timeout: float = float(os.getenv("CM_REDIS_SOCKET_TIMEOUT", "30.0"))
-    cm_redis_op_timeout: float = float(os.getenv("CM_REDIS_OP_TIMEOUT", "1.0"))
+    cm_redis_op_timeout: float = float(os.getenv("CM_REDIS_OP_TIMEOUT", "1.5"))
 
     @property
     def redis_url(self) -> str:
@@ -192,7 +192,7 @@ class Settings(BaseSettings):
     scan_timeout: int = int(os.getenv("SCAN_TIMEOUT", "7200"))
     netuid: int = int(os.getenv("NETUID", "64"))
     subtensor: str = os.getenv("SUBTENSOR_ADDRESS", "wss://entrypoint-finney.opentensor.ai:443")
-    payment_recovery_blocks: int = int(os.getenv("PAYMENT_RECOVERY_BLOCKS", "128"))
+    payment_recovery_blocks: int = int(os.getenv("PAYMENT_RECOVERY_BLOCKS", "256"))
     device_info_challenge_count: int = int(os.getenv("DEVICE_INFO_CHALLENGE_COUNT", "20"))
     skip_gpu_verification: bool = os.getenv("SKIP_GPU_VERIFICATION", "false").lower() == "true"
     graval_url: str = os.getenv("GRAVAL_URL", "https://graval.chutes.ai:11443")

@@ -141,6 +141,20 @@ ON CONFLICT (invocation_id, started_at)
 )
 
 
+async def update_usage_data(
+    user_id: str, chute_id: str, balance_used: float, metrics: dict
+) -> None:
+    pipeline = settings.redis_client.pipeline()
+    key = f"balance:{user_id}:{chute_id}"
+    pipeline.hincrbyfloat(key, "amount", balance_used)
+    pipeline.hincrby(key, "count", 1)
+    if metrics:
+        pipeline.hincrby(key, "input_tokens", metrics.get("it", 0))
+        pipeline.hincrby(key, "output_tokens", metrics.get("ot", 0))
+    pipeline.hset(key, "timestamp", int(time.time()))
+    await pipeline.execute()
+
+
 async def store_invocation(
     parent_invocation_id: str,
     invocation_id: str,
@@ -670,7 +684,9 @@ async def _invoke_one(
                             else:
                                 completion_tokens = claimed_completion_tokens
                     except Exception as exc:
-                        logger.warning(f"Error checking metrics: {exc}")
+                        logger.warning(
+                            f"Error checking metrics for {chute.chute_id=} {chute.name=}: {exc}"
+                        )
 
                 metrics["it"] = max(0, prompt_tokens or 0)
                 metrics["ot"] = max(0, completion_tokens or 0)
@@ -1165,18 +1181,14 @@ async def invoke(
                     balance_used = 0
 
                 # Ship the data over to usage tracker which actually deducts/aggregates balance/etc.
-                try:
-                    pipeline = settings.redis_client.pipeline()
-                    key = f"balance:{user_id}:{chute.chute_id}"
-                    pipeline.hincrbyfloat(key, "amount", balance_used)
-                    pipeline.hincrby(key, "count", 1)
-                    if chute.standard_template == "vllm" and metrics:
-                        pipeline.hincrby(key, "input_tokens", metrics.get("it", 0))
-                        pipeline.hincrby(key, "output_tokens", metrics.get("ot", 0))
-                    pipeline.hset(key, "timestamp", int(time.time()))
-                    await pipeline.execute()
-                except Exception as exc:
-                    logger.error(f"Error updating usage pipeline: {exc}")
+                asyncio.create_task(
+                    update_usage_data(
+                        user_id,
+                        chute.chute_id,
+                        balance_used,
+                        metrics if chute.standard_template == "vllm" else None,
+                    )
+                )
 
                 # Increment quota usage value.
                 if (
@@ -1190,7 +1202,7 @@ async def invoke(
                 ):
                     value = 1.0 if not reroll else settings.reroll_multiplier
                     key = await InvocationQuota.quota_key(user.user_id, chute.chute_id)
-                    await settings.redis_client.incrbyfloat(key, value)
+                    asyncio.create_task(settings.redis_client.incrbyfloat(key, value))
 
                 # For private chutes, push back the instance termination timestamp.
                 if (
@@ -1198,7 +1210,7 @@ async def invoke(
                     and not has_legacy_private_billing(chute)
                     and chute.user_id != await chutes_user_id()
                 ):
-                    await update_shutdown_timestamp(target.instance_id)
+                    asyncio.create_task(update_shutdown_timestamp(target.instance_id))
 
                 yield sse(
                     {

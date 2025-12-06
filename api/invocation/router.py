@@ -420,10 +420,8 @@ async def _invoke(
         elif quota_init:
             # Initialize the quota key with an expiration date (keys are daily)
             try:
-                pipe = settings.redis_client.pipeline()
-                pipe.incrbyfloat(key, 0.0)
-                pipe.expire(key, 25 * 60 * 60)
-                await pipe.execute()
+                await settings.redis_client.incrbyfloat(key, 0.0)
+                await settings.redis_client.expire(key, 25 * 60 * 60)
             except Exception as exc:
                 logger.error(f"Failed to initialize quota for {current_user.user_id=}: {str(exc)}")
 
@@ -640,13 +638,14 @@ async def _invoke(
             prompt_hash = str(uuid.uuid5(uuid.NAMESPACE_OID, prompt_hash_str)).replace("-", "")
             prompt_key = f"userreq:{current_user.user_id}{prompt_hash}"
             prompt_count = await settings.redis_client.incr(prompt_key)
-            await settings.redis_client.expire(prompt_key, 30 * 60)  # 30 minute re-roll clock.
-            if prompt_count and 1 < prompt_count < 15:
-                reroll = True
-            elif prompt_count > 15:
-                logger.warning(
-                    f"User seems to be spamming: {current_user.user_id=} {current_user.username=} {chute.chute_id=} {chute.name=} -- removing reroll flag for excessive use"
-                )
+            if prompt_count:
+                await settings.redis_client.expire(prompt_key, 30 * 60)  # 30 minute re-roll clock.
+                if prompt_count and 1 < prompt_count < 15:
+                    reroll = True
+                elif prompt_count > 15:
+                    logger.warning(
+                        f"User seems to be spamming: {current_user.user_id=} {current_user.username=} {chute.chute_id=} {chute.name=} -- removing reroll flag for excessive use"
+                    )
 
     except Exception as exc:
         logger.warning(f"Error updating request hash tracking: {exc}")
@@ -917,9 +916,9 @@ async def hostname_invocation(
         if model == "deepseek-ai/DeepSeek-R1-sgtest":
             payload["model"] = "deepseek-ai/DeepSeek-R1"
 
-        # Route 3.2-Speciale to TEE variant.
-        if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
-            payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
+        # # Route 3.2-Speciale to TEE variant.
+        # if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
+        #     payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
 
         # Disable logprobs for now on 3.2* models.
         if model in (

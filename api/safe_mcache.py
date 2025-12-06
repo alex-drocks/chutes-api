@@ -48,6 +48,8 @@ class SafeMemcached:
     def __getattr__(self, name: str) -> Callable[..., Any]:
         attr = getattr(self._client, name)
 
+        name_lower = name.lower()
+
         if not callable(attr):
             return attr
 
@@ -59,10 +61,16 @@ class SafeMemcached:
                         return await asyncio.wait_for(result, 0.5)
                     except FAIL_OPEN_EXCEPTIONS as exc:
                         logger.error(f"SafeMemcached fail-open on {name}(await): {exc}")
+                        if name_lower == "multi_get":
+                            keys = args[0] if args else []
+                            return [None] * len(keys)
                         return self.default
                 return result
             except FAIL_OPEN_EXCEPTIONS as exc:
                 logger.error(f"SafeMemcached fail-open on {name}(call): {exc}")
+                if name_lower == "multi_get":
+                    keys = args[0] if args else []
+                    return [None] * len(keys)
                 return self.default
 
         return safe_call
