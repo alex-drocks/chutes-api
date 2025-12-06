@@ -119,6 +119,9 @@ class Settings(BaseSettings):
     redis_max_connections: int = int(os.getenv("REDIS_MAX_CONNECTIONS", 512))
     redis_connect_timeout: float = float(os.getenv("REDIS_CONNECT_TIMEOUT", "1.5"))
     redis_socket_timeout: float = float(os.getenv("REDIS_SOCKET_TIMEOUT", "2.5"))
+    redis_op_timeout: float = float(
+        os.getenv("REDIS_OP_TIMEOUT", os.getenv("REDIS_SOCKET_TIMEOUT", "2.5"))
+    )
 
     _redis_client: Optional[redis.Redis] = None
     _cm_redis_clients: Optional[list[redis.Redis]] = None
@@ -142,6 +145,7 @@ class Settings(BaseSettings):
                 password=self.redis_password,
                 socket_connect_timeout=self.redis_connect_timeout,
                 socket_timeout=self.redis_socket_timeout,
+                op_timeout=self.redis_op_timeout,
                 max_connections=self.redis_max_connections,
                 socket_keepalive=True,
                 health_check_interval=30,

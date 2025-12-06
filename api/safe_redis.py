@@ -57,6 +57,19 @@ def is_pipeline(obj) -> bool:
     return hasattr(obj, "execute") and hasattr(obj, "command_stack")
 
 
+def pool_stats(pool) -> str:
+    """Return a lightweight snapshot of pool usage for diagnostics."""
+    try:
+        in_use = len(getattr(pool, "_in_use_connections", []))
+        available = len(getattr(pool, "_available_connections", []))
+        max_conns = getattr(pool, "_max_connections", None) or getattr(
+            pool, "max_connections", None
+        )
+        return f"in_use={in_use} available={available} max={max_conns}"
+    except Exception:
+        return "pool_stats_unavailable"
+
+
 def wrap_pipeline(pipe, default=None, timeout: float = 0.5):
     """Make pipeline.execute() fail-open."""
     orig_execute = pipe.execute
@@ -184,13 +197,26 @@ class SafeRedis:
 
                 async def safe_coro():
                     timeout = 30.0 if name_lower == "scan" else self.timeout
+                    loop = asyncio.get_running_loop()
+                    start = loop.time()
                     try:
-                        return await asyncio.wait_for(result, timeout)
+                        value = await asyncio.wait_for(result, timeout)
+                        elapsed = loop.time() - start
+                        if elapsed > 0.1:  # log only slow calls to keep noise down
+                            logger.debug(
+                                f"SafeRedis: slow call {name} elapsed={elapsed * 1000:.1f}ms "
+                                f"pool=({pool_stats(self.client.connection_pool)})"
+                            )
+                        return value
                     except FAIL_OPEN_EXCEPTIONS as exc:
+                        elapsed = loop.time() - start
                         error_detail = str(exc)
                         if not error_detail.strip():
                             error_detail = traceback.format_exc()
-                        logger.error(f"SafeRedis: fail-open on {name} (await): {error_detail}")
+                        logger.error(
+                            f"SafeRedis: fail-open on {name} (await): {error_detail} "
+                            f"elapsed={elapsed * 1000:.1f}ms pool=({pool_stats(self.client.connection_pool)})"
+                        )
                         return self.default
 
                 return safe_coro()
