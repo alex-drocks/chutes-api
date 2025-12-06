@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import traceback
 import concurrent.futures
 from typing import Any, Callable
 from loguru import logger
@@ -58,16 +59,22 @@ class SafeMemcached:
                 result = attr(*args, **kwargs)
                 if asyncio.iscoroutine(result):
                     try:
-                        return await asyncio.wait_for(result, 0.5)
+                        return await asyncio.wait_for(result, 2.5)
                     except FAIL_OPEN_EXCEPTIONS as exc:
-                        logger.error(f"SafeMemcached fail-open on {name}(await): {exc}")
+                        error_detail = str(exc)
+                        if not error_detail.strip():
+                            error_detail = traceback.format_exc()
+                        logger.error(f"SafeMemcached: fail-open on {name}(await): {error_detail}")
                         if name_lower == "multi_get":
                             keys = args[0] if args else []
                             return [None] * len(keys)
                         return self.default
                 return result
             except FAIL_OPEN_EXCEPTIONS as exc:
-                logger.error(f"SafeMemcached fail-open on {name}(call): {exc}")
+                error_detail = str(exc)
+                if not error_detail.strip():
+                    error_detail = traceback.format_exc()
+                logger.error(f"SafeMemcached: fail-open on {name}(call): {error_detail}")
                 if name_lower == "multi_get":
                     keys = args[0] if args else []
                     return [None] * len(keys)
@@ -79,4 +86,7 @@ class SafeMemcached:
         try:
             await self._client.close()
         except FAIL_OPEN_EXCEPTIONS as exc:
-            logger.warning(f"SafeMemcached close() fail-open: {exc}")
+            error_detail = str(exc)
+            if not error_detail.strip():
+                error_detail = traceback.format_exc()
+            logger.warning(f"SafeMemcached: close() fail-open: {error_detail}")

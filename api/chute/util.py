@@ -468,14 +468,16 @@ async def _invoke_one(
     if use_encryption_v2(target.chutes_version):
         if not target.symmetric_key:
             raise KeyExchangeRequired(f"Instance {target.instance_id} requires new symmetric key.")
-        payload = aes_encrypt(json.dumps(payload), target.symmetric_key)
+        payload = await asyncio.to_thread(aes_encrypt, json.dumps(payload), target.symmetric_key)
         iv = bytes.fromhex(payload[:32])
 
     # Encrypted paths?
     plain_path = path.lstrip("/").rstrip("/")
     if use_encrypted_path(target.chutes_version):
         path = "/" + path.lstrip("/")
-        encrypted_path = aes_encrypt(path.ljust(24, "?"), target.symmetric_key, hex_encode=True)
+        encrypted_path = await asyncio.to_thread(
+            aes_encrypt, path.ljust(24, "?"), target.symmetric_key, hex_encode=True
+        )
         path = encrypted_path
 
     session, response = None, None
@@ -535,7 +537,9 @@ async def _invoke_one(
             async for raw_chunk in response.content:
                 chunk = raw_chunk
                 if iv:
-                    chunk = aes_decrypt(raw_chunk, target.symmetric_key, iv)
+                    chunk = await asyncio.to_thread(
+                        aes_decrypt, raw_chunk, target.symmetric_key, iv
+                    )
 
                 # Track time to first token and (approximate) token count; approximate
                 # here because in speculative decoding multiple tokens may be returned.
@@ -718,7 +722,9 @@ async def _invoke_one(
                 # Encryption V2 always uses JSON, regardless of the underlying data type.
                 response_data = json.loads(body_bytes)
                 if "json" in response_data:
-                    plaintext = aes_decrypt(response_data["json"], target.symmetric_key, iv)
+                    plaintext = await asyncio.to_thread(
+                        aes_decrypt, response_data["json"], target.symmetric_key, iv
+                    )
                     if chute.standard_template == "vllm" and plaintext.startswith(
                         b'{"object":"error","message":"input_ids cannot be empty."'
                     ):
@@ -735,7 +741,9 @@ async def _invoke_one(
                         raise
                 else:
                     # Response was a file or other response object.
-                    plaintext = aes_decrypt(response_data["body"], target.symmetric_key, iv)
+                    plaintext = await asyncio.to_thread(
+                        aes_decrypt, response_data["body"], target.symmetric_key, iv
+                    )
                     headers = response_data["headers"]
                     data = {
                         "content_type": response_data.get(
@@ -1393,7 +1401,9 @@ async def load_llm_details(chute, target):
     """
     path = "/get_models"
     if use_encrypted_path(target.chutes_version):
-        path = aes_encrypt(path.ljust(24, "?"), target.symmetric_key, hex_encode=True)
+        path = await asyncio.to_thread(
+            aes_encrypt, path.ljust(24, "?"), target.symmetric_key, hex_encode=True
+        )
     payload = {
         "args": base64.b64encode(gzip.compress(pickle.dumps(tuple()))).decode(),
         "kwargs": base64.b64encode(gzip.compress(pickle.dumps({}))).decode(),
@@ -1402,7 +1412,7 @@ async def load_llm_details(chute, target):
     if use_encryption_v2(target.chutes_version):
         if not target.symmetric_key:
             raise KeyExchangeRequired(f"Instance {target.instance_id} requires new symmetric key.")
-        payload = aes_encrypt(json.dumps(payload), target.symmetric_key)
+        payload = await asyncio.to_thread(aes_encrypt, json.dumps(payload), target.symmetric_key)
         iv = bytes.fromhex(payload[:32])
 
     async with aiohttp.ClientSession(
@@ -1423,7 +1433,9 @@ async def load_llm_details(chute, target):
             info = (
                 raw_data
                 if not iv
-                else json.loads(aes_decrypt(raw_data["json"], target.symmetric_key, iv))
+                else json.loads(
+                    await asyncio.to_thread(aes_decrypt, raw_data["json"], target.symmetric_key, iv)
+                )
             )
             return info["data"][0]
 

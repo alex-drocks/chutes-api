@@ -240,6 +240,8 @@ class LeastConnManager:
             pipe.zcount(key, cutoff, now)
         try:
             counts = await pipe.execute()
+            if not counts:
+                return {iid: 0 for iid in instance_ids}
             return dict(zip(instance_ids, counts))
         except Exception as e:
             logger.error(f"Error getting connection counts: {e}")

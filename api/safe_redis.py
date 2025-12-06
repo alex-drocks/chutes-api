@@ -1,6 +1,7 @@
 import socket
 import asyncio
 import inspect
+import traceback
 import concurrent.futures
 from typing import Any, Optional
 from loguru import logger
@@ -64,7 +65,10 @@ def wrap_pipeline(pipe, default=None, timeout: float = 0.5):
         try:
             return await asyncio.wait_for(orig_execute(*args, **kwargs), timeout)
         except FAIL_OPEN_EXCEPTIONS as exc:
-            logger.error(f"SafeRedis: pipeline.execute fail-open: {exc}")
+            error_detail = str(exc)
+            if not error_detail.strip():
+                error_detail = traceback.format_exc()
+            logger.error(f"SafeRedis: pipeline.execute fail-open: {error_detail}")
             return []  # pipelines return lists normally
 
     pipe.execute = safe_execute
@@ -86,7 +90,10 @@ class SafeIterator:
         try:
             return next(self._it)
         except FAIL_OPEN_EXCEPTIONS as exc:
-            logger.error(f"SafeRedis iter fail-open: {exc}")
+            error_detail = str(exc)
+            if not error_detail.strip():
+                error_detail = traceback.format_exc()
+            logger.error(f"SafeRedis: iter fail-open: {error_detail}")
             self._failed = True
             raise StopIteration
 
@@ -106,7 +113,10 @@ class SafeAsyncIterator:
         try:
             return await self._it.__anext__()
         except FAIL_OPEN_EXCEPTIONS as exc:
-            logger.error(f"SafeRedis async-iter fail-open: {exc}")
+            error_detail = str(exc)
+            if not error_detail.strip():
+                error_detail = traceback.format_exc()
+            logger.error(f"SafeRedis: async-iter fail-open: {error_detail}")
             self._failed = True
             raise StopAsyncIteration
 
@@ -159,7 +169,10 @@ class SafeRedis:
             try:
                 result = attr(*args, **kwargs)
             except FAIL_OPEN_EXCEPTIONS as exc:
-                logger.error(f"SafeRedis fail-open on {name} (call): {exc}")
+                error_detail = str(exc)
+                if not error_detail.strip():
+                    error_detail = traceback.format_exc()
+                logger.error(f"SafeRedis: fail-open on {name} (call): {error_detail}")
                 if name_lower == "scan":
                     return (0, [])
                 return self.default
@@ -174,7 +187,10 @@ class SafeRedis:
                     try:
                         return await asyncio.wait_for(result, timeout)
                     except FAIL_OPEN_EXCEPTIONS as exc:
-                        logger.error(f"SafeRedis fail-open on {name} (await): {exc}")
+                        error_detail = str(exc)
+                        if not error_detail.strip():
+                            error_detail = traceback.format_exc()
+                        logger.error(f"SafeRedis: fail-open on {name} (await): {error_detail}")
                         return self.default
 
                 return safe_coro()

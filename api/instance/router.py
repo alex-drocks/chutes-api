@@ -355,9 +355,11 @@ async def _validate_launch_config_env(
     if "ENVDUMP_UNLOCK" in os.environ:
         code = None
         try:
-            dump = DUMPER.decrypt(launch_config.env_key, args.env)
+            dump = await asyncio.to_thread(DUMPER.decrypt, launch_config.env_key, args.env)
             if semcomp(chute.chutes_version or "0.0.0", "0.3.61") < 0:
-                code_data = DUMPER.decrypt(launch_config.env_key, args.code)
+                code_data = await asyncio.to_thread(
+                    DUMPER.decrypt, launch_config.env_key, args.code
+                )
                 code = base64.b64decode(code_data["content"]).decode()
         except Exception as exc:
             logger.error(
@@ -1185,7 +1187,9 @@ async def verify_port_map(instance, port_map):
             return False
 
         iv_hex, encrypted_response = response.split("|", 1)
-        decrypted = aes_decrypt(encrypted_response, instance.symmetric_key, iv_hex)
+        decrypted = await asyncio.to_thread(
+            aes_decrypt, encrypted_response, instance.symmetric_key, iv_hex
+        )
         expected = f"response from {port_map['proto'].lower()} {port_map['internal_port']}"
         return decrypted.decode() == expected
     except Exception as e:
@@ -1406,7 +1410,7 @@ async def verify_launch_config_instance(
     try:
         ciphertext = response_body["response"]
         iv = response_body["iv"]
-        response = aes_decrypt(ciphertext, instance.symmetric_key, iv)
+        response = await asyncio.to_thread(aes_decrypt, ciphertext, instance.symmetric_key, iv)
         assert response == f"secret is {launch_config.config_id} {launch_config.seed}".encode()
     except Exception as exc:
         reason = (

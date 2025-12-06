@@ -35,10 +35,8 @@ from api.chute.templates import (
     VLLMChuteArgs,
     VLLMEngineArgs,
     DiffusionChuteArgs,
-    TEIChuteArgs,
     build_vllm_code,
     build_diffusion_code,
-    build_tei_code,
 )
 from api.gpu import ALLOW_INCLUDE, SUPPORTED_GPUS
 from api.chute.response import ChuteResponse
@@ -1578,57 +1576,6 @@ async def easy_deploy_diffusion_chute(
         filename="chute.py",
         ref_str="chute:chute",
         standard_template="diffusion",
-        node_selector=node_selector,
-        cords=chute_to_cords(chute.chute),
-        jobs=[],
-    )
-    return await _deploy_chute(chute_args, db, current_user)
-
-
-@router.post("/tei", response_model=ChuteResponse)
-async def easy_deploy_tei_chute(
-    args: TEIChuteArgs,
-    db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user()),
-):
-    """
-    Easy/templated text-embeddings-inference deployment.
-    """
-    # XXX disabled
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Easy deployment is currently disabled!",
-    )
-
-    await limit_deployments(db, current_user)
-
-    image = await _find_latest_image(db, "tei")
-    image = f"chutes/{image.name}:{image.tag}"
-    code, chute = build_tei_code(args, current_user.username, image)
-    if (node_selector := args.node_selector) is None:
-        node_selector = NodeSelector(
-            gpu_count=1,
-            min_vram_gb_per_gpu=16,
-        )
-    node_selector.exclude = list(
-        set(
-            node_selector.exclude
-            or [] + ["h200", "b300", "b200", "h100", "h100_sxm", "h100_nvl", "h800", "mi300x"]
-        )
-    )
-
-    chute_args = ChuteArgs(
-        name=args.model,
-        image=image,
-        tagline=args.tagline,
-        readme=args.readme,
-        tool_description=args.tool_description,
-        logo_id=args.logo_id if args.logo_id and args.logo_id.strip() else None,
-        public=args.public,
-        code=code,
-        filename="chute.py",
-        ref_str="chute:chute",
-        standard_template="tei",
         node_selector=node_selector,
         cords=chute_to_cords(chute.chute),
         jobs=[],

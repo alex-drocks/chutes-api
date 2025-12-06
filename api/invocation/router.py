@@ -5,6 +5,7 @@ Invocations router.
 import re
 import base64
 import pickle
+import asyncio
 import gzip
 import orjson as json
 import csv
@@ -240,7 +241,8 @@ async def get_recent_export(
     writer = csv.writer(output)
     result = await db.execute(text(query), params)
     writer.writerow([col for col in result.keys()])
-    writer.writerows(result)
+    rows = result.fetchall()
+    await asyncio.to_thread(writer.writerows, rows)
     return Response(
         content=output.getvalue(),
         media_type="text/csv",
