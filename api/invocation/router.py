@@ -11,7 +11,6 @@ import csv
 import uuid
 import time
 import decimal
-import random
 import traceback
 from loguru import logger
 from pydantic import BaseModel, ValidationError, Field
@@ -979,8 +978,8 @@ async def hostname_invocation(
         if model == "deepseek-ai/DeepSeek-R1-sgtest":
             payload["model"] = "deepseek-ai/DeepSeek-R1"
 
-        # Route some of the 3.2-Speciale traffic to TEE variant.
-        if model == "deepseek-ai/DeepSeek-V3.2-Speciale" and random.random() <= 0.5:
+        # Route 3.2-Speciale to TEE variant.
+        if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
             payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
 
         # Disable logprobs for now on 3.2* models.
