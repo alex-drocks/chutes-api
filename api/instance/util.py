@@ -131,7 +131,7 @@ class LeastConnManager:
         concurrency: int,
         instances: list[Instance],
         connection_expiry: int = 600,
-        cleanup_interval: int = 5,
+        cleanup_interval: int = 30,
     ):
         self.concurrency = concurrency or 1
         self.chute_id = chute_id
@@ -189,15 +189,19 @@ class LeastConnManager:
         """
         Run cleanup continuously while CM is alive.
         """
+        lock_key = f"_cleanuplock:{self.chute_id}"
         while True:
             try:
-                await self._cleanup_expired_connections()
-                await asyncio.sleep(self.cleanup_interval)
+                if await self.redis_client.setnx(lock_key, "1"):
+                    await self._cleanup_expired_connections()
+                    await self.redis_client.delete(lock_key)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in cleanup loop: {e}", exc_info=True)
-                await asyncio.sleep(self.cleanup_interval)
+            finally:
+                await self.redis_client.expire(lock_key, self.cleanup_interval * 3)
+            await asyncio.sleep(self.cleanup_interval)
 
     async def _cleanup_expired_connections(self):
         now = int(time.time())
@@ -208,7 +212,10 @@ class LeastConnManager:
             total_removed = 0
             cursor = 0
             while True:
-                cursor, keys = await self.redis_client.scan(cursor, match=pattern, count=100)
+                res = await self.redis_client.scan(cursor, match=pattern, count=100)
+                if not res:
+                    break
+                cursor, keys = res
                 if keys:
                     pipe = self.redis_client.pipeline()
                     for key in keys:

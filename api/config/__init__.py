@@ -8,11 +8,16 @@ from pathlib import Path
 import aioboto3
 import aiomcache
 import json
+from api.safe_redis import SafeRedis
+from api.safe_mcache import SafeMemcached
 from functools import cached_property, lru_cache
 import redis.asyncio as redis
+from redis.retry import Retry
+from redis.backoff import NoBackoff
 from boto3.session import Config
 from typing import Dict, Optional
 from bittensor_wallet.keypair import Keypair
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from contextlib import asynccontextmanager
 from cryptography.hazmat.primitives import serialization
@@ -88,53 +93,94 @@ class Settings(BaseSettings):
 
     validator_ss58: Optional[str] = os.getenv("VALIDATOR_SS58")
     storage_bucket: str = os.getenv("STORAGE_BUCKET", "REPLACEME")
-    redis_url: str = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-    memcached_host: str = os.getenv("MEMCACHED", "memcached.chutes.svc.cluster.local")
+
+    # Base memcached settings.
+    memcached_host: str = Field(
+        default="172.16.0.100",
+        validation_alias="PRIMARY_MEMCACHED_HOST",
+    )
+    memcached_port: int = Field(
+        default=22122,
+        validation_alias="PRIMARY_MEMCACHED_PORT",
+    )
+    memcached_pool_size: int = int(os.getenv("MEMCACHED_POOL_SIZE", "128"))
+
+    # Base redis settings.
+    redis_host: str = Field(
+        default="172.16.0.100",
+        validation_alias="PRIMARY_REDIS_HOST",
+    )
+    redis_port: int = Field(
+        default=1600,
+        validation_alias="PRIMARY_REDIS_PORT",
+    )
+    redis_password: str = str(os.getenv("REDIS_PASSWORD", "password"))
+    redis_db: int = int(os.getenv("REDIS_DB", "0"))
+    redis_max_connections: int = int(os.getenv("REDIS_MAX_CONNECTIONS", 128))
+    redis_connect_timeout: float = float(os.getenv("REDIS_CONNECT_TIMEOUT", "0.5"))
+    redis_socket_timeout: float = float(os.getenv("REDIS_SOCKET_TIMEOUT", "1.0"))
 
     _redis_client: Optional[redis.Redis] = None
     _cm_redis_clients: Optional[list[redis.Redis]] = None
-    _quota_client: Optional[redis.Redis] = None
     _memcache: Optional[aiomcache.Client] = None
-    cm_redis_shard_count: int = int(os.getenv("CM_REDIS_SHARD_COUNT", "1"))
+    cm_redis_shard_count: int = int(os.getenv("CM_REDIS_SHARD_COUNT", "5"))
+    cm_redis_start_port: int = int(os.getenv("CM_REDIS_START_PORT", "1700"))
+    cm_redis_socket_timeout: float = float(os.getenv("CM_REDIS_SOCKET_TIMEOUT", "30.0"))
+    cm_redis_op_timeout: float = float(os.getenv("CM_REDIS_OP_TIMEOUT", "1.0"))
+
+    @property
+    def redis_url(self) -> str:
+        return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
     @property
     def redis_client(self) -> redis.Redis:
         if self._redis_client is None:
-            self._redis_client = redis.Redis.from_url(self.redis_url)
+            self._redis_client = SafeRedis(
+                host=self.redis_host,
+                port=self.redis_port,
+                db=self.redis_db,
+                password=self.redis_password,
+                socket_connect_timeout=self.redis_connect_timeout,
+                socket_timeout=self.redis_socket_timeout,
+                max_connections=self.redis_max_connections,
+                socket_keepalive=True,
+                health_check_interval=30,
+                retry_on_timeout=True,
+                retry=Retry(NoBackoff(), 2),
+            )
         return self._redis_client
 
     @property
     def cm_redis_client(self) -> list[redis.Redis]:
         if self._cm_redis_clients is None:
             self._cm_redis_clients = [
-                redis.Redis.from_url(
-                    self.redis_url.replace(
-                        "@redis.chutes.svc.cluster.local",
-                        f"@cm-redis-{idx}.chutes.svc.cluster.local",
-                    ),
-                    socket_timeout=10.0,
-                    socket_connect_timeout=3.0,
+                SafeRedis(
+                    host=self.redis_host,
+                    port=self.cm_redis_start_port + idx,
+                    db=self.redis_db,
+                    password=self.redis_password,
+                    socket_connect_timeout=self.redis_connect_timeout,
+                    socket_timeout=self.cm_redis_socket_timeout,
+                    op_timeout=self.cm_redis_op_timeout,
+                    max_connections=self.redis_max_connections,
                     socket_keepalive=True,
                     health_check_interval=30,
+                    retry_on_timeout=False,
+                    retry=None,
                 )
                 for idx in range(self.cm_redis_shard_count)
             ]
         return self._cm_redis_clients
 
     @property
-    def quota_client(self) -> redis.Redis:
-        if self._quota_client is None:
-            self._quota_client = redis.Redis.from_url(
-                self.redis_url.replace(
-                    "@redis.chutes.svc.cluster.local", "@quota-redis.chutes.svc.cluster.local"
-                )
-            )
-        return self._quota_client
-
-    @property
     def memcache(self) -> Optional[aiomcache.Client]:
-        if self._memcache is None and self.memcached_host:
-            self._memcache = aiomcache.Client(self.memcached_host, 11211, pool_size=4)
+        if self._memcache is None:
+            self._memcache = SafeMemcached(
+                host=self.memcached_host,
+                port=self.memcached_port,
+                pool_size=self.memcached_pool_size,
+                default=None,
+            )
         return self._memcache
 
     registry_host: str = os.getenv("REGISTRY_HOST", "registry:5000")
@@ -208,9 +254,6 @@ class Settings(BaseSettings):
     default_quotas: dict = json.loads(os.getenv("DEFAULT_QUOTAS", '{"*": 200}'))
     default_discounts: dict = json.loads(os.getenv("DEFAULT_DISCOUNTS", '{"*": 0.0}'))
     default_job_quotas: dict = json.loads(os.getenv("DEFAULT_JOB_QUOTAS", '{"*": 0}'))
-
-    # Quota unlock amount (requires replacing the trigger function to actually work though!)
-    quota_unlock_amount: float = float(os.getenv("QUOTA_UNLOCK_AMOUNT", "5.0"))
 
     # Reroll discount (i.e. duplicate prompts for re-roll in RP, or pass@k, etc.)
     reroll_multiplier: float = float(os.getenv("REROLL_MULTIPLIER", "0.1"))
