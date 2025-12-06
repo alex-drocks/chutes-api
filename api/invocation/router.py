@@ -642,7 +642,7 @@ async def _invoke(
             prompt_count = await settings.redis_client.incr(prompt_key)
             if prompt_count:
                 await settings.redis_client.expire(prompt_key, 30 * 60)  # 30 minute re-roll clock.
-                if prompt_count and 1 < prompt_count < 15:
+                if 1 < prompt_count <= 15:
                     reroll = True
                 elif prompt_count > 15:
                     logger.warning(
@@ -918,9 +918,9 @@ async def hostname_invocation(
         if model == "deepseek-ai/DeepSeek-R1-sgtest":
             payload["model"] = "deepseek-ai/DeepSeek-R1"
 
-        # # Route 3.2-Speciale to TEE variant.
-        # if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
-        #     payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
+        # Route 3.2-Speciale to TEE variant.
+        if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
+            payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
 
         # Disable logprobs for now on 3.2* models.
         if model in (
