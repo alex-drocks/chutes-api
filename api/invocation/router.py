@@ -348,7 +348,7 @@ async def _invoke(
                         tomorrow = datetime.combine(quota_date, datetime.min.time()) + timedelta(
                             days=1
                         )
-                        exp = max(int((tomorrow - datetime.now()).total_seconds()), 1)
+                        exp = max(int((tomorrow - datetime.now()).total_seconds()), 1)  # noqa
                 except Exception as exc:
                     logger.warning(
                         f"Error checking free usage for {current_user.user_id=}: {str(exc)}"
