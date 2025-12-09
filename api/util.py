@@ -626,7 +626,12 @@ async def recreate_vlm_payload(request_body: dict):
         )
     if futures:
         try:
+            started_at = time.time()
             await asyncio.gather(*futures)
+            logger.success(
+                f"finished recreate_vlm_payload(..) with {len(futures)} "
+                f"remote objects  in {time.time() - started_at} seconds"
+            )
         except Exception as exc:
             logger.error(
                 f"Failed to update images/videos to base64: {str(exc)}\n{traceback.format_exc()}"

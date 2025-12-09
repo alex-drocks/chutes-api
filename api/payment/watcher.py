@@ -1,3 +1,4 @@
+import gc
 import traceback
 import uuid
 import backoff
@@ -372,6 +373,7 @@ monitor = PaymentMonitor()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    gc.set_threshold(5000, 50, 50)
     logger.info("Inside the lifespan...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

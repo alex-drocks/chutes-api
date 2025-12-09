@@ -16,7 +16,7 @@ from api.chute.schemas import RollingUpdate, Chute
 from api.database import get_session
 from api.instance.schemas import Instance
 from api.instance.util import invalidate_instance_cache
-from api.util import aes_encrypt, notify_deleted, semcomp, load_shared_object
+from api.util import aes_encrypt, notify_deleted, semcomp
 from api.chute.util import get_one
 
 ENETUNREACH_TOKEN = "ENETUNREACH"

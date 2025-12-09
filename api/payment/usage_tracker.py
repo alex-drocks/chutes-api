@@ -3,6 +3,7 @@ Script to continuously pop microtransactions out of redis and
 update the actual database with usage data, deduct user balance.
 """
 
+import gc
 import time
 import asyncio
 import api.database.orms  # noqa
@@ -127,4 +128,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    gc.set_threshold(5000, 50, 50)
     asyncio.run(main())

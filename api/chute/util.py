@@ -213,7 +213,7 @@ async def get_miner_session(instance: Instance, timeout: int = 600) -> aiohttp.C
     """
     return aiohttp.ClientSession(
         base_url=f"http://{instance.host}:{instance.port}",
-        timeout=aiohttp.ClientTimeout(connect=5.0, total=timeout),
+        timeout=aiohttp.ClientTimeout(connect=10.0, total=timeout),
         read_bufsize=8 * 1024 * 1024,
     )
 
@@ -492,6 +492,10 @@ async def _invoke_one(
         timeout = 900
     try:
         session = await get_miner_session(target, timeout=timeout)
+        if random.random() <= 0.05 or chute.name.endswith("-TEE"):
+            logger.info(
+                f"Setting timeout to {timeout} for {chute.name=} and {plain_path=} with {target.chutes_version=}"
+            )
         headers, payload_string = sign_request(miner_ss58=target.miner_hotkey, payload=payload)
         if iv:
             headers["X-Chutes-Serialized"] = "true"
@@ -574,9 +578,10 @@ async def _invoke_one(
 
                     # CLLMV check.
                     if (
-                        (random.random() <= 0.05 or chunk_idx <= 5)
+                        (random.random() <= 0.01 or chunk_idx <= 4)
                         and image_supports_cllmv(chute.image)
                         and target.version == chute.version
+                        and not chute.tee
                         and chute.chute_id
                         not in (
                             "385aa551-6085-5c94-bda8-aa12609ef73b",
@@ -585,7 +590,7 @@ async def _invoke_one(
                             "f53ae961-7dcd-576f-badd-098f907d9bd2",
                             "110bf8d9-d07e-54dd-9c31-abe1a9919c7a",
                             "39d75699-957f-571f-8737-f2c72819d3e8",
-                            "689d2caa-01c1-5de1-ba69-39c5398be0c6",
+                            "3048cf8d-67de-5a6d-9fdd-18ac9c560c05",
                         )
                         and "model" in data
                         and not data.get("error")
@@ -795,6 +800,7 @@ async def _invoke_one(
                         image_supports_cllmv(chute.image)
                         and target.version == chute.version
                         and "model" in json_data
+                        and not chute.tee
                         and chute.chute_id
                         not in (
                             "385aa551-6085-5c94-bda8-aa12609ef73b",
@@ -803,7 +809,7 @@ async def _invoke_one(
                             "f53ae961-7dcd-576f-badd-098f907d9bd2",
                             "110bf8d9-d07e-54dd-9c31-abe1a9919c7a",
                             "39d75699-957f-571f-8737-f2c72819d3e8",
-                            "689d2caa-01c1-5de1-ba69-39c5398be0c6",
+                            "3048cf8d-67de-5a6d-9fdd-18ac9c560c05",
                         )
                     ):
                         verification_token = json_data.get("chutes_verification")
