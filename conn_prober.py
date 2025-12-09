@@ -1,3 +1,4 @@
+import gc
 import uuid
 import orjson as json
 import asyncio
@@ -23,7 +24,7 @@ REDIS_PREFIX = "conntestfail:"
 PROXY_URL = "https://proxy.chutes.ai/misc/proxy?url=ping"
 LBPING_URL = "https://api.chutes.ai/_lbping"
 
-NETNANNY = load_shared_object("chutes", "chutes-netnanny.so")
+NETNANNY = ctypes.CDLL("/usr/local/lib/chutes-nnverify.so")
 NETNANNY.verify.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
 NETNANNY.verify.restype = ctypes.c_int
 
@@ -311,4 +312,5 @@ async def check_connectivity_all(max_concurrent: int = 32) -> None:
 
 
 if __name__ == "__main__":
+    gc.set_threshold(5000, 50, 50)
     asyncio.run(check_connectivity_all())
