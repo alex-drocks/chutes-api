@@ -1,3 +1,4 @@
+import gc
 import re
 import os
 import uuid
@@ -1671,4 +1672,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    gc.set_threshold(5000, 50, 50)
     asyncio.run(main())

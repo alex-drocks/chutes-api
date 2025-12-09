@@ -1,3 +1,4 @@
+import gc
 import asyncio
 import traceback
 import api.database.orms  # noqa
@@ -115,4 +116,5 @@ async def check_logging_servers(max_concurrent: int = 32):
 
 
 if __name__ == "__main__":
+    gc.set_threshold(5000, 50, 50)
     asyncio.run(check_logging_servers())

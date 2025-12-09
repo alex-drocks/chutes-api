@@ -2,6 +2,7 @@
 Auto-scale chutes based on utilization.
 """
 
+import gc
 import os
 import asyncio
 import argparse
@@ -310,7 +311,7 @@ async def perform_autoscale(dry_run: bool = False):
     await instance_cleanup()
 
     # Cleanup the connections while we are at it...
-    conn_task = asyncio.create_task(cleanup_expired_connections())
+    await cleanup_expired_connections()
 
     logger.info(f"Fetching metrics from Prometheus and database... (dry_run={dry_run})")
     chute_metrics = await get_all_chute_metrics()
@@ -320,7 +321,6 @@ async def perform_autoscale(dry_run: bool = False):
         logger.warning(
             f"Only found {len(chute_metrics)} chutes total, need at least {MIN_CHUTES_FOR_SCALING}. Aborting."
         )
-        await conn_task
         return
     logger.info(f"Processing metrics for {len(chute_metrics)} chutes")
 
@@ -978,11 +978,11 @@ async def perform_autoscale(dry_run: bool = False):
     if instances_removed:
         logger.success(f"Scaled down, {instances_removed=} and {gpus_removed=}")
 
-    await conn_task
     return instances_removed
 
 
 if __name__ == "__main__":
+    gc.set_threshold(5000, 50, 50)
     parser = argparse.ArgumentParser(description="Auto-scale chutes based on utilization")
     parser.add_argument(
         "--dry-run",
