@@ -4,9 +4,11 @@ Main API entrypoint.
 
 import os
 import re
+import gc
 import asyncio
 import fickling
 import hashlib
+from loguru import logger
 from urllib.parse import quote
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, APIRouter, HTTPException, status, Response
@@ -39,14 +41,63 @@ from api.database import Base, engine, get_session
 from api.config import settings
 
 
+async def loop_lag_monitor(interval: float = 0.1, warn_threshold: float = 0.2):
+    """
+    Very lightweight event-loop lag monitor.
+    Produces *summary only* — no full stack traces.
+    """
+    loop = asyncio.get_running_loop()
+    last = loop.time()
+
+    ignored_task_str = (
+        "aiohttp",
+        "ClientSession",
+        "ClientResponse",
+        "TCPConnector",
+    )
+
+    def _should_ignore(task: asyncio.Task) -> bool:
+        r = repr(task)
+        return any(s in r for s in ignored_task_str)
+
+    while True:
+        await asyncio.sleep(interval)
+        now = loop.time()
+        lag = now - last - interval
+        last = now
+
+        if lag <= warn_threshold:
+            continue
+
+        ms = lag * 1000.0
+        tasks = [
+            t
+            for t in asyncio.all_tasks(loop)
+            if t is not asyncio.current_task(loop=loop) and not _should_ignore(t)
+        ]
+
+        # Group tasks by coroutine/function name (high-level signal)
+        summary = {}
+        for t in tasks:
+            coro = t.get_coro()
+            name = getattr(coro, "__qualname__", coro.__class__.__name__)
+            summary.setdefault(name, 0)
+            summary[name] += 1
+        logger.warning(f"Event loop lag: {ms:.1f}ms, task summary during lag: {summary}")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """
     Execute all initialization/startup code, e.g. ensuring tables exist and such.
     """
+    gc.set_threshold(5000, 50, 50)
+
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(max_workers=64)
     loop.set_default_executor(executor)
+
+    asyncio.create_task(loop_lag_monitor())
 
     # Prom multi-proc dir.
     os.makedirs("/tmp/prometheus_multiproc", exist_ok=True)
