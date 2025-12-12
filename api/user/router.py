@@ -296,6 +296,7 @@ async def admin_batch_user_lookup(
 
 @router.post("/admin_balance_change")
 async def admin_balance_change(
+    request: Request,
     balance_req: BalanceRequest,
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user()),
@@ -316,12 +317,35 @@ async def admin_balance_change(
         )
     user.balance += balance_req.amount
     event_id = str(uuid.uuid4())
+
+    origin_ip = request.headers.get("x-forwarded-for", "").split(",")[0]
+    raw_request_data = {}
+    try:
+        payload = await request.json()
+        raw_request_data = {
+            "source_ip": origin_ip,
+            "payload": payload,
+            "headers": {
+                k: v
+                for k, v in request.headers.items()
+                if k.lower() not in {"authorization", "x-api-key", "x-auth-token"}
+            },
+        }
+    except Exception as exc:
+        logger.error(f"Error gathering raw request data: {str(exc)}")
+    logger.warning(
+        f"admin_balance_change requested from {current_user.user_id=} "
+        f"{current_user.username=} {origin_ip=} {balance_req=} {event_id=}"
+    )
+
     event_data = AdminBalanceChange(
         event_id=event_id,
         user_id=user.user_id,
         amount=balance_req.amount,
         reason=balance_req.reason,
         timestamp=func.now(),
+        created_by=current_user.user_id,
+        raw_request=raw_request_data,
     )
     db.add(event_data)
     await db.commit()
