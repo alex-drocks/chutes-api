@@ -498,10 +498,6 @@ async def _invoke_one(
         timeout = 900
     try:
         session = await get_miner_session(target, timeout=timeout)
-        if random.random() <= 0.05 or chute.name.endswith("-TEE"):
-            logger.info(
-                f"Setting timeout to {timeout} for {chute.name=} and {plain_path=} with {target.chutes_version=}"
-            )
         headers, payload_string = sign_request(miner_ss58=target.miner_hotkey, payload=payload)
         if iv:
             headers["X-Chutes-Serialized"] = "true"

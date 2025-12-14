@@ -11,6 +11,7 @@ import orjson as json
 import csv
 import uuid
 import time
+import random
 import decimal
 import traceback
 from loguru import logger
@@ -913,8 +914,12 @@ async def hostname_invocation(
             payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
         elif model == "tngtech/TNG-R1T-Chimera":
             payload["model"] = "tngtech/TNG-R1T-Chimera-TEE"
-        if model == "zai-org/GLM-4.6":
+        elif model == "zai-org/GLM-4.6":
             payload["model"] = "zai-org/GLM-4.6-TEE"
+        elif model == "openai/gpt-oss-120b":
+            payload["model"] = "openai/gpt-oss-120b-TEE"
+        elif model == "deepseek-ai/DeepSeek-V3-0324" and random.random() <= 0.1:
+            payload["model"] = "deepseek-ai/DeepSeek-V3-0324-TEE"
 
         # Disable logprobs for now on 3.2* models.
         if model in (
