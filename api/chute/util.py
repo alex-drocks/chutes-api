@@ -580,7 +580,7 @@ async def _invoke_one(
 
                     # CLLMV check.
                     if (
-                        (random.random() <= 0.01 or chunk_idx <= 4)
+                        (random.random() <= 0.005 or chunk_idx <= 3)
                         and image_supports_cllmv(chute.image)
                         and target.version == chute.version
                         and not chute.tee

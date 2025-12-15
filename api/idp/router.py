@@ -255,21 +255,29 @@ async def get_app(
     current_user: User = Depends(get_current_user()),
 ):
     """Get details of an OAuth application."""
+    shared_app_ids = select(OAuthAppShare.app_id).where(
+        OAuthAppShare.shared_to == current_user.user_id
+    )
     app = (
         await db.execute(
             select(OAuthApp).where(
-                OAuthApp.app_id == app_id,
-                OAuthApp.user_id == current_user.user_id,
+                or_(
+                    OAuthApp.app_id == app_id,
+                    OAuthApp.client_id == app_id,
+                ),
+                or_(
+                    OAuthApp.user_id == current_user.user_id,
+                    OAuthApp.public.is_(True),
+                    OAuthApp.app_id.in_(shared_app_ids),
+                ),
             )
         )
     ).scalar_one_or_none()
-
     if not app:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Application not found",
         )
-
     return OAuthAppResponse.model_validate(app)
 
 

@@ -655,6 +655,11 @@ async def warm_up_chute(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Chute not found, or does not belong to you",
         )
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid authentication.",
+        )
     balance = (
         current_user.current_balance.effective_balance if current_user.current_balance else 0.0
     )
