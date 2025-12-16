@@ -4,6 +4,7 @@ Auto-scale chutes based on utilization.
 
 import gc
 import os
+import math
 import asyncio
 import argparse
 import random
@@ -52,7 +53,7 @@ PRICE_COMPATIBILITY_THRESHOLD = 0.67
 LIMIT_OVERRIDES = {}
 FAILSAFE = {
     "0d7184a2-32a3-53e0-9607-058c37edaab5": 20,
-    "579ca543-dda4-51d0-83ef-5667d1a5ed5f": 18,
+    "579ca543-dda4-51d0-83ef-5667d1a5ed5f": 16,
     "4fa0c7f5-82f7-59d1-8996-661bb778893d": 15,
     "0df3133d-c477-56d2-b4db-f2093bb150a1": 15,
     "d711f181-5b21-5169-a011-ccb472a1604f": 10,
@@ -548,16 +549,28 @@ async def perform_autoscale(dry_run: bool = False):
                 removal_percentage = 0.1 + (0.1 * (1 - utilization_basis / threshold))
             removal_percentage = min(removal_percentage, 0.4)
             num_to_remove = max(1, int(excess_instances * removal_percentage))
+
+            # Ensure post-removal utilization stays well below scale-up threshold to prevent flapping
+            # Use threshold * 0.75 as target ceiling for better hysteresis
+            target_utilization = threshold * 0.75
             post_removal_count = info.instance_count - num_to_remove
             post_removal_utilization = (
                 utilization_basis * info.instance_count
             ) / post_removal_count
-            if post_removal_utilization > threshold * 0.9:
+            if post_removal_utilization > target_utilization:
                 safe_count = max(
                     UNDERUTILIZED_CAP,
-                    int((utilization_basis * info.instance_count) / (threshold * 0.9)),
+                    math.ceil((utilization_basis * info.instance_count) / target_utilization),
                 )
-                num_to_remove = info.instance_count - safe_count
+                num_to_remove = max(info.instance_count - safe_count, 0)
+
+            # Final validation - never scale down if it would trigger scale-up
+            if num_to_remove > 0:
+                final_utilization = (utilization_basis * info.instance_count) / (
+                    info.instance_count - num_to_remove
+                )
+                if final_utilization >= threshold:
+                    num_to_remove = 0  # Abort scale-down to prevent flapping
 
             # Check failsafe minimum
             failsafe_min = FAILSAFE.get(chute_id, UNDERUTILIZED_CAP)
