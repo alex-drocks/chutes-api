@@ -1566,9 +1566,13 @@ async def get_user_info(
         .unique()
         .scalar_one_or_none()
     )
-    if not user or (
-        user.user_id != current_user.user_id
-        and not current_user.has_role(Permissioning.billing_admin)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+    if user.user_id != current_user.user_id and not current_user.has_role(
+        Permissioning.billing_admin
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
