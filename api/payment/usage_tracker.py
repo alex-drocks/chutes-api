@@ -17,14 +17,14 @@ from api.database import get_session
 
 async def process_balance_changes():
     current_time = int(time.time())
-    redis = settings.redis_client
+    redis = settings.redis_client.client
 
     # Fetch all pending payment data in redis.
     keys_to_process = []
     cursor = 0
     pattern = "balance:*"
     while True:
-        cursor, keys = await redis.scan(cursor, pattern, 100)
+        cursor, keys = await redis.scan(cursor, pattern, 1000)
         for key in keys:
             keys_to_process.append(key)
         if cursor == 0:

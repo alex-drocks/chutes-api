@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     )
 
     _redis_client: Optional[redis.Redis] = None
+    _lite_redis_client: Optional[redis.Redis] = None
     _cm_redis_clients: Optional[list[redis.Redis]] = None
     cm_redis_shard_count: int = int(os.getenv("CM_REDIS_SHARD_COUNT", "5"))
     cm_redis_start_port: int = int(os.getenv("CM_REDIS_START_PORT", "1700"))
@@ -139,6 +140,25 @@ class Settings(BaseSettings):
                 retry=Retry(ConstantBackoff(0.5), 2),
             )
         return self._redis_client
+
+    @property
+    def lite_redis_client(self) -> redis.Redis:
+        if self._lite_redis_client is None:
+            self._lite_redis_client = SafeRedis(
+                host=self.redis_host,
+                port=self.redis_port,
+                db=self.redis_db + 1,
+                password=self.redis_password,
+                socket_connect_timeout=self.redis_connect_timeout,
+                socket_timeout=self.redis_socket_timeout,
+                op_timeout=self.redis_op_timeout,
+                max_connections=self.redis_max_connections,
+                socket_keepalive=True,
+                health_check_interval=30,
+                retry_on_timeout=True,
+                retry=Retry(ConstantBackoff(0.5), 2),
+            )
+        return self._lite_redis_client
 
     @property
     def cm_redis_client(self) -> list[redis.Redis]:
