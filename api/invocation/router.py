@@ -918,7 +918,7 @@ async def hostname_invocation(
             payload["model"] = "zai-org/GLM-4.6-TEE"
         elif model == "openai/gpt-oss-120b":
             payload["model"] = "openai/gpt-oss-120b-TEE"
-        elif model == "deepseek-ai/DeepSeek-V3-0324" and random.random() <= 0.05:
+        elif model == "deepseek-ai/DeepSeek-V3-0324":
             payload["model"] = "deepseek-ai/DeepSeek-V3-0324-TEE"
 
         # Disable logprobs for now on 3.2* models.

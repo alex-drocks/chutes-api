@@ -52,14 +52,14 @@ PRICE_COMPATIBILITY_THRESHOLD = 0.67
 LIMIT_OVERRIDES = {}
 FAILSAFE = {
     "0d7184a2-32a3-53e0-9607-058c37edaab5": 20,
-    "579ca543-dda4-51d0-83ef-5667d1a5ed5f": 20,
-    "154ad01c-a431-5744-83c8-651215124360": 15,
+    "579ca543-dda4-51d0-83ef-5667d1a5ed5f": 18,
     "4fa0c7f5-82f7-59d1-8996-661bb778893d": 15,
     "0df3133d-c477-56d2-b4db-f2093bb150a1": 15,
-    "4bbc44e9-6bfc-5e21-a91d-129bff2fb6d4": 10,
     "d711f181-5b21-5169-a011-ccb472a1604f": 10,
     "39d75699-957f-571f-8737-f2c72819d3e8": 7,
-    "3048cf8d-67de-5a6d-9fdd-18ac9c560c05": 7,
+    "8f3bb827-b9e6-5487-88bc-ee8f0c6f5810": 6,
+    "3048cf8d-67de-5a6d-9fdd-18ac9c560c05": 5,
+    "4bbc44e9-6bfc-5e21-a91d-129bff2fb6d4": 5,
     "ae3b9d04-28fa-543a-9276-290da772dc23": 5,
     "8d008c10-60d3-51e8-9272-c428ed6ff576": 5,
     "aef797d4-f375-5beb-9986-3ad245947469": 5,

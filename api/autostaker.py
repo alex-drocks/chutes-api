@@ -251,11 +251,11 @@ async def stake(user_id: str) -> None:
     to chutes until the balance is zero, then burn all alpha.
     """
     try:
-        if not (await settings.redis_client.setnx(f"autostake:{user_id}", "1")):
+        if not (await settings.redis_client.client.setnx(f"autostake:{user_id}", "1")):
             logger.warning(f"Staking operation already in progress for {user_id=}")
             return
     finally:
-        await settings.redis_client.expire(f"autostake:{user_id}", 60 * 60)
+        await settings.redis_client.client.expire(f"autostake:{user_id}", 60 * 60)
 
     async with get_session() as session:
         user = (
@@ -265,7 +265,7 @@ async def stake(user_id: str) -> None:
         )
         if user is None:
             logger.warning(f"User {user_id} not found")
-            await settings.redis_client.delete(f"autostake:{user_id}")
+            await settings.redis_client.client.delete(f"autostake:{user_id}")
             return
 
     # Load the keypair.
@@ -304,7 +304,7 @@ async def stake(user_id: str) -> None:
                 logger.error(
                     f"Giving up staking, max consecutive failures reached for {user.user_id=} {keypair.ss58_address=}"
                 )
-                await settings.redis_client.delete(f"autostake:{user_id}")
+                await settings.redis_client.client.delete(f"autostake:{user_id}")
                 return
         await asyncio.sleep(12)
 
@@ -345,7 +345,7 @@ async def stake(user_id: str) -> None:
                 f"Failed to burn alpha after {max_burn_attempts} attempts for {user.user_id=}"
             )
 
-    await settings.redis_client.delete(f"autostake:{user_id}")
+    await settings.redis_client.client.delete(f"autostake:{user_id}")
     logger.info(f"Auto-staking and alpha burning completed for {user.user_id=}")
 
 
