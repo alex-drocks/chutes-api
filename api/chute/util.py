@@ -147,17 +147,28 @@ ON CONFLICT (invocation_id, started_at)
 
 
 async def update_usage_data(
-    user_id: str, chute_id: str, balance_used: float, metrics: dict
+    user_id: str, chute_id: str, balance_used: float, metrics: dict, compute_time: float = 0.0
 ) -> None:
-    pipeline = settings.redis_client.client.pipeline()
-    key = f"balance:{user_id}:{chute_id}"
-    pipeline.hincrbyfloat(key, "amount", balance_used)
-    pipeline.hincrby(key, "count", 1)
-    if metrics:
-        pipeline.hincrby(key, "input_tokens", metrics.get("it", 0))
-        pipeline.hincrby(key, "output_tokens", metrics.get("ot", 0))
-    pipeline.hset(key, "timestamp", int(time.time()))
-    await pipeline.execute()
+    """
+    Push usage data metrics to redis for async processing.
+
+    Uses compact format to minimize network/storage overhead:
+    - Short keys: u=user_id, c=chute_id, a=amount, i=input_tokens, o=output_tokens, t=compute_time, s=timestamp
+    - compute_time rounded to 4 decimal places (0.1ms precision)
+    - count omitted (always 1, handled by consumer)
+    """
+    record = json.dumps(
+        {
+            "u": user_id,
+            "c": chute_id,
+            "a": balance_used,
+            "i": metrics.get("it", 0) if metrics else 0,
+            "o": metrics.get("ot", 0) if metrics else 0,
+            "t": round(compute_time, 4),
+            "s": int(time.time()),
+        }
+    ).decode()
+    await settings.billing_redis_client.client.rpush("usage_queue", record)
 
 
 async def store_invocation(
@@ -1207,6 +1218,7 @@ async def invoke(
                         chute.chute_id,
                         balance_used,
                         metrics if chute.standard_template == "vllm" else None,
+                        compute_time=duration,
                     )
                 )
 
