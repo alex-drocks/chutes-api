@@ -149,7 +149,7 @@ ON CONFLICT (invocation_id, started_at)
 async def update_usage_data(
     user_id: str, chute_id: str, balance_used: float, metrics: dict
 ) -> None:
-    pipeline = settings.redis_client.pipeline()
+    pipeline = settings.redis_client.client.pipeline()
     key = f"balance:{user_id}:{chute_id}"
     pipeline.hincrbyfloat(key, "amount", balance_used)
     pipeline.hincrby(key, "count", 1)
