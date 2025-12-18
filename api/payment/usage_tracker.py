@@ -215,6 +215,8 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
     try:
         async with get_session() as session:
             # Batch upsert usage_data using unnest for efficiency
+            sorted_items = sorted(aggregated.items(), key=lambda x: (x[0][0], x[0][1]))
+
             # This does all inserts in a single query instead of N queries
             usage_params = [
                 {
@@ -227,7 +229,7 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
                     "output_tokens": m["o"],
                     "compute_time": m["t"],
                 }
-                for (user_id, chute_id), m in aggregated.items()
+                for (user_id, chute_id), m in sorted_items
             ]
 
             # Process in batches of 1000 to avoid query size limits
@@ -425,6 +427,8 @@ async def process_queue_items(redis, batch_size: int = 250) -> int:
                     if m["t"] != 0:
                         pipeline.hincrbyfloat(bucket_key, f"{field_prefix}:t", m["t"])
         await pipeline.execute()
+    if count < 10:
+        await asyncio.sleep(1)
 
     return count
 
