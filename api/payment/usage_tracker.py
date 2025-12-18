@@ -351,7 +351,7 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
         raise
 
 
-async def process_queue_items(redis, batch_size: int = 250) -> int:
+async def process_queue_items(redis, batch_size: int = 100) -> int:
     """
     Pop items from queue and increment their minute buckets.
     Uses batch processing and local aggregation to minimize Redis round trips.
@@ -427,13 +427,13 @@ async def process_queue_items(redis, batch_size: int = 250) -> int:
                     if m["t"] != 0:
                         pipeline.hincrbyfloat(bucket_key, f"{field_prefix}:t", m["t"])
         await pipeline.execute()
-    if count < 10:
+    if count < batch_size:
         await asyncio.sleep(1)
 
     return count
 
 
-async def process_usage_queue():
+async def process_usage_queue(batch_size: int = 100):
     """
     Main processing loop:
     1. On startup, process any completed minute buckets (recovery)
@@ -447,9 +447,9 @@ async def process_usage_queue():
     logger.info("Draining queue before recovery...")
     drained_total = 0
     while True:
-        drained = await process_queue_items(redis)
+        drained = await process_queue_items(redis, batch_size=batch_size)
         drained_total += drained
-        if drained == 0:
+        if drained < batch_size:
             break
 
     if drained_total > 0:
@@ -494,7 +494,7 @@ async def process_usage_queue():
                 last_minute_ts = current_minute_ts
 
             # Process any items in the queue
-            processed = await process_queue_items(redis)
+            processed = await process_queue_items(redis, batch_size=batch_size)
 
             if processed > 0:
                 logger.info(f"Processed {processed} queue items into minute buckets")
