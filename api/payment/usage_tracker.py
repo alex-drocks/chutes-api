@@ -349,7 +349,7 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
         raise
 
 
-async def process_queue_items(redis, batch_size: int = 100) -> int:
+async def process_queue_items(redis, batch_size: int = 250) -> int:
     """
     Pop items from queue and increment their minute buckets.
     Uses batch processing and local aggregation to minimize Redis round trips.
@@ -357,6 +357,18 @@ async def process_queue_items(redis, batch_size: int = 100) -> int:
     items = await redis.lpop(QUEUE_KEY, count=batch_size)
     if not items:
         return 0
+
+    # Calculate lag from the oldest item (first in list) and check remaining queue size
+    try:
+        first_record = json.loads(items[0])
+        ts = float(first_record.get("s", 0)) or time.time()
+        lag = time.time() - ts
+    except Exception as exc:
+        logger.error(f"Failed to determine queue lag: {str(exc)}")
+        lag = 0.0
+
+    remaining = await redis.llen(QUEUE_KEY)
+    logger.info(f"Popped {len(items)} items, queue {remaining=}, {lag=}s")
 
     # Local aggregation to minimize HINCRBY calls
     # minute_ts -> user_id -> chute_id -> metrics
