@@ -24,10 +24,13 @@ This gives us:
 """
 
 import gc
+import sys
 import time
 import asyncio
 import orjson as json
 import api.database.orms  # noqa
+import uvicorn
+from fastapi import FastAPI, Response, status
 from collections import defaultdict
 from sqlalchemy import text
 from loguru import logger
@@ -39,6 +42,37 @@ QUEUE_KEY = "usage_queue"
 BUCKET_PREFIX = "usage_pending"
 PROCESSING_PREFIX = "usage_processing"
 POLL_TIMEOUT = 5
+
+# Health check tracking
+last_heartbeat = time.time()
+metrics = {"queue_size": 0, "lag": 0.0}
+app = FastAPI()
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Kubernetes readiness/liveness probe.
+    Returns 503 if the main processing loop hasn't updated the heartbeat in > 60 seconds.
+    """
+    heartbeat_age = time.time() - last_heartbeat
+    status_code = status.HTTP_200_OK
+
+    if heartbeat_age > 60:
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return Response(
+        content=json.dumps(
+            {
+                "status": "ok" if status_code == 200 else "stalled",
+                "heartbeat_age": heartbeat_age,
+                "queue_size": metrics["queue_size"],
+                "lag": metrics["lag"],
+            }
+        ),
+        status_code=status_code,
+        media_type="application/json",
+    )
 
 
 def get_minute_ts(timestamp: int = None) -> int:
@@ -334,7 +368,9 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
                             "amounts": sorted_amounts,
                         },
                     )
-                    logger.info(f"Deducted balance from {len(chargeable)} users")
+                    logger.info(
+                        f"Deducted balance from {len(chargeable)} users, total=${sum(sorted_amounts)}"
+                    )
 
             await session.commit()
 
@@ -356,6 +392,8 @@ async def process_queue_items(redis, batch_size: int = 100) -> int:
     Pop items from queue and increment their minute buckets.
     Uses batch processing and local aggregation to minimize Redis round trips.
     """
+    global metrics
+
     items = await redis.lpop(QUEUE_KEY, count=batch_size)
     if not items:
         return 0
@@ -370,7 +408,12 @@ async def process_queue_items(redis, batch_size: int = 100) -> int:
         lag = 0.0
 
     remaining = await redis.llen(QUEUE_KEY)
-    logger.info(f"Popped {len(items)} items, queue {remaining=}, {lag=}s")
+
+    # Update global metrics
+    metrics["queue_size"] = remaining
+    metrics["lag"] = lag
+
+    logger.info(f"Popped {len(items)} items. Queue size: {remaining}. Head lag: {lag:.2f}s")
 
     # Local aggregation to minimize HINCRBY calls
     # minute_ts -> user_id -> chute_id -> metrics
@@ -397,12 +440,12 @@ async def process_queue_items(redis, batch_size: int = 100) -> int:
             output_tokens = int(record.get("o", 0))
             compute_time = float(record.get("t", 0))
 
-            metrics = updates[minute_ts][user_id][chute_id]
-            metrics["a"] += amount
-            metrics["n"] += 1
-            metrics["i"] += input_tokens
-            metrics["o"] += output_tokens
-            metrics["t"] += compute_time
+            agg = updates[minute_ts][user_id][chute_id]
+            agg["a"] += amount
+            agg["n"] += 1
+            agg["i"] += input_tokens
+            agg["o"] += output_tokens
+            agg["t"] += compute_time
 
             count += 1
         except Exception as exc:
@@ -440,6 +483,7 @@ async def process_usage_queue(batch_size: int = 100):
     2. Continuously pop from queue and increment minute buckets
     3. When minute rolls over, process completed buckets to DB
     """
+    global last_heartbeat
     redis = settings.billing_redis_client.client
     last_minute_ts = get_minute_ts()
 
@@ -482,6 +526,7 @@ async def process_usage_queue(batch_size: int = 100):
     logger.info("Starting main processing loop")
 
     while True:
+        last_heartbeat = time.time()
         try:
             current_minute_ts = get_minute_ts()
             if current_minute_ts > last_minute_ts:
@@ -522,8 +567,33 @@ async def process_usage_queue(batch_size: int = 100):
 
 
 async def main():
-    logger.info("Starting usage tracker with minute-bucket processing")
-    await process_usage_queue()
+    logger.info("Starting usage tracker...")
+
+    # Start health check server
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="error")
+    server = uvicorn.Server(config)
+
+    # Run server and processor concurrently, ensure both continue running.
+    tasks = [asyncio.create_task(server.serve()), asyncio.create_task(process_usage_queue())]
+
+    # This should never actually return, since both processes are expected to run forever.
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    for task in done:
+        try:
+            task.result()
+        except Exception as exc:
+            logger.error(f"Task failed with exception: {exc}")
+            raise
+
+    logger.error("A critical task finished unexpectedly!")
+    sys.exit(1)
 
 
 if __name__ == "__main__":
