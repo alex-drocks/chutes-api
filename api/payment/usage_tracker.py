@@ -311,6 +311,11 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
                 }
 
                 if chargeable:
+                    # Sort users to prevent deadlocks when updating balances
+                    # strictly ordering updates ensures consistent locking order across workers
+                    sorted_user_ids = sorted(chargeable.keys())
+                    sorted_amounts = [chargeable[uid] for uid in sorted_user_ids]
+
                     # Batch update balances in a single query
                     await session.execute(
                         text("""
@@ -323,8 +328,8 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
                             WHERE users.user_id = deductions.user_id
                         """),
                         {
-                            "user_ids": list(chargeable.keys()),
-                            "amounts": list(chargeable.values()),
+                            "user_ids": sorted_user_ids,
+                            "amounts": sorted_amounts,
                         },
                     )
                     logger.info(f"Deducted balance from {len(chargeable)} users")
@@ -344,21 +349,70 @@ async def process_bucket(redis, bucket_key: str, already_claimed: bool = False) 
         raise
 
 
-async def process_queue_items(redis) -> int:
+async def process_queue_items(redis, batch_size: int = 100) -> int:
     """
     Pop items from queue and increment their minute buckets.
+    Uses batch processing and local aggregation to minimize Redis round trips.
     """
+    items = await redis.lpop(QUEUE_KEY, count=batch_size)
+    if not items:
+        return 0
+
+    # Local aggregation to minimize HINCRBY calls
+    # minute_ts -> user_id -> chute_id -> metrics
+    updates = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: {"a": 0.0, "n": 0, "i": 0, "o": 0, "t": 0.0})
+        )
+    )
+
     count = 0
-    while True:
-        item = await redis.lpop(QUEUE_KEY)
-        if item is None:
-            break
+    for item in items:
+        if not item:
+            continue
         try:
             record = json.loads(item)
-            await increment_bucket(redis, record)
+
+            user_id = record["u"]
+            chute_id = record["c"]
+            timestamp = int(record.get("s", time.time()))
+            minute_ts = get_minute_ts(timestamp)
+
+            amount = float(record.get("a", 0))
+            input_tokens = int(record.get("i", 0))
+            output_tokens = int(record.get("o", 0))
+            compute_time = float(record.get("t", 0))
+
+            metrics = updates[minute_ts][user_id][chute_id]
+            metrics["a"] += amount
+            metrics["n"] += 1
+            metrics["i"] += input_tokens
+            metrics["o"] += output_tokens
+            metrics["t"] += compute_time
+
             count += 1
         except Exception as exc:
             logger.error(f"Failed to process queue item: {exc}, raw={item}")
+
+    # Push aggregated updates to Redis
+    if count > 0:
+        pipeline = redis.pipeline()
+        for minute_ts, users in updates.items():
+            bucket_key = f"{BUCKET_PREFIX}:{minute_ts}"
+            for user_id, chutes in users.items():
+                for chute_id, m in chutes.items():
+                    field_prefix = f"{user_id}:{chute_id}"
+                    if m["a"] != 0:
+                        pipeline.hincrbyfloat(bucket_key, f"{field_prefix}:a", m["a"])
+                    if m["n"] != 0:
+                        pipeline.hincrby(bucket_key, f"{field_prefix}:n", m["n"])
+                    if m["i"] != 0:
+                        pipeline.hincrby(bucket_key, f"{field_prefix}:i", m["i"])
+                    if m["o"] != 0:
+                        pipeline.hincrby(bucket_key, f"{field_prefix}:o", m["o"])
+                    if m["t"] != 0:
+                        pipeline.hincrbyfloat(bucket_key, f"{field_prefix}:t", m["t"])
+        await pipeline.execute()
 
     return count
 
@@ -375,9 +429,15 @@ async def process_usage_queue():
 
     # On startup, we first drain the queue to ensure the timestamp buckets are complete.
     logger.info("Draining queue before recovery...")
-    drained = await process_queue_items(redis)
-    if drained > 0:
-        logger.info(f"Drained {drained} items from queue into minute buckets")
+    drained_total = 0
+    while True:
+        drained = await process_queue_items(redis)
+        drained_total += drained
+        if drained == 0:
+            break
+
+    if drained_total > 0:
+        logger.info(f"Drained {drained_total} items from queue into minute buckets")
 
     # Now, process any of  the stake keys from crashed workers.
     logger.info("Checking for stale processing buckets to recover...")
