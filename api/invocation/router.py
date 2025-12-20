@@ -924,10 +924,12 @@ async def hostname_invocation(
             payload["model"] = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8-TEE"
         elif model == "deepseek-ai/DeepSeek-V3.2":
             payload["model"] = "deepseek-ai/DeepSeek-V3.2-TEE"
-        elif model == "deepseek-ai/DeepSeek-R1-0528" and random.random() <= 0.2:
+        elif model == "deepseek-ai/DeepSeek-R1-0528" and random.random() <= 0.35:
             payload["model"] = "deepseek-ai/DeepSeek-R1-0528-TEE"
         elif model == "deepseek-ai/DeepSeek-V3.1":
             payload["model"] = "deepseek-ai/DeepSeek-V3.1-TEE"
+        elif model == "deepseek-ai/DeepSeek-V3.1-Terminus":
+            payload["model"] = "deepseek-ai/DeepSeek-V3.1-Terminus-TEE"
 
         # Disable logprobs for now on 3.2* models.
         if model in (

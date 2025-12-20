@@ -198,6 +198,8 @@ async def get_hf_repo_info(
     # Chute exists?
     chute = await get_one(repo_id)
     if not chute:
+        chute = await get_one(f"{repo_id}-TEE")
+    if not chute:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No chute found for model {repo_id}"
         )
