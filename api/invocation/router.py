@@ -11,7 +11,6 @@ import orjson as json
 import csv
 import uuid
 import time
-import random
 import decimal
 import traceback
 from loguru import logger
@@ -601,47 +600,45 @@ async def _invoke(
     include_trace = request.headers.get("X-Chutes-Trace", "").lower() == "true"
     parent_invocation_id = str(uuid.uuid4())
 
-    # Track unique requests.
-    body_target = request_body
-    if (
-        chute.standard_template in ("vllm", "tei")
-        or selected_cord.get("passthrough", False)
-        and "json" in request_body
-    ):
-        body_target = request_body["json"]
-
     # Check for re-rolls, which are cheaper/consume fewer quota units.
+    #
+    # A "reroll" is defined as: a (single, real) user sending identical request bodies
+    # within 15 minutes, to the same model and endpoint, up to 15 times. After 15 duplicates
+    # the reroll discount ceases. Each time a duplicate arrives, the TTL on the reroll tracking
+    # is pushed back another 15 minutes, so really you can get up to 15 rerolls, each within
+    # 14 minutes 59 seconds of each other (almost 4 hours); they don't all need to fit in the
+    # same 15 minute window.
+    #
+    # Invoiced users are generally inference partners, e.g. openrouter, and
+    # don't provide ways to differentiate who the actual end user is, so we can't
+    # even attempt to properly distinguish a reroll from two users performing
+    # the same requests, so reroll is always false for invoice users.
+    #
+    # We've already calculated the request body sha256 in the main API middleware, so we'll
+    # re-use that for the reroll identification instead of creating yet another dump/hash.
+    #
+    # This exact sha256 of request body makes it very sensitive to any changes, such as using
+    # a new seed, sampling params, or even changing the ordering of the request body, so be
+    # sure, if you want to make use of the reroll discount, your requests are indeed dupes.
     reroll = False
-    try:
-        prompt_dump = None
-        if "messages" in body_target:
-            try:
-                prompt_dump = "::".join([json.dumps(m).decode() for m in body_target["messages"]])
-            except Exception as exc:
-                logger.warning(f"Error generating prompt key for dupe tracking: {exc}")
-        elif "prompt" in body_target and isinstance(body_target, str):
-            prompt_dump = body_target["prompt"]
-        if prompt_dump:
-            prompt_hash_str = "::".join(
-                [
-                    chute.name,
-                    request.url.path,
-                    prompt_dump,
-                ]
-            ).encode()
-            prompt_hash = str(uuid.uuid5(uuid.NAMESPACE_OID, prompt_hash_str)).replace("-", "")
-            prompt_key = f"userreq:{current_user.user_id}{prompt_hash}"
-            prompt_count = await settings.redis_client.incr(prompt_key)
-            if prompt_count:
-                if 1 < prompt_count <= 15:
-                    reroll = True
-                elif prompt_count > 15:
-                    logger.warning(
-                        f"User seems to be spamming: {current_user.user_id=} {current_user.username=} {chute.chute_id=} {chute.name=} -- removing reroll flag for excessive use"
-                    )
-
-    except Exception as exc:
-        logger.warning(f"Error updating request hash tracking: {exc}")
+    if not current_user.has_role(Permissioning.invoice_billing) and request.state.body_sha256:
+        prompt_key = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_OID,
+                f"{current_user.user_id}:{request.state.body_sha256}:{chute.chute_id}",
+            )
+        )
+        reroll_key = f"userreq:{prompt_key}"
+        prompt_count = await settings.redis_client.incr(reroll_key)
+        if prompt_count:
+            if 1 < prompt_count <= 15:
+                reroll = True
+                logger.info(f"Reroll: {current_user.username=} {chute.name=} {prompt_key=}")
+            elif prompt_count > 15:
+                logger.warning(
+                    f"User seems to be spamming: {current_user.user_id=} {current_user.username=} {chute.chute_id=} {chute.name=} -- removing reroll flag for excessive use"
+                )
+        await settings.redis_client.expire(reroll_key, 15 * 60)
 
     # Handle streaming responses, either because the user asked for X-Chutes-Trace,
     # or in the case of LLMs with stream: true in request.
@@ -924,8 +921,6 @@ async def hostname_invocation(
             payload["model"] = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8-TEE"
         elif model == "deepseek-ai/DeepSeek-V3.2":
             payload["model"] = "deepseek-ai/DeepSeek-V3.2-TEE"
-        elif model == "deepseek-ai/DeepSeek-R1-0528" and random.random() <= 0.35:
-            payload["model"] = "deepseek-ai/DeepSeek-R1-0528-TEE"
         elif model == "deepseek-ai/DeepSeek-V3.1":
             payload["model"] = "deepseek-ai/DeepSeek-V3.1-TEE"
         elif model == "deepseek-ai/DeepSeek-V3.1-Terminus":
