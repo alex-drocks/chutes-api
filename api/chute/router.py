@@ -38,7 +38,7 @@ from api.chute.templates import (
     build_vllm_code,
     build_diffusion_code,
 )
-from api.gpu import ALLOW_INCLUDE, SUPPORTED_GPUS
+from api.gpu import ALLOW_INCLUDE, SUPPORTED_GPUS, MAX_GPU_PRICE_DELTA
 from api.chute.response import ChuteResponse
 from api.chute.util import (
     selector_hourly_price,
@@ -927,6 +927,23 @@ async def _deploy_chute(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not allowed to require consumer GPUs exclusively.",
+        )
+
+    # Prevent people from paying for a 3090 when they actually want (hope for?) a b200.
+    prices = {gpu: SUPPORTED_GPUS[gpu]["hourly_rate"] for gpu in allowed_gpus}
+    min_price = min(prices.values())
+    max_price = max(prices.values())
+    if max_price > min_price * MAX_GPU_PRICE_DELTA:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Your node selector's supported GPU price range is too large, currently "
+                f"ranging from ${min_price} to ${max_price} based on supported GPUs. The maximum "
+                f"allowed spread is {MAX_GPU_PRICE_DELTA} times min supported GPU price, i.e. "
+                f"{round(min_price * MAX_GPU_PRICE_DELTA, 2)}. "
+                "Please update your node selector to either only use count and VRAM, or "
+                "update your include directive to be more specific. See https://api.chutes.ai/pricing"
+            ),
         )
 
     # Fee estimate, as an error, if the user hasn't used the confirmed param.
