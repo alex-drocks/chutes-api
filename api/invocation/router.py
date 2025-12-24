@@ -886,12 +886,25 @@ async def hostname_invocation(
             payload["model"] = "deepseek-ai/DeepSeek-V3.1-Terminus-TEE"
         elif model == "zai-org/GLM-4.7":
             payload["model"] = "zai-org/GLM-4.7-TEE"
+        elif model == "zai-org/GLM-4.5":
+            payload["model"] = "zai-org/GLM-4.5-TEE"
         elif model == "moonshotai/Kimi-K2-Thinking":
             payload["model"] = "moonshotai/Kimi-K2-Thinking-TEE"
 
-        # Fix the incompatibility between continue_final_message and add_generation_prompt.
-        if payload.get("continue_final_message") is True and "add_generation_prompt" not in payload:
-            payload["add_generation_prompt"] = False
+        # No file support currently.
+        if isinstance(payload.get("messages"), list):
+            for message in payload["messages"]:
+                if isinstance(message, dict) and isinstance(message.get("content"), list):
+                    for content_item in message["content"]:
+                        if (
+                            isinstance(content_item, dict)
+                            and "file" in content_item
+                            or "file_url" in content_item
+                        ):
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="File content not currently supported",
+                            )
 
         # Disable logprobs for now on 3.2* models.
         if model in (
