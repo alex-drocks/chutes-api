@@ -884,6 +884,14 @@ async def hostname_invocation(
             payload["model"] = "deepseek-ai/DeepSeek-V3.1-TEE"
         elif model == "deepseek-ai/DeepSeek-V3.1-Terminus":
             payload["model"] = "deepseek-ai/DeepSeek-V3.1-Terminus-TEE"
+        elif model == "zai-org/GLM-4.7":
+            payload["model"] = "zai-org/GLM-4.7-TEE"
+        elif model == "moonshotai/Kimi-K2-Thinking":
+            payload["model"] = "moonshotai/Kimi-K2-Thinking-TEE"
+
+        # Fix the incompatibility between continue_final_message and add_generation_prompt.
+        if payload.get("continue_final_message") is True and "add_generation_prompt" not in payload:
+            payload["add_generation_prompt"] = False
 
         # Disable logprobs for now on 3.2* models.
         if model in (
