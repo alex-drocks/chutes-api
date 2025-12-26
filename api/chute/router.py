@@ -933,7 +933,7 @@ async def _deploy_chute(
     prices = {gpu: SUPPORTED_GPUS[gpu]["hourly_rate"] for gpu in allowed_gpus}
     min_price = min(prices.values())
     max_price = max(prices.values())
-    if max_price > min_price * MAX_GPU_PRICE_DELTA:
+    if chute_args.node_selector.include and max_price > min_price * MAX_GPU_PRICE_DELTA:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
