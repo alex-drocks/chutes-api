@@ -617,8 +617,8 @@ async def handle_rolling_update(chute_id: str, version: str, reason: str = "code
     if not sleep_per_instance:
         sleep_per_instance = 1
 
-    # Cap sleep time per instance to 5 minutes per instance.
-    sleep_per_instance = min(300, sleep_per_instance)
+    # Cap sleep time per instance to 45 minutes per instance.
+    sleep_per_instance = min(45 * 60, sleep_per_instance)
 
     # Iterate through instances slowly to avoid crashing the entire chute.
     logger.info(
