@@ -890,6 +890,8 @@ async def hostname_invocation(
             payload["model"] = "zai-org/GLM-4.5-TEE"
         elif model == "moonshotai/Kimi-K2-Thinking":
             payload["model"] = "moonshotai/Kimi-K2-Thinking-TEE"
+        elif model == "deepseek-ai/DeepSeek-R1-0528":
+            payload["model"] = "deepseek-ai/DeepSeek-R1-0528-TEE"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):
