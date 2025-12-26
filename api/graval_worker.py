@@ -611,8 +611,8 @@ async def handle_rolling_update(chute_id: str, version: str, reason: str = "code
             logger.info(f"No instances to update? {chute_id=}")
             return
 
-    # Calculate sleep per instance so we finish within 45 minutes.
-    max_duration = 60 * 45
+    # Calculate sleep per instance so we finish within 3 hours.
+    max_duration = 60 * 60 * 3
     sleep_per_instance = int(max_duration / len(chute.instances))
     if not sleep_per_instance:
         sleep_per_instance = 1

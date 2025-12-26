@@ -172,7 +172,9 @@ class NodeSelector(BaseModel):
             prices = {gpu: SUPPORTED_GPUS[gpu]["hourly_rate"] for gpu in allowed_gpus}
             min_price = min(prices.values())
             allowed_gpus = {
-                gpu for gpu, price in prices.items() if price <= min_price * MAX_GPU_PRICE_DELTA
+                gpu
+                for gpu, price in prices.items()
+                if price <= min_price * MAX_GPU_PRICE_DELTA or gpu == "pro_6000"
             }
 
         # Can't currently mix AMD and NVidia images.
