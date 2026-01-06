@@ -997,20 +997,6 @@ async def hostname_invocation(
         if payload.get("tools") and "tool_choice" not in payload:
             payload["tool_choice"] = "auto"
 
-        # Required/explicit tool + reasoning issues.
-        # TL;DR; vLLM starts doing grammar constrained output so we need to disable
-        # reasoning otherwise it will chuck the tool call (constrained output) into
-        # reasoning content deltas and never actually produce a tool call.
-        tool_choice = payload.get("tool_choice")
-        if tool_choice and (
-            isinstance(tool_choice, dict) or f"{tool_choice}".lower() == "required"
-        ):
-            if "chat_template_kwargs" in payload:
-                payload["chat_template_kwargs"]["thinking"] = False
-                payload["chat_template_kwargs"]["enable_thinking"] = False
-            else:
-                payload["chat_template_kwargs"] = {"thinking": False, "enable_thinking": False}
-
         model = payload.get("model")
         chute = None
         template = (
