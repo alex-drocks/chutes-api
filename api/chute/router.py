@@ -45,12 +45,15 @@ from api.chute.util import (
     get_one,
     is_shared,
     get_mtoken_price,
+    calculate_effective_compute_multiplier,
 )
+from api.bounty.util import get_bounty_info, get_bounty_infos
 from api.instance.schemas import Instance
 from api.instance.util import get_chute_target_manager
 from api.user.schemas import User, PriceOverride
 from api.user.service import get_current_user, chutes_user_id, subnet_role_accessible
 from api.image.schemas import Image
+from api.graval_worker import handle_rolling_update
 from api.image.util import get_image_by_id_or_name
 from api.permissions import Permissioning
 
@@ -74,7 +77,6 @@ from api.util import (
 )
 from api.affine import check_affine_code
 from api.guesser import guesser
-from api.graval_worker import handle_rolling_update
 
 router = APIRouter()
 
@@ -139,6 +141,18 @@ async def _inject_current_estimated_price(chute: Chute, response: ChuteResponse)
             "supported_gpus": node_selector.supported_gpus,
         }
     )
+
+
+async def _inject_effective_compute_multiplier(
+    chute: Chute, response: ChuteResponse, bounty_info: Optional[dict] = None
+):
+    """
+    Inject the effective compute multiplier and factors into a ChuteResponse.
+    """
+    result = await calculate_effective_compute_multiplier(chute, bounty_info=bounty_info)
+    response.effective_compute_multiplier = result["effective_compute_multiplier"]
+    response.compute_multiplier_factors = result["compute_multiplier_factors"]
+    response.bounty = result["bounty"]
 
 
 @router.post("/share")
@@ -407,9 +421,11 @@ async def list_chutes(
         offset = (page or 0) * limit
     query = query.order_by(Chute.invocation_count.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
+    items = result.unique().scalars().all()
+    bounty_infos = await get_bounty_infos([item.chute_id for item in items])
     responses = []
     cord_refs = {}
-    for item in result.unique().scalars().all():
+    for item in items:
         chute_response = ChuteResponse.from_orm(item)
         cord_defs = json.dumps(item.cords).decode()
         if item.standard_template == "vllm":
@@ -426,6 +442,9 @@ async def list_chutes(
         chute_response.cord_ref_id = cord_ref_id
         responses.append(chute_response)
         await _inject_current_estimated_price(item, responses[-1])
+        await _inject_effective_compute_multiplier(
+            item, responses[-1], bounty_info=bounty_infos.get(item.chute_id)
+        )
     result = {
         "total": total,
         "page": page,
@@ -767,6 +786,8 @@ async def get_chute(
         )
     response = ChuteResponse.from_orm(chute)
     await _inject_current_estimated_price(chute, response)
+    bounty_info = await get_bounty_info(chute.chute_id)
+    await _inject_effective_compute_multiplier(chute, response, bounty_info=bounty_info)
     return response
 
 

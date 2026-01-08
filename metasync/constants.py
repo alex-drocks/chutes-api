@@ -1,61 +1,14 @@
 SCORING_INTERVAL = "7 days"
 
-# Bonuses applied to base score, where base score is simply compute units * instance lifetime where termination reason is valid.
-BONUS = {
-    "demand": 0.35,  # Miner generally meets the platform demands, i.e. chutes with high utilization are deployed more frequently.
-    "bounty": 0.35,  # Claimed bounties, i.e. when there was platform demand for a chute, they launched it.
-    "breadth": 0.3,  # Non-selectivity of the miner, i.e. deploying all chutes with equal weight.
-}
-DEMAND_COMPUTE_WEIGHT = 0.75
-DEMAND_COUNT_WEIGHT = 0.25
-BONUS_WEIGHT = 0.1
-BONUS_EXP = 1.4
+# Dynamic bounty boost based on bounty age at claim time (maxes out at 3 hours)
+BOUNTY_BOOST_MIN = 1.5
+BOUNTY_BOOST_MAX = 4.0
+BOUNTY_BOOST_RAMP_MINUTES = 180
 
-# Prevent bounty spamming.
-BOUNTY_DECAY = 0.8
-BOUNTY_RHO = 0.5
-
-# Query to fetch raw request counts and compute units per chute (to calculate 'demand' bonus).
-NORMALIZED_COMPUTE_QUERY = """
-SELECT
-    i.miner_hotkey,
-    COUNT(CASE WHEN i.error_message IS NULL THEN 1 END) AS successful_count,
-    SUM(
-        i.compute_multiplier *
-        CASE
-            -- For token-based computations (nc = normalized compute, handles prompt & completion tokens).
-            WHEN i.metrics->>'nc' IS NOT NULL
-                AND (i.metrics->>'nc')::float > 0
-            THEN (i.metrics->>'nc')::float
-
-            -- For step-based computations
-            WHEN i.metrics->>'steps' IS NOT NULL
-                AND (i.metrics->>'steps')::float > 0
-                AND i.metrics->>'masps' IS NOT NULL
-            THEN (i.metrics->>'steps')::float * (i.metrics->>'masps')::float
-
-            -- Legacy token-based calculation if 'nc' not available.
-            WHEN i.metrics->>'it' IS NOT NULL
-                AND i.metrics->>'ot' IS NOT NULL
-                AND (i.metrics->>'it')::float > 0
-                AND (i.metrics->>'ot')::float > 0
-                AND i.metrics->>'maspt' IS NOT NULL
-            THEN ((i.metrics->>'it')::float + (i.metrics->>'ot')::float) * (i.metrics->>'maspt')::float
-
-            -- Fallback to actual elapsed time
-            ELSE EXTRACT(EPOCH FROM (i.completed_at - i.started_at))
-        END
-    ) AS compute_units
-FROM invocations i
-WHERE i.started_at > NOW() - INTERVAL '{interval}'
-AND NOT EXISTS (
-    SELECT 1
-    FROM reports
-    WHERE invocation_id = i.parent_invocation_id
-    AND confirmed_at IS NOT NULL
-)
-GROUP BY i.miner_hotkey ORDER BY compute_units desc
-"""
+# After claiming, instance compute_multiplier gradually adjusts toward
+# the current chute target (base * urgency * TEE, etc.) over this many hours.
+# The bounty boost component decays to 1.0, but other factors remain.
+BOUNTY_BOOST_DECAY_HOURS = 8
 
 # GPU inventory (and unique chute GPU).
 INVENTORY_HISTORY_QUERY = """
@@ -136,33 +89,26 @@ LEFT JOIN metrics_per_timepoint mpt
   AND mts.miner_hotkey = mpt.miner_hotkey
 ORDER BY mts.miner_hotkey, mts.time_point
 """
-INVENTORY_QUERY = (
-    """
-SELECT
-  miner_hotkey,
-  AVG(unique_chute_gpus)::integer AS avg_unique_chute_gpus,
-  AVG(total_active_gpus)::integer AS avg_total_active_gpus
-FROM ("""
-    + INVENTORY_HISTORY_QUERY
-    + """) AS history_data
-GROUP BY miner_hotkey
-ORDER BY avg_unique_chute_gpus DESC
-"""
-)
 
 # Instances lifetime/compute units queries - this is the entire basis for scoring!
+# Uses instance_compute_history for accurate time-weighted multipliers.
+# The history table includes the startup period (created_at to activated_at) at 0.3x rate,
+# so billing_start uses created_at to capture this.
+# All bonuses (bounty, urgency, TEE, private) are baked into compute_multiplier.
 INSTANCES_QUERY = """
 WITH billed_instances AS (
     SELECT
         ia.miner_hotkey,
         ia.instance_id,
         ia.chute_id,
+        ia.created_at,
         ia.activated_at,
         ia.deleted_at,
         ia.stop_billing_at,
         ia.compute_multiplier,
         ia.bounty,
-        GREATEST(ia.activated_at, now() - interval '{interval}') as billing_start,
+        -- Start from created_at to include startup period (history has 0.3x rate for this period)
+        GREATEST(ia.created_at, now() - interval '{interval}') as billing_start,
         LEAST(
             COALESCE(ia.stop_billing_at, now()),
             COALESCE(ia.deleted_at, now()),
@@ -188,58 +134,45 @@ WITH billed_instances AS (
       AND (ia.deleted_at IS NULL OR ia.deleted_at >= now() - interval '{interval}')
 ),
 
--- Count total bounties per chute in the interval
-chute_bounty_totals AS (
+-- Calculate time-weighted compute units using history table.
+-- For each instance, sum (overlap_seconds * multiplier) across all history intervals.
+instance_weighted_compute AS (
     SELECT
-        bi.chute_id,
-        COUNT(*)::bigint AS n_total
-    FROM billed_instances bi
-    WHERE bi.bounty IS TRUE
-      AND bi.billing_end > bi.billing_start
-    GROUP BY bi.chute_id
-),
-
--- Count bounties per miner per chute in the interval
-miner_chute_bounty_counts AS (
-    SELECT
+        bi.instance_id,
         bi.miner_hotkey,
-        bi.chute_id,
-        COUNT(*)::bigint AS n_miner_chute
+        bi.billing_start,
+        bi.billing_end,
+        bi.bounty,
+        bi.compute_multiplier as fallback_multiplier,
+        COALESCE(
+            SUM(
+                EXTRACT(EPOCH FROM (
+                    LEAST(COALESCE(ich.ended_at, now()), bi.billing_end)
+                    - GREATEST(ich.started_at, bi.billing_start)
+                )) * ich.compute_multiplier
+            ),
+            -- Fallback to instance_audit.compute_multiplier if no history exists
+            EXTRACT(EPOCH FROM (bi.billing_end - bi.billing_start)) * COALESCE(bi.compute_multiplier, 1.0)
+        ) AS weighted_compute_units
     FROM billed_instances bi
-    WHERE bi.bounty IS TRUE
-      AND bi.billing_end > bi.billing_start
-    GROUP BY bi.miner_hotkey, bi.chute_id
+    LEFT JOIN instance_compute_history ich
+           ON ich.instance_id = bi.instance_id
+          AND ich.started_at < bi.billing_end
+          AND (ich.ended_at IS NULL OR ich.ended_at > bi.billing_start)
+    WHERE bi.billing_end > bi.billing_start
+    GROUP BY bi.instance_id, bi.miner_hotkey, bi.billing_start, bi.billing_end, bi.bounty, bi.compute_multiplier
 ),
 
--- Convert counts to an "effective" bounty score with:
---   per-miner geometric diminishing + global chute dampening
-miner_bounty_effective AS (
-    SELECT
-        mcbc.miner_hotkey,
-        SUM(
-            (1.0 - POWER({bounty_decay}, mcbc.n_miner_chute::double precision))
-            / (1.0 - {bounty_decay})
-            *
-            POWER(GREATEST(cbt.n_total, 1)::double precision, {bounty_rho} - 1.0)
-        ) AS bounty_score
-    FROM miner_chute_bounty_counts mcbc
-    JOIN chute_bounty_totals cbt USING (chute_id)
-    GROUP BY mcbc.miner_hotkey
-),
-
--- Aggregate compute units by miner (and pull in the effective bounty score)
+-- Aggregate compute units by miner
 miner_compute_units AS (
     SELECT
-        bi.miner_hotkey,
+        iwc.miner_hotkey,
         COUNT(*) AS total_instances,
-        COALESCE(mbe.bounty_score, 0.0) AS bounty_score,
-        SUM(EXTRACT(EPOCH FROM (bi.billing_end - bi.billing_start))) AS compute_seconds,
-        SUM(EXTRACT(EPOCH FROM (bi.billing_end - bi.billing_start)) * bi.compute_multiplier) AS compute_units
-    FROM billed_instances bi
-    LEFT JOIN miner_bounty_effective mbe
-           ON mbe.miner_hotkey = bi.miner_hotkey
-    WHERE bi.billing_end > bi.billing_start
-    GROUP BY bi.miner_hotkey, mbe.bounty_score
+        COUNT(CASE WHEN iwc.bounty IS TRUE THEN 1 END) AS bounty_score,
+        SUM(EXTRACT(EPOCH FROM (iwc.billing_end - iwc.billing_start))) AS compute_seconds,
+        SUM(iwc.weighted_compute_units) AS compute_units
+    FROM instance_weighted_compute iwc
+    GROUP BY iwc.miner_hotkey
 )
 
 SELECT
@@ -247,7 +180,7 @@ SELECT
     total_instances,
     bounty_score,
     COALESCE(compute_seconds, 0) AS compute_seconds,
-    COALESCE(compute_units, 0)  AS compute_units
+    COALESCE(compute_units, 0) AS compute_units
 FROM miner_compute_units
 ORDER BY compute_units DESC
 """

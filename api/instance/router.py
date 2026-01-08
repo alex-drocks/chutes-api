@@ -18,7 +18,7 @@ from api.image.util import get_inspecto_hash
 import api.miner_client as miner_client
 from loguru import logger
 from typing import Optional, Tuple
-from datetime import timedelta
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Response, status, Header, Request
 from sqlalchemy import select, text, func, update, and_
 from sqlalchemy.orm import joinedload
@@ -41,6 +41,7 @@ from api.payment.util import decrypt_secret
 from api.node.util import get_node_by_id
 from api.chute.schemas import Chute, NodeSelector
 from api.chute.util import is_shared
+from api.bounty.util import claim_bounty, calculate_bounty_boost
 from api.secret.schemas import Secret
 from api.image.schemas import Image  # noqa
 from api.instance.schemas import (
@@ -80,7 +81,7 @@ from api.util import (
     load_shared_object,
     has_legacy_private_billing,
 )
-from api.bounty.util import check_bounty_exists, delete_bounty, claim_bounty
+from api.bounty.util import check_bounty_exists, delete_bounty
 from starlette.responses import StreamingResponse
 from api.graval_worker import graval_encrypt, verify_proof, generate_fs_hash
 from watchtower import is_kubernetes_env, verify_expected_command
@@ -327,8 +328,8 @@ async def get_instance_reconciliation_csv(
             instance_id,
             deleted_at
         FROM instance_audit
-        WHERE deleted_at IS NOT NULL
-        AND activated_at IS NOT NULL
+        WHERE (deleted_at IS NULL OR deleted_at >= NOW() - INTERVAL '7 days 1 hour')
+          AND activated_at IS NOT NULL
     """
     output = StringIO()
     writer = csv.writer(output)
@@ -339,6 +340,37 @@ async def get_instance_reconciliation_csv(
         content=output.getvalue(),
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="audit-reconciliation.csv"'},
+    )
+
+
+@router.get("/compute_history_csv")
+async def get_instance_compute_history_csv(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Get instance_compute_history records for the scoring period (last 7 days + buffer).
+    Used by the auditor to reconcile compute history data on startup.
+    """
+    query = """
+        SELECT
+            instance_id,
+            compute_multiplier,
+            started_at,
+            ended_at
+        FROM instance_compute_history
+        WHERE ended_at IS NULL
+           OR ended_at >= NOW() - INTERVAL '8 days'
+        ORDER BY instance_id, started_at
+    """
+    output = StringIO()
+    writer = csv.writer(output)
+    result = await db.execute(text(query))
+    writer.writerow([col for col in result.keys()])
+    writer.writerows(result)
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="compute-history.csv"'},
     )
 
 
@@ -685,9 +717,13 @@ async def _validate_launch_config_instance(
         )
         instance.billed_to = chute.user_id
 
-    # Add chute boost.
+    # Add chute boost (urgency boost from autoscaler).
     if chute.boost is not None and chute.boost > 0 and chute.boost <= 20:
         instance.compute_multiplier *= chute.boost
+        logger.info(
+            f"Adding chute boost {chute.boost=} to {instance.instance_id} "
+            f"for total {instance.compute_multiplier=} for {chute.name=} {chute.chute_id=}"
+        )
 
     # Add TEE boost.
     if chute.tee:
@@ -1110,12 +1146,40 @@ async def activate_launch_config_instance(
 
     # Activate the instance (and trigger tentative billing stop time).
     if not instance.active:
-        # If a bounty exists for this chute, claim it.
+        # Reject instances that took too long to activate (> 90 minutes). These should be cleaned up automatically
+        # in the chute autoscaler's instance_cleanup() method, but just in case...
+        max_startup_seconds = 2 * 60 * 60
+        if instance.created_at:
+            startup_seconds = (
+                datetime.utcnow() - instance.created_at.replace(tzinfo=None)
+            ).total_seconds()
+            if startup_seconds > max_startup_seconds:
+                reason = f"Instance took too long to activate ({startup_seconds:.0f}s > {max_startup_seconds}s max)"
+                logger.warning(reason)
+                await db.delete(instance)
+                await asyncio.create_task(notify_deleted(instance))
+                await db.execute(
+                    text(
+                        "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
+                    ),
+                    {"instance_id": instance.instance_id, "reason": reason},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_410_GONE,
+                    detail=reason,
+                )
+
+        # If a bounty exists for this chute, claim it and apply dynamic boost based on age.
+        # Older bounties = higher boost (1.5x at 0min → 4x at 180min+)
         bounty = await claim_bounty(instance.chute_id)
-        if bounty is None:
-            bounty = 0
         if bounty:
             instance.bounty = True
+            bounty_boost = calculate_bounty_boost(bounty["age_seconds"])
+            instance.compute_multiplier *= bounty_boost
+            logger.info(
+                f"Claimed bounty for {instance.chute_id}: age={bounty['age_seconds']}s, "
+                f"bounty_boost={bounty_boost:.2f}x, total compute_multiplier={instance.compute_multiplier}"
+            )
 
         # Verify egress.
         # net_success = True
@@ -1583,31 +1647,69 @@ async def delete_instance(
         job.miner_terminated = True
         job.finished_at = func.now()
 
-    # Bounties are negated if an instance of a public chute is deleted with no other active instanes.
+    # Bounties are negated if an instance of a public chute is deleted with no other active instances.
+    # Additionally, heavily penalize the compute_multiplier:
+    # - Public chutes: divide by 10
+    # - Private chutes: zero entirely
     negate_bounty = False
-    if not instance.billed_to:
-        active_count = (
-            await db.execute(
-                select(func.count())
-                .select_from(Instance)
-                .where(
-                    Instance.chute_id == instance.chute_id,
-                    Instance.instance_id != instance.instance_id,
-                    Instance.active.is_(True),
-                )
+    compute_multiplier_penalty = 1.0
+
+    # Check if this is the last active instance
+    active_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(Instance)
+            .where(
+                Instance.chute_id == instance.chute_id,
+                Instance.instance_id != instance.instance_id,
+                Instance.active.is_(True),
             )
-        ).scalar_one()
-        if active_count == 0:
-            logger.warning(
-                f"Instance {instance.instance_id=} of {instance.miner_hotkey=} terminated without any other active instances, negating bounty!"
-            )
+        )
+    ).scalar_one()
+
+    if active_count == 0:
+        # This is the last instance - apply penalties
+        if not instance.billed_to:
+            # Public chute: negate bounty and apply 10x penalty
             negate_bounty = True
+            compute_multiplier_penalty = 0.1
+            logger.warning(
+                f"Instance {instance.instance_id=} of {instance.miner_hotkey=} terminated without any other active instances, "
+                f"negating bounty and applying 10x compute_multiplier penalty!"
+            )
+        else:
+            # Private chute: zero out compute_multiplier entirely
+            compute_multiplier_penalty = 0.0
+            logger.warning(
+                f"Private instance {instance.instance_id=} of {instance.miner_hotkey=} terminated without any other active instances, "
+                f"zeroing compute_multiplier!"
+            )
+
+        # Apply penalty to instance_compute_history BEFORE delete (so the delete trigger
+        # closes the record with the penalized multiplier already applied).
+        # This ensures scoring uses the penalized value, not the original.
+        await db.execute(
+            text("""
+                UPDATE instance_compute_history
+                SET compute_multiplier = compute_multiplier * :penalty
+                WHERE instance_id = :instance_id
+                  AND ended_at IS NULL
+            """),
+            {"instance_id": instance_id, "penalty": compute_multiplier_penalty},
+        )
 
     await db.delete(instance)
 
     # Update instance audit table.
-    params = {"instance_id": instance_id}
-    sql = "UPDATE instance_audit SET deletion_reason = 'miner initialized'"
+    params = {"instance_id": instance_id, "penalty": compute_multiplier_penalty}
+    sql = """
+        UPDATE instance_audit
+        SET deletion_reason = 'miner initialized',
+            compute_multiplier = CASE
+                WHEN :penalty < 1.0 THEN compute_multiplier * :penalty
+                ELSE compute_multiplier
+            END
+    """
     if negate_bounty:
         sql += ", bounty = :bounty"
         params["bounty"] = False

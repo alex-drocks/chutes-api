@@ -16,6 +16,8 @@ from pydantic.fields import ComputedFieldInfo
 import api.database.orms  # noqa
 from api.user.schemas import User
 from api.chute.schemas import Chute, NodeSelector
+from api.chute.util import calculate_effective_compute_multiplier
+from api.bounty.util import get_bounty_infos
 from api.node.schemas import Node
 from api.image.schemas import Image
 from api.instance.schemas import Instance
@@ -32,7 +34,7 @@ from metasync.shared import get_scoring_data
 router = APIRouter()
 
 
-def model_to_dict(obj):
+async def model_to_dict(obj, bounty_info: Optional[dict] = None):
     """
     Helper to convert object to dict.
     """
@@ -59,6 +61,13 @@ def model_to_dict(obj):
         if semcomp(obj.chutes_version or "0.0.0", "0.3.61") >= 0:
             data["code"] = "print('legacy placeholder')"
         data["preemptible"] = obj.preemptible
+
+        # Add effective compute multiplier and factors.
+        effective_data = await calculate_effective_compute_multiplier(obj, bounty_info=bounty_info)
+        data["effective_compute_multiplier"] = effective_data["effective_compute_multiplier"]
+        data["compute_multiplier_factors"] = effective_data["compute_multiplier_factors"]
+        data["bounty"] = effective_data["bounty"]
+
     if isinstance(obj, Image):
         data["username"] = obj.user.username.lower()
         data["name"] = obj.name.lower()
@@ -80,10 +89,25 @@ async def _stream_items(clazz: Any, selector: Any = None, explicit_null: bool = 
     """
     async with get_session() as db:
         query = selector if selector is not None else select(clazz)
+        if clazz is Chute:
+            result = await db.execute(query)
+            items = result.unique().scalars().all()
+            any_found = False
+            if items:
+                bounty_infos = await get_bounty_infos([item.chute_id for item in items])
+                for item in items:
+                    data = await model_to_dict(item, bounty_info=bounty_infos.get(item.chute_id))
+                    yield f"data: {json.dumps(data).decode()}\n\n"
+                    any_found = True
+            if explicit_null and not any_found:
+                yield "data: NO_ITEMS\n"
+            return
+
         result = await db.stream(query)
         any_found = False
         async for row in result.unique():
-            yield f"data: {json.dumps(model_to_dict(row[0])).decode()}\n\n"
+            data = await model_to_dict(row[0])
+            yield f"data: {json.dumps(data).decode()}\n\n"
             any_found = True
         if explicit_null and not any_found:
             yield "data: NO_ITEMS\n"
@@ -226,6 +250,39 @@ async def metrics(
     return StreamingResponse(_stream())
 
 
+@router.get("/active_instances/")
+async def list_active_instances(
+    _: User = Depends(get_current_user(purpose="miner", registered_to=settings.netuid)),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Get all active instances across the platform.
+    Used by miners to make informed preemption decisions based on global state.
+    """
+    query = text("""
+        SELECT
+            instance_id,
+            miner_hotkey,
+            chute_id,
+            activated_at,
+            COALESCE(compute_multiplier, 1.0) as compute_multiplier
+        FROM instances
+        WHERE active = true
+        AND verified = true
+    """)
+    result = await session.execute(query)
+    return [
+        {
+            "instance_id": row[0],
+            "miner_hotkey": row[1],
+            "chute_id": row[2],
+            "activated_at": row[3].isoformat() if row[3] else None,
+            "compute_multiplier": float(row[4]),
+        }
+        for row in result.fetchall()
+    ]
+
+
 @router.get("/chutes/{chute_id}/{version}")
 async def get_chute(
     chute_id: str,
@@ -247,7 +304,7 @@ async def get_chute(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"{chute_id=} not found",
             )
-        return model_to_dict(chute)
+        return await model_to_dict(chute)
 
 
 @router.get("/stats")
@@ -258,16 +315,19 @@ async def get_stats(
     request: Request = None,
 ) -> Response:
     """
-    Get invocation status over different intervals.
-    """
+    Get miner stats over different intervals based on instance data (matching actual scoring).
 
-    cache_key = f"mstats:{per_chute}"
+    Returns instance-based metrics (total_instances, compute_seconds, compute_units, bounty_count)
+    which align with how miners are actually scored for validator weights.
+    """
+    cache_key = f"get_stats:{per_chute}"
 
     def _filter_by_key(mstats):
         if miner_hotkey:
             for _, data in mstats.items():
                 for key in data:
-                    data[key] = [v for v in data[key] if v["miner_hotkey"] == miner_hotkey]
+                    if isinstance(data[key], list):
+                        data[key] = [v for v in data[key] if v.get("miner_hotkey") == miner_hotkey]
         return mstats
 
     if request:
@@ -279,192 +339,197 @@ async def get_stats(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid hotkey parameter."
         )
-    bounty_query = """
-    SELECT miner_hotkey, SUM(bounty) as total_bounty
-      FROM invocations i
-      JOIN metagraph_nodes mn on i.miner_hotkey = mn.hotkey AND mn.netuid = 64
-     WHERE started_at >= NOW() - INTERVAL '{interval}'
-       AND error_message IS NULL
-       AND miner_uid >= 0
-       AND NOT EXISTS (
-          SELECT 1
-          FROM reports
-          WHERE invocation_id = i.parent_invocation_id
-          AND confirmed_at IS NOT NULL
-       )
-    GROUP BY miner_hotkey
-    """
-    compute_query = """
-    SELECT
-        i.miner_hotkey,
-        COUNT(CASE WHEN (i.metrics->>'p')::bool IS NOT TRUE OR chute_id = '561e4875-254d-588f-a36f-57c9cdef8961' THEN 1 END) AS total_invocations,
-        SUM(
-            i.bounty +
-            i.compute_multiplier *
-            CASE
-                WHEN (i.metrics->>'p')::bool IS TRUE AND chute_id != '561e4875-254d-588f-a36f-57c9cdef8961' THEN 0::float
 
-                WHEN i.metrics->>'nc' IS NOT NULL
-                    AND (i.metrics->>'nc')::float > 0
-                THEN (i.metrics->>'nc')::float
-
-                WHEN i.metrics->>'steps' IS NOT NULL
-                    AND (i.metrics->>'steps')::float > 0
-                    AND i.metrics->>'masps' IS NOT NULL
-                THEN (i.metrics->>'steps')::float * (i.metrics->>'masps')::float
-
-                WHEN i.metrics->>'it' IS NOT NULL
-                    AND i.metrics->>'ot' IS NOT NULL
-                    AND (i.metrics->>'it')::float > 0
-                    AND (i.metrics->>'ot')::float > 0
-                    AND i.metrics->>'maspt' IS NOT NULL
-                THEN ((i.metrics->>'it')::float + (i.metrics->>'ot')::float) * (i.metrics->>'maspt')::float
-
-                ELSE EXTRACT(EPOCH FROM (i.completed_at - i.started_at))
-            END
-        ) AS compute_units
-    FROM invocations i
-    JOIN metagraph_nodes mn on i.miner_hotkey = mn.hotkey AND mn.netuid = 64
-    WHERE i.started_at > NOW() - INTERVAL '{interval}'
-    AND i.error_message IS NULL
-    AND miner_uid >= 0
-    AND i.completed_at IS NOT NULL
-    AND NOT EXISTS (
-        SELECT 1
-        FROM reports
-        WHERE invocation_id = i.parent_invocation_id
-        AND confirmed_at IS NOT NULL
+    # Simple instance-based stats query - matches the scoring mechanism structure
+    # but without the complex bounty decay formula (just counts for stats purposes).
+    # Uses instance_compute_history for accurate time-weighted multipliers.
+    # Startup bonus is included in history table (0.3x rate from created_at to activated_at).
+    instance_stats_query = """
+    WITH billed_instances AS (
+        SELECT
+            ia.instance_id,
+            ia.miner_hotkey,
+            ia.chute_id,
+            ia.activated_at,
+            ia.compute_multiplier,
+            ia.bounty,
+            GREATEST(ia.created_at, now() - interval '{interval}') as billing_start,
+            LEAST(
+                COALESCE(ia.stop_billing_at, now()),
+                COALESCE(ia.deleted_at, now()),
+                now()
+            ) as billing_end
+        FROM instance_audit ia
+        WHERE ia.activated_at IS NOT NULL
+          AND (
+              (ia.billed_to IS NULL AND ia.deleted_at IS NOT NULL AND ia.deleted_at - ia.activated_at >= INTERVAL '1 hour')
+              OR ia.valid_termination IS TRUE
+              OR ia.deletion_reason in (
+                  'job has been terminated due to insufficient user balance',
+                  'user-defined/private chute instance has not been used since shutdown_after_seconds',
+                  'user has zero/negative balance (private chute)'
+              )
+              OR ia.deletion_reason LIKE '%has an old version%'
+              OR ia.deleted_at IS NULL
+          )
+          AND (ia.deleted_at IS NULL OR ia.deleted_at >= now() - interval '{interval}')
+    ),
+    instance_weighted AS (
+        SELECT
+            bi.instance_id,
+            bi.miner_hotkey,
+            bi.chute_id,
+            bi.billing_start,
+            bi.billing_end,
+            bi.bounty,
+            bi.compute_multiplier as fallback_multiplier,
+            COALESCE(
+                SUM(
+                    EXTRACT(EPOCH FROM (
+                        LEAST(COALESCE(ich.ended_at, now()), bi.billing_end)
+                        - GREATEST(ich.started_at, bi.billing_start)
+                    )) * ich.compute_multiplier
+                ),
+                EXTRACT(EPOCH FROM (bi.billing_end - bi.billing_start)) * COALESCE(bi.compute_multiplier, 1.0)
+            ) AS weighted_compute_units
+        FROM billed_instances bi
+        LEFT JOIN instance_compute_history ich
+               ON ich.instance_id = bi.instance_id
+              AND ich.started_at < bi.billing_end
+              AND (ich.ended_at IS NULL OR ich.ended_at > bi.billing_start)
+        WHERE bi.billing_end > bi.billing_start
+        GROUP BY bi.instance_id, bi.miner_hotkey, bi.chute_id,
+                 bi.billing_start, bi.billing_end, bi.bounty, bi.compute_multiplier
     )
-    GROUP BY i.miner_hotkey
-    HAVING SUM(
-        i.bounty +
-        i.compute_multiplier *
-        CASE
-            WHEN (i.metrics->>'p')::bool IS TRUE AND chute_id != '561e4875-254d-588f-a36f-57c9cdef8961' THEN 0::float
-
-            WHEN i.metrics->>'nc' IS NOT NULL
-                AND (i.metrics->>'nc')::float > 0
-            THEN (i.metrics->>'nc')::float
-
-            WHEN i.metrics->>'steps' IS NOT NULL
-                AND (i.metrics->>'steps')::float > 0
-                AND i.metrics->>'masps' IS NOT NULL
-            THEN (i.metrics->>'steps')::float * (i.metrics->>'masps')::float
-
-            WHEN i.metrics->>'it' IS NOT NULL
-                AND i.metrics->>'ot' IS NOT NULL
-                AND (i.metrics->>'it')::float > 0
-                AND (i.metrics->>'ot')::float > 0
-                AND i.metrics->>'maspt' IS NOT NULL
-            THEN ((i.metrics->>'it')::float + (i.metrics->>'ot')::float) * (i.metrics->>'maspt')::float
-
-            ELSE EXTRACT(EPOCH FROM (i.completed_at - i.started_at))
-        END
-    ) > 0
+    SELECT
+        iw.miner_hotkey,
+        COUNT(*) AS total_instances,
+        COUNT(CASE WHEN iw.bounty IS TRUE THEN 1 END) AS bounty_count,
+        SUM(EXTRACT(EPOCH FROM (iw.billing_end - iw.billing_start))) AS compute_seconds,
+        SUM(iw.weighted_compute_units) AS compute_units
+    FROM instance_weighted iw
+    JOIN metagraph_nodes mn ON iw.miner_hotkey = mn.hotkey AND mn.netuid = 64 AND mn.node_id >= 0
+    GROUP BY iw.miner_hotkey
+    HAVING SUM(iw.weighted_compute_units) > 0
     ORDER BY compute_units DESC
     """
-    if per_chute:
-        compute_query = """
+
+    # Per-chute instance stats query
+    per_chute_stats_query = """
+    WITH billed_instances AS (
         SELECT
-            i.miner_hotkey,
-            i.chute_id,
-            COUNT(CASE WHEN (i.metrics->>'p')::bool IS NOT TRUE OR chute_id = '561e4875-254d-588f-a36f-57c9cdef8961' THEN 1 END) AS total_invocations,
-            SUM(
-                i.bounty +
-                i.compute_multiplier *
-                CASE
-                    WHEN (i.metrics->>'p')::bool IS TRUE AND chute_id != '561e4875-254d-588f-a36f-57c9cdef8961' THEN 0::float
+            ia.instance_id,
+            ia.miner_hotkey,
+            ia.chute_id,
+            ia.activated_at,
+            ia.compute_multiplier,
+            ia.bounty,
+            GREATEST(ia.created_at, now() - interval '{interval}') as billing_start,
+            LEAST(
+                COALESCE(ia.stop_billing_at, now()),
+                COALESCE(ia.deleted_at, now()),
+                now()
+            ) as billing_end
+        FROM instance_audit ia
+        WHERE ia.activated_at IS NOT NULL
+          AND (
+              (ia.billed_to IS NULL AND ia.deleted_at IS NOT NULL AND ia.deleted_at - ia.activated_at >= INTERVAL '1 hour')
+              OR ia.valid_termination IS TRUE
+              OR ia.deletion_reason in (
+                  'job has been terminated due to insufficient user balance',
+                  'user-defined/private chute instance has not been used since shutdown_after_seconds',
+                  'user has zero/negative balance (private chute)'
+              )
+              OR ia.deletion_reason LIKE '%has an old version%'
+              OR ia.deleted_at IS NULL
+          )
+          AND (ia.deleted_at IS NULL OR ia.deleted_at >= now() - interval '{interval}')
+    ),
+    instance_weighted AS (
+        SELECT
+            bi.instance_id,
+            bi.miner_hotkey,
+            bi.chute_id,
+            bi.billing_start,
+            bi.billing_end,
+            bi.bounty,
+            bi.compute_multiplier as fallback_multiplier,
+            COALESCE(
+                SUM(
+                    EXTRACT(EPOCH FROM (
+                        LEAST(COALESCE(ich.ended_at, now()), bi.billing_end)
+                        - GREATEST(ich.started_at, bi.billing_start)
+                    )) * ich.compute_multiplier
+                ),
+                EXTRACT(EPOCH FROM (bi.billing_end - bi.billing_start)) * COALESCE(bi.compute_multiplier, 1.0)
+            ) AS weighted_compute_units
+        FROM billed_instances bi
+        LEFT JOIN instance_compute_history ich
+               ON ich.instance_id = bi.instance_id
+              AND ich.started_at < bi.billing_end
+              AND (ich.ended_at IS NULL OR ich.ended_at > bi.billing_start)
+        WHERE bi.billing_end > bi.billing_start
+        GROUP BY bi.instance_id, bi.miner_hotkey, bi.chute_id,
+                 bi.billing_start, bi.billing_end, bi.bounty, bi.compute_multiplier
+    )
+    SELECT
+        iw.miner_hotkey,
+        iw.chute_id,
+        COUNT(*) AS total_instances,
+        COUNT(CASE WHEN iw.bounty IS TRUE THEN 1 END) AS bounty_count,
+        SUM(EXTRACT(EPOCH FROM (iw.billing_end - iw.billing_start))) AS compute_seconds,
+        SUM(iw.weighted_compute_units) AS compute_units
+    FROM instance_weighted iw
+    JOIN metagraph_nodes mn ON iw.miner_hotkey = mn.hotkey AND mn.netuid = 64 AND mn.node_id >= 0
+    GROUP BY iw.miner_hotkey, iw.chute_id
+    HAVING SUM(iw.weighted_compute_units) > 0
+    ORDER BY compute_units DESC
+    """
 
-                    WHEN i.metrics->>'nc' IS NOT NULL
-                        AND (i.metrics->>'nc')::float > 0
-                    THEN (i.metrics->>'nc')::float
-
-                    WHEN i.metrics->>'steps' IS NOT NULL
-                        AND (i.metrics->>'steps')::float > 0
-                        AND i.metrics->>'masps' IS NOT NULL
-                    THEN (i.metrics->>'steps')::float * (i.metrics->>'masps')::float
-
-                    WHEN i.metrics->>'it' IS NOT NULL
-                        AND i.metrics->>'ot' IS NOT NULL
-                        AND (i.metrics->>'it')::float > 0
-                        AND (i.metrics->>'ot')::float > 0
-                        AND i.metrics->>'maspt' IS NOT NULL
-                    THEN ((i.metrics->>'it')::float + (i.metrics->>'ot')::float) * (i.metrics->>'maspt')::float
-
-                    ELSE EXTRACT(EPOCH FROM (i.completed_at - i.started_at))
-                END
-            ) AS compute_units
-        FROM invocations i
-        JOIN metagraph_nodes mn on i.miner_hotkey = mn.hotkey AND mn.netuid = 64
-        WHERE i.started_at > NOW() - INTERVAL '{interval}'
-        AND i.error_message IS NULL
-        AND miner_uid >= 0
-        AND i.completed_at IS NOT NULL
-        AND NOT EXISTS (
-            SELECT 1
-            FROM reports
-            WHERE invocation_id = i.parent_invocation_id
-            AND confirmed_at IS NOT NULL
-        )
-        GROUP BY i.miner_hotkey, i.chute_id
-        HAVING SUM(
-            i.bounty +
-            i.compute_multiplier *
-            CASE
-                WHEN (i.metrics->>'p')::bool IS TRUE AND chute_id != '561e4875-254d-588f-a36f-57c9cdef8961' THEN 0::float
-
-                WHEN i.metrics->>'nc' IS NOT NULL
-                    AND (i.metrics->>'nc')::float > 0
-                THEN (i.metrics->>'nc')::float
-
-                WHEN i.metrics->>'steps' IS NOT NULL
-                    AND (i.metrics->>'steps')::float > 0
-                    AND i.metrics->>'masps' IS NOT NULL
-                THEN (i.metrics->>'steps')::float * (i.metrics->>'masps')::float
-
-                WHEN i.metrics->>'it' IS NOT NULL
-                    AND i.metrics->>'ot' IS NOT NULL
-                    AND (i.metrics->>'it')::float > 0
-                    AND (i.metrics->>'ot')::float > 0
-                    AND i.metrics->>'maspt' IS NOT NULL
-                THEN ((i.metrics->>'it')::float + (i.metrics->>'ot')::float) * (i.metrics->>'maspt')::float
-
-                ELSE EXTRACT(EPOCH FROM (i.completed_at - i.started_at))
-            END
-        ) > 0
-        ORDER BY compute_units DESC
-        """
     results = {}
-    for interval, label in (("1 hour", "past_hour"), ("1 day", "past_day"), ("1 week", "all")):
-        bounty_result = await session.execute(text(bounty_query.format(interval=interval)))
-        compute_result = await session.execute(text(compute_query.format(interval=interval)))
-        bounty_data = [
-            {"miner_hotkey": row[0], "total_bounty": float(row[1])}
-            for row in bounty_result.fetchall()
-        ]
-        compute_data = []
+    for interval, label in (("1 hour", "past_hour"), ("1 day", "past_day"), ("7 days", "all")):
         if per_chute:
-            compute_data = [
+            result = await session.execute(text(per_chute_stats_query.format(interval=interval)))
+            stats_data = [
                 {
                     "miner_hotkey": row[0],
                     "chute_id": row[1],
+                    "total_instances": int(row[2]),
+                    "bounty_count": int(row[3]),
+                    "compute_seconds": float(row[4]),
+                    "compute_units": float(row[5]),
+                    # Legacy field for backwards compatibility
                     "invocation_count": int(row[2]),
-                    "compute_units": float(row[3]),
                 }
-                for row in compute_result.fetchall()
+                for row in result.fetchall()
             ]
         else:
-            compute_data = [
+            result = await session.execute(text(instance_stats_query.format(interval=interval)))
+            stats_data = [
                 {
                     "miner_hotkey": row[0],
+                    "total_instances": int(row[1]),
+                    "bounty_count": int(row[2]),
+                    "compute_seconds": float(row[3]),
+                    "compute_units": float(row[4]),
+                    # Legacy fields for backwards compatibility
                     "invocation_count": int(row[1]),
-                    "compute_units": float(row[2]),
+                    "total_bounty": float(row[2]),
                 }
-                for row in compute_result.fetchall()
+                for row in result.fetchall()
             ]
+
+        # Keep backwards-compatible structure
         results[label] = {
-            "bounties": bounty_data,
-            "compute_units": compute_data,
+            "instance_stats": stats_data,
+            # Legacy keys for backwards compatibility
+            "bounties": [
+                {"miner_hotkey": s["miner_hotkey"], "total_bounty": float(s["bounty_count"])}
+                for s in stats_data
+            ]
+            if not per_chute
+            else [],
+            "compute_units": stats_data,
         }
 
     await settings.redis_client.set(cache_key, json.dumps(results))
@@ -473,9 +538,10 @@ async def get_stats(
 
 @router.get("/scores")
 async def get_scores(hotkey: Optional[str] = None, request: Request = None):
+    cache_key = "get_scores"
     rv = None
     if request:
-        cached = await settings.redis_client.get("miner_scores")
+        cached = await settings.redis_client.get(cache_key)
         if cached:
             rv = json.loads(cached)
         else:
@@ -485,7 +551,7 @@ async def get_scores(hotkey: Optional[str] = None, request: Request = None):
             )
     if not rv:
         rv = await get_scoring_data()
-        await settings.redis_client.set("miner_scores", json.dumps(rv))
+        await settings.redis_client.set(cache_key, json.dumps(rv))
     if hotkey:
         for key in rv:
             if key != "totals":

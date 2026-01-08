@@ -44,13 +44,23 @@ LLM_MIN_PRICE_OUT = 0.01
 DIFFUSION_PRICE_MULT_PER_STEP = 0.005
 
 # Minimum utilization of a chute before additional instances can be added.
-UTILIZATION_SCALE_UP = 0.6
+UTILIZATION_SCALE_UP = 0.5
 
-# Cap on number of instances for an underutilized chute.
-UNDERUTILIZED_CAP = 3
+# Utilization threshold below which scale-down is considered.
+# Gap between SCALE_DOWN and SCALE_UP creates a "stable zone".
+UTILIZATION_SCALE_DOWN = 0.35
+
+# Cap on number of instances for an underutilized public chute.
+UNDERUTILIZED_CAP = 2
 
 # Percentage of requests being rate limited to allow scaling up.
 RATE_LIMIT_SCALE_UP = 0.03
+
+# Scale-down moving average parameters.
+# How far back to look in capacity_log for trend analysis.
+SCALE_DOWN_LOOKBACK_MINUTES = 90
+# Can't drop more than this ratio below the rolling average target count.
+SCALE_DOWN_MAX_DROP_RATIO = 0.8
 
 # Maximum size of VLM asset (video/image).
 VLM_MAX_SIZE = 100 * 1024 * 1024
@@ -60,7 +70,7 @@ PRIVATE_INSTANCE_BONUS = 2
 INTEGRATED_SUBNET_BONUS = 3
 
 # TEE bonus.
-TEE_BONUS = 1.5
+TEE_BONUS = 2.25
 
 # Duration for instance disablement when consecutive errors are hit (increases linearly until max).
 INSTANCE_DISABLE_BASE_TIMEOUT = 90
