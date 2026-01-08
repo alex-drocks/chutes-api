@@ -299,8 +299,7 @@ async def list_boosted_chutes():
         query = (
             select(Chute.chute_id, Chute.name, Chute.boost)
             .where(Chute.boost.isnot(None))
-            .where(Chute.boost >= 1)
-            .where(Chute.boost <= 20)
+            .where(Chute.boost > 1)
         )
         result = await session.execute(query)
         chutes = [
