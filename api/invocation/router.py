@@ -274,20 +274,6 @@ async def report_invocation(
             status_code=status.HTTP_409_CONFLICT,
             detail="A report has already been filed for this invocation",
         )
-    invocation_exists = (
-        await db.execute(
-            select(
-                text(
-                    "EXISTS (SELECT 1 FROM invocations WHERE parent_invocation_id = :invocation_id AND user_id = :user_id)"
-                ).bindparams(invocation_id=invocation_id, user_id=current_user.user_id)
-            )
-        )
-    ).scalar()
-    if not invocation_exists:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Invocation not found, or does not belong to you",
-        )
 
     report = Report(
         invocation_id=invocation_id,
