@@ -2287,10 +2287,27 @@ async def calculate_local_decision(ctx: AutoScaleContext):
             )
             return
 
-    # Default/Stable - maintain current count (respecting failsafe minimum)
-    # Chutes in stable zone (between scale_down_threshold and threshold) can still
-    # be forced to donate capacity during arbitration if others are starving
-    ctx.target_count = max(failsafe_min, ctx.current_count)
+    # Moderate Scale-Up: at/above threshold but not starving or rate limiting.
+    # Scale to bring utilization back to the target threshold.
+    if ctx.utilization_basis >= ctx.threshold:
+        # target_count ~= current_count * (util / threshold)
+        desired_count = math.ceil(ctx.current_count * (ctx.utilization_basis / ctx.threshold))
+        desired_count = max(ctx.current_count + 1, desired_count)
+        ctx.target_count = max(failsafe_min, desired_count)
+        ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+        ctx.action = "scale_up_candidate"
+        clamp_to_max_instances(ctx)
+        if ctx.upscale_amount > 0:
+            logger.info(
+                f"Scale up: {ctx.chute_id} - util={ctx.utilization_basis:.1%} >= "
+                f"{ctx.threshold:.1%}, adding {ctx.upscale_amount} instance(s), "
+                f"target={ctx.target_count}"
+            )
+    else:
+        # Default/Stable - maintain current count (respecting failsafe minimum)
+        # Chutes in stable zone (between scale_down_threshold and threshold) can still
+        # be forced to donate capacity during arbitration if others are starving
+        ctx.target_count = max(failsafe_min, ctx.current_count)
 
     if ctx.info.new_chute:
         # New chutes get a boost, but still respect max_instances
