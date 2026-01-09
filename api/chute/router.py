@@ -48,7 +48,7 @@ from api.chute.util import (
     calculate_effective_compute_multiplier,
     get_manual_boosts,
 )
-from api.bounty.util import get_bounty_info, get_bounty_infos
+from api.bounty.util import get_bounty_info, get_bounty_infos, delete_bounty
 from api.instance.schemas import Instance
 from api.instance.util import get_chute_target_manager
 from api.user.schemas import User, PriceOverride
@@ -1249,6 +1249,8 @@ async def _deploy_chute(
 
     await db.commit()
     await db.refresh(chute)
+    if old_version:
+        await delete_bounty(chute.chute_id)
 
     # Update in usage tracker, only after successful DB commit.
     if deployment_fee and not current_user.has_role(Permissioning.free_account):
