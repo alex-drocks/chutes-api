@@ -1486,6 +1486,8 @@ async def _perform_autoscale_impl(
             for starving_ctx in starving_chutes:
                 if starving_ctx.chute_id == ctx.chute_id:
                     continue
+                if ctx.tee != starving_ctx.tee:
+                    continue
                 if (
                     ctx.gpu_count is not None
                     and starving_ctx.gpu_count is not None
