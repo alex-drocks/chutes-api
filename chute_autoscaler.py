@@ -1239,6 +1239,7 @@ async def _perform_autoscale_impl(
                             c.node_selector,
                             c.tee,
                             c.version,
+                            c.boost,
                             MAX(COALESCE(ucb.effective_balance, 0)) AS user_balance,
                             c.max_instances,
                             c.scaling_threshold,
