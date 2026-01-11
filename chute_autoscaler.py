@@ -1324,9 +1324,9 @@ async def _perform_autoscale_impl(
             metrics,
             info,
             supported_gpus,
-            gpu_count,
             instances_by_chute[chute_id],
             db_now,
+            gpu_count,
         )
         contexts[chute_id] = ctx
 
