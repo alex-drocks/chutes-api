@@ -186,6 +186,8 @@ async def get_scale_down_permission(
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-server")
 MIN_CHUTES_FOR_SCALING = 10
 PRICE_COMPATIBILITY_THRESHOLD = 0.67
+AUTOSCALER_FULL_INTERVAL_SECONDS = int(os.getenv("AUTOSCALER_FULL_INTERVAL_SECONDS", "1200"))
+AUTOSCALER_SOFT_INTERVAL_SECONDS = int(os.getenv("AUTOSCALER_SOFT_INTERVAL_SECONDS", "120"))
 
 # Higher min instance counts for some chutes...
 LIMIT_OVERRIDES = {
@@ -830,6 +832,7 @@ async def manage_rolling_updates(
     db_now: datetime,
     chute_target_counts: Dict[str, int] | None = None,
     chute_rate_limiting: Dict[str, bool] | None = None,
+    interval_seconds: int = AUTOSCALER_FULL_INTERVAL_SECONDS,
 ):
     """
     Manage rolling updates by replacing old-version instances with new-version capacity.
@@ -890,6 +893,13 @@ async def manage_rolling_updates(
                     f"Rolling update exceeded 3h cap for {rolling_update.chute_id=}, forcing cleanup"
                 )
             else:
+                permitted_capacity = None
+                if rolling_update.permitted:
+                    try:
+                        permitted_capacity = sum(rolling_update.permitted.values())
+                    except Exception:
+                        permitted_capacity = None
+
                 total_active = (
                     await session.execute(
                         select(func.count())
@@ -906,26 +916,45 @@ async def manage_rolling_updates(
                     target = chute_target_counts.get(rolling_update.chute_id)
                 if target is not None:
                     remaining_seconds = max(0, int((max_duration - elapsed).total_seconds()))
-                    autoscaler_interval = 30 * 60
-                    remaining_cycles = max(1, math.ceil(remaining_seconds / autoscaler_interval))
-                    deletions_needed = math.ceil(len(old_instances) / remaining_cycles)
+                    remaining_cycles = max(1, math.ceil(remaining_seconds / interval_seconds))
+                    max_per_cycle = max(1, math.ceil(len(old_instances) / remaining_cycles))
 
-                    is_rate_limited = False
-                    if chute_rate_limiting is not None:
-                        is_rate_limited = chute_rate_limiting.get(rolling_update.chute_id, False)
+                    if permitted_capacity is None:
+                        permitted_capacity = total_active
+                    baseline_capacity = permitted_capacity
+                    if target is not None and target < baseline_capacity:
+                        baseline_capacity = target
 
-                    deletable = 0
-                    if total_active > target:
-                        deletable = max(total_active - target, deletions_needed)
-                    elif not is_rate_limited:
-                        deletable = deletions_needed
+                    initial_old = max(permitted_capacity or 0, len(old_instances))
+                    elapsed_seconds = max(0, int(elapsed.total_seconds()))
+                    max_seconds = max(1, int(max_duration.total_seconds()))
+                    expected_deleted = int((initial_old * elapsed_seconds) / max_seconds)
+                    deleted_so_far = max(0, initial_old - len(old_instances))
+                    schedule_needed = max(0, expected_deleted - deleted_so_far)
 
-                    deletable = min(deletable, len(old_instances))
+                    available_capacity = max(0, total_active - baseline_capacity)
+                    surplus_based = min(available_capacity, max_per_cycle)
+
+                    deletable = max(schedule_needed, surplus_based)
+                    deletable = min(deletable, max_per_cycle, len(old_instances))
                     if deletable > 0:
                         to_delete = old_instances[:deletable]
 
             if not to_delete:
                 continue
+
+            reason = (
+                "Rolling update timeout (3h cap)"
+                if elapsed >= max_duration
+                else "Rolling update replacement"
+            )
+            instance_ids = [instance.instance_id for instance in to_delete]
+            await session.execute(
+                text(
+                    "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = ANY(:instance_ids)"
+                ),
+                {"reason": reason, "instance_ids": instance_ids},
+            )
 
             for instance in to_delete:
                 await session.delete(instance)
@@ -934,12 +963,6 @@ async def manage_rolling_updates(
                 await session.delete(rolling_update)
 
             await session.commit()
-
-            reason = (
-                "Rolling update timeout (3h cap)"
-                if elapsed >= max_duration
-                else "Rolling update replacement"
-            )
             for instance in to_delete:
                 await notify_deleted(instance, message=reason)
                 await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
@@ -2105,7 +2128,13 @@ async def _perform_autoscale_impl(
 
         # Manage rolling updates (replacement + hard cap enforcement)
         # In soft_mode, still manage rolling updates (they're not scale-downs, they're version transitions)
-        await manage_rolling_updates(db_now, chute_target_counts, chute_rate_limiting)
+        if not soft_mode:
+            await manage_rolling_updates(
+                db_now,
+                chute_target_counts,
+                chute_rate_limiting,
+                interval_seconds=AUTOSCALER_FULL_INTERVAL_SECONDS,
+            )
 
     # Include filtered chutes in capacity logging with their actual targets
     for chute_id, target in filtered_chutes.items():
