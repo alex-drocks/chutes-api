@@ -1512,6 +1512,8 @@ async def _perform_autoscale_impl(
         for ctx in contexts.values():
             if ctx.is_starving:
                 continue
+            if not ctx.public:
+                continue
             for starving_ctx in starving_chutes:
                 if starving_ctx.chute_id == ctx.chute_id:
                     continue
