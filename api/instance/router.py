@@ -465,31 +465,31 @@ async def _validate_launch_config_env(
             )
 
         # Ensure lmcache/vllm/sglang env can't be set outside of user's code.
-        if semcomp(chute.chutes_version or "0.0.0", "0.3.61") >= 0:
-            if any(
-                key.lower().startswith(
+        if semcomp(chute.chutes_version or "0.0.0", "0.4.0") >= 0:
+            banned_keys = [
+                key
+                for key in dump["env"]
+                if key.lower().startswith(
                     (
                         "lmcache",
-                        "sgl_",
-                        "sglang",
-                        "vllm_",
-                        "hf_",
-                        "huggingface_",
-                        "torch",
+                        "hf_token",
+                        "huggingface_hub_token",
+                        "hugging_face_hub_token",
                         "requests_ca_bundle",
                         "curl_ca_bundle",
                         "ssl_cert_file",
-                        "transformers",
-                        "tokenizers",
-                        "safetensors",
-                        "wandb",
-                        "mlflow",
                     )
                 )
-                and key.lower() != "hf_home"
-                for key in dump["env"]
-            ):
-                logger.error(f"{log_prefix} has LLM engine/HF/ssl/cache/etc. overrides")
+                and key.lower()
+                not in (
+                    "hf_home",
+                    "lmcache_use_experimental",
+                )
+            ]
+            if banned_keys:
+                logger.error(
+                    f"{log_prefix} has LLM engine/HF/ssl/cache/etc. overrides: {banned_keys=}"
+                )
                 launch_config.failed_at = func.now()
                 launch_config.verification_error = (
                     "Failed kubernetes environment check (llm/hf/sec/etc. envs)."
