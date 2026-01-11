@@ -486,6 +486,7 @@ async def _validate_launch_config_env(
                         "mlflow",
                     )
                 )
+                and key.lower() != "hf_home"
                 for key in dump["env"]
             ):
                 logger.error(f"{log_prefix} has LLM engine/HF/ssl/cache/etc. overrides")
