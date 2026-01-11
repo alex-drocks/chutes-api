@@ -31,6 +31,7 @@ from api.config import settings
 from api.bounty.util import (
     check_bounty_exists,
     get_bounty_info,
+    get_bounty_infos,
     send_bounty_notification,
 )
 from api.user.service import chutes_user_id
@@ -311,6 +312,7 @@ class AutoScaleContext:
         self.base_multiplier = 0.0  # Base compute multiplier from node selector
         self.effective_multiplier = 0.0  # Total effective compute multiplier for miners
         self.cm_delta_ratio = 0.0  # Ratio of effective/base (how much boost overall)
+        self.has_bounty = False
 
 
 async def instance_cleanup():
@@ -1528,6 +1530,11 @@ async def _perform_autoscale_impl(
                 if ctx.blocked_by_starving:
                     break
 
+    bounty_infos = await get_bounty_infos(list(contexts.keys()))
+    for ctx in contexts.values():
+        if ctx.chute_id in bounty_infos:
+            ctx.has_bounty = True
+
     # 2. Local Decision Making (Ideal World)
     for ctx in contexts.values():
         await calculate_local_decision(ctx)
@@ -1749,11 +1756,6 @@ async def _perform_autoscale_impl(
     # but uses ctx.boost (which may not be saved to DB yet in dry-run mode)
     from api.constants import PRIVATE_INSTANCE_BONUS, INTEGRATED_SUBNET_BONUS, TEE_BONUS
     from api.chute.util import INTEGRATED_SUBNETS
-    from api.bounty.util import get_bounty_infos
-
-    # Batch fetch all bounty info in one Redis round-trip
-    all_chute_ids = list(contexts.keys())
-    bounty_infos = await get_bounty_infos(all_chute_ids)
 
     for ctx in contexts.values():
         try:
@@ -2274,6 +2276,16 @@ async def calculate_local_decision(ctx: AutoScaleContext):
             ctx.upscale_amount = limit - ctx.current_count
             ctx.action = "scale_up_candidate"
             logger.info(f"Chute {ctx.chute_id}: limit override, scaling up to {limit}")
+        return
+
+    if ctx.public and ctx.current_count == 0:
+        ctx.target_count = max(failsafe_min, 2)
+        ctx.upscale_amount = max(1, ctx.target_count - ctx.current_count)
+        ctx.action = "scale_up_candidate"
+        clamp_to_max_instances(ctx)
+        logger.info(
+            f"Scale up: {ctx.chute_id} - bounty with no instances, target={ctx.target_count}"
+        )
         return
 
     # Rolling updates: allow scaling up to ensure smooth transition
