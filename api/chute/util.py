@@ -831,10 +831,9 @@ async def _invoke_one(
                             logger.warning(
                                 f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
                             )
-                            if "affine" in chute.name.lower():
-                                raise InvalidCLLMV(
-                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                                )
+                            raise InvalidCLLMV(
+                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                            )
 
                     last_chunk = chunk
                 if b"data:" in chunk:
@@ -1024,10 +1023,9 @@ async def _invoke_one(
                             logger.warning(
                                 f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
                             )
-                            if "affine" in chute.name.lower():
-                                raise InvalidCLLMV(
-                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                                )
+                            raise InvalidCLLMV(
+                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                            )
                         elif "affine" in chute.name.lower():
                             logger.success(
                                 f"CLLMV success {target.instance_id=} {target.miner_hotkey=} {chute.name=} {chute.chute_id=}"
