@@ -1477,8 +1477,9 @@ async def _perform_autoscale_impl(
         # Chutes in LIMIT_OVERRIDES should never be preempted.
         # Use SMOOTHED utilization for donor determination to prevent flip-flopping
         allow_donor = ctx.public or (ctx.info and ctx.info.user_id == await chutes_user_id())
+        has_active_rate_limiting = ctx.rate_limit_5m > 0 or ctx.rate_limit_15m > 0
         if (
-            not ctx.any_rate_limiting
+            not has_active_rate_limiting
             and ctx.current_count > 0
             and allow_donor
             and ctx.chute_id not in LIMIT_OVERRIDES
