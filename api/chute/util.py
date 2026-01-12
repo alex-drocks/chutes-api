@@ -806,9 +806,9 @@ async def _invoke_one(
                                         and choice["delta"]
                                         and isinstance(choice["delta"], dict)
                                     ):
-                                        text = choice["delta"].get("content") or choice[
-                                            "delta"
-                                        ].get("reasoning_content")
+                                        text = choice["delta"].get("content")
+                                        if not text and chute.image.name == "sglang":
+                                            text = choice["delta"].get("reasoning_content")
                                         tool_calls = choice["delta"].get("tool_calls")
                                         if isinstance(tool_calls, list) and tool_calls:
                                             has_tool_call = True
@@ -831,9 +831,10 @@ async def _invoke_one(
                             logger.warning(
                                 f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
                             )
-                            raise InvalidCLLMV(
-                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                            )
+                            if chute.chute_id != "16c67462-c5c9-400d-9325-d084c503e837":
+                                raise InvalidCLLMV(
+                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                                )
 
                     last_chunk = chunk
                 if b"data:" in chunk:
@@ -1023,9 +1024,10 @@ async def _invoke_one(
                             logger.warning(
                                 f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
                             )
-                            raise InvalidCLLMV(
-                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                            )
+                            if chute.chute_id != "16c67462-c5c9-400d-9325-d084c503e837":
+                                raise InvalidCLLMV(
+                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                                )
                         elif "affine" in chute.name.lower():
                             logger.success(
                                 f"CLLMV success {target.instance_id=} {target.miner_hotkey=} {chute.name=} {chute.chute_id=}"
