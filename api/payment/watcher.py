@@ -162,14 +162,26 @@ class PaymentMonitor:
     async def _refresh_addresses(self):
         """
         Refresh the set of payment addresses from database.
+        Only fetches users updated since the last refresh (minus a buffer for in-flight
+        transactions) to minimize network usage.
         """
         async with get_session() as session:
+            # Get current DB time for timestamp tracking
+            db_now = (await session.execute(select(func.now()))).scalar()
+
             query = select(User.payment_address, User.updated_at)
+            if self._user_refresh_timestamp is not None:
+                # Use a 2-minute lookback buffer to catch any in-flight transactions
+                # that may commit with an earlier updated_at timestamp
+                lookback = self._user_refresh_timestamp - timedelta(minutes=2)
+                query = query.where(User.updated_at > lookback)
             query = query.order_by(User.updated_at.asc())
             result = await session.execute(query)
-            for payment_address, updated_at in result:
+            for payment_address, _ in result:
                 self._payment_addresses.add(payment_address)
-                self._user_refresh_timestamp = updated_at
+
+            # Advance timestamp to now (minus buffer) so next query only gets truly new users
+            self._user_refresh_timestamp = db_now
 
     async def _handle_payment(
         self,
