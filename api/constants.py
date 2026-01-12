@@ -146,7 +146,8 @@ latest_logs AS (
         ll.rate_limited_requests_1h,
         ll.instance_count,
         ll.action_taken,
-        ll.target_count
+        ll.target_count,
+        ll.effective_multiplier
     FROM chute_details cd
     CROSS JOIN LATERAL (
         SELECT
@@ -169,7 +170,8 @@ latest_logs AS (
             rate_limited_requests_1h,
             instance_count,
             action_taken,
-            target_count
+            target_count,
+            effective_multiplier
         FROM capacity_log cl
         WHERE cl.chute_id = cd.chute_id
         ORDER BY cl.timestamp DESC
@@ -199,6 +201,7 @@ SELECT
     ll.instance_count,
     ll.action_taken,
     ll.target_count,
+    ll.effective_multiplier,
     cd.total_instance_count,
     cd.active_instance_count
 FROM chute_details cd
