@@ -192,24 +192,11 @@ AUTOSCALER_SOFT_INTERVAL_SECONDS = int(os.getenv("AUTOSCALER_SOFT_INTERVAL_SECON
 
 # Higher min instance counts for some chutes...
 LIMIT_OVERRIDES = {
-    "0596f791-79e9-51e1-bf93-93f22a4e8110": 1,
-    "8f3bb827-b9e6-5487-88bc-ee8f0c6f5810": 4,
     "0d7184a2-32a3-53e0-9607-058c37edaab5": 36,
 }
 FAILSAFE = {
     "722df757-203b-58df-b54b-22130fd1fc53": 20,
-    "398651e1-5f85-5e50-a513-7c5324e8e839": 20,
-    "4fa0c7f5-82f7-59d1-8996-661bb778893d": 15,
-    "d711f181-5b21-5169-a011-ccb472a1604f": 10,
-    "08a7a60f-6956-5a9e-9983-5603c3ac5a38": 10,
-    "579ca543-dda4-51d0-83ef-5667d1a5ed5f": 9,
     "4f82321e-3e58-55da-ba44-051686ddbfe5": 8,
-    "8d008c10-60d3-51e8-9272-c428ed6ff576": 6,
-    "02636d63-c996-5779-a0a2-25712469a7ca": 6,
-    "b2b7a64c-b203-5a5f-8982-a9c5cc12058c": 6,
-    "4bbc44e9-6bfc-5e21-a91d-129bff2fb6d4": 5,
-    "ae3b9d04-28fa-543a-9276-290da772dc23": 5,
-    "689d2caa-01c1-5de1-ba69-39c5398be0c6": 5,
 }
 
 
