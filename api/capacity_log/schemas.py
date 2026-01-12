@@ -39,5 +39,8 @@ class CapacityLog(Base):
     # Target number of instances.
     target_count = Column(Integer, nullable=False)
 
+    # Effective compute multiplier at time of logging.
+    effective_multiplier = Column(Float, nullable=True)
+
     # Index on the timestamp and chute_id.
     __table_args__ = (Index("idx_capacity_log_chute_timestamp", "chute_id", "timestamp"),)

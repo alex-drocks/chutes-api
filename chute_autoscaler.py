@@ -1112,10 +1112,13 @@ async def log_capacity_metrics(
     chute_metrics: Dict[str, Dict],
     chute_actions: Dict[str, str],
     chute_target_counts: Dict[str, int],
+    chute_effective_multipliers: Dict[str, float] = None,
 ):
     """
     Log all chute metrics to the capacity_log table.
     """
+    if chute_effective_multipliers is None:
+        chute_effective_multipliers = {}
     async with get_session() as session:
         await session.execute(text("SET LOCAL statement_timeout = '5s'"))
         instance_counts = {}
@@ -1155,6 +1158,7 @@ async def log_capacity_metrics(
                 instance_count=instance_counts.get(chute_id, 0),
                 action_taken=chute_actions.get(chute_id, "no_action"),
                 target_count=chute_target_counts.get(chute_id, UNDERUTILIZED_CAP),
+                effective_multiplier=chute_effective_multipliers.get(chute_id),
             )
             session.add(capacity_log)
             logged_count += 1
@@ -2133,7 +2137,16 @@ async def _perform_autoscale_impl(
         chute_actions[chute_id] = "filtered"
         chute_target_counts[chute_id] = target
 
-    await log_capacity_metrics(chute_metrics, chute_actions, chute_target_counts)
+    # Build effective_multipliers dict from contexts
+    chute_effective_multipliers = {
+        ctx.chute_id: ctx.effective_multiplier
+        for ctx in contexts.values()
+        if ctx.effective_multiplier > 0
+    }
+
+    await log_capacity_metrics(
+        chute_metrics, chute_actions, chute_target_counts, chute_effective_multipliers
+    )
 
     # 5. Execute Downsizing (skip in soft_mode)
     if soft_mode:
