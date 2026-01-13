@@ -736,6 +736,7 @@ async def _invoke_one(
             last_chunk = None
             any_chunks = False
             chunk_idx = 0
+            cllmv_verified = False
             async for raw_chunk in response.content:
                 chunk = raw_chunk
                 if iv:
@@ -816,9 +817,10 @@ async def _invoke_one(
                                     text = choice.get("text")
 
                         # Verify the hash.
-                        if (text or not has_tool_call) and (
-                            not verification_token
-                            or not cllmv_validate(
+                        # If verification token is missing but we've already verified at least
+                        # one token in this stream, don't fail.
+                        if (text or not has_tool_call) and verification_token:
+                            if not cllmv_validate(
                                 data.get("id") or "bad",
                                 data.get("created") or 0,
                                 text,
@@ -826,8 +828,15 @@ async def _invoke_one(
                                 target.config_id,
                                 model_identifier,
                                 chute.revision,
-                            )
-                        ):
+                            ):
+                                logger.warning(
+                                    f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
+                                )
+                                raise InvalidCLLMV(
+                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                                )
+                            cllmv_verified = True
+                        elif (text or not has_tool_call) and not verification_token and not cllmv_verified:
                             logger.warning(
                                 f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
                             )
