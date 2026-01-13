@@ -826,7 +826,7 @@ def _image_supports_cllmv(image, name: str, min_version: int) -> bool:
 
 
 def image_supports_cllmv(
-    image, min_sglang_version: int = 2025100801, min_vllm_version: int = 2026010900
+    image, min_sglang_version: int = 2025100801, min_vllm_version: int = 2026011301
 ) -> bool:
     if _image_supports_cllmv(image, "sglang", min_version=min_sglang_version):
         return True

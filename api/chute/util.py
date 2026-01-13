@@ -793,7 +793,6 @@ async def _invoke_one(
                         )
                         verification_token = data.get("chutes_verification")
                         text = None
-                        has_tool_call = False
                         if (
                             "choices" in data
                             and isinstance(data["choices"], list)
@@ -808,18 +807,13 @@ async def _invoke_one(
                                         and isinstance(choice["delta"], dict)
                                     ):
                                         text = choice["delta"].get("content")
-                                        if not text and chute.image.name == "sglang":
+                                        if not text:
                                             text = choice["delta"].get("reasoning_content")
-                                        tool_calls = choice["delta"].get("tool_calls")
-                                        if isinstance(tool_calls, list) and tool_calls:
-                                            has_tool_call = True
                                 else:
                                     text = choice.get("text")
 
                         # Verify the hash.
-                        # If verification token is missing but we've already verified at least
-                        # one token in this stream, don't fail.
-                        if (text or not has_tool_call) and verification_token:
+                        if text and verification_token:
                             if not cllmv_validate(
                                 data.get("id") or "bad",
                                 data.get("created") or 0,
@@ -832,18 +826,19 @@ async def _invoke_one(
                                 logger.warning(
                                     f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
                                 )
-                                raise InvalidCLLMV(
-                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                                )
+                                if not chute.tee:
+                                    raise InvalidCLLMV(
+                                        f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                                    )
                             cllmv_verified = True
-                        elif (text or not has_tool_call) and not verification_token and not cllmv_verified:
+                        elif text and not verification_token and not cllmv_verified:
                             logger.warning(
                                 f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
                             )
-                            raise InvalidCLLMV(
-                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                            )
-
+                            if not chute.tee:
+                                raise InvalidCLLMV(
+                                    f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                                )
                     last_chunk = chunk
                 if b"data:" in chunk:
                     any_chunks = True
@@ -1017,28 +1012,30 @@ async def _invoke_one(
                             if "text" in choice and not plain_path.startswith("chat"):
                                 text = choice["text"]
                             elif isinstance(choice.get("message"), dict):
-                                text = choice["message"].get(
-                                    "content", choice["message"].get("reasoning_content")
+                                text = choice["message"].get("content")
+                                if not text:
+                                    text = choice["message"].get("reasoning_content")
+                        if text:
+                            if not verification_token or not cllmv_validate(
+                                json_data.get("id") or "bad",
+                                json_data.get("created") or 0,
+                                text,
+                                verification_token,
+                                target.config_id,
+                                model_identifier,
+                                chute.revision,
+                            ):
+                                logger.warning(
+                                    f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
                                 )
-                        if not verification_token or not cllmv_validate(
-                            json_data.get("id") or "bad",
-                            json_data.get("created") or 0,
-                            text,
-                            verification_token,
-                            target.config_id,
-                            model_identifier,
-                            chute.revision,
-                        ):
-                            logger.warning(
-                                f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
-                            )
-                            raise InvalidCLLMV(
-                                f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
-                            )
-                        elif "affine" in chute.name.lower():
-                            logger.success(
-                                f"CLLMV success {target.instance_id=} {target.miner_hotkey=} {chute.name=} {chute.chute_id=}"
-                            )
+                                if not chute.tee:
+                                    raise InvalidCLLMV(
+                                        f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
+                                    )
+                            elif "affine" in chute.name.lower():
+                                logger.success(
+                                    f"CLLMV success {target.instance_id=} {target.miner_hotkey=} {chute.name=} {chute.chute_id=}"
+                                )
 
                     output_text = None
                     if plain_path == "chat":
