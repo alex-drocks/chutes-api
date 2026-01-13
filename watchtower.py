@@ -16,7 +16,6 @@ import traceback
 import tempfile
 from contextlib import asynccontextmanager
 from loguru import logger
-from datetime import timedelta
 from api.config import settings
 from api.util import (
     aes_encrypt,
@@ -29,7 +28,7 @@ from api.util import (
     notify_job_deleted,
 )
 from api.database import get_session
-from api.chute.schemas import Chute, RollingUpdate
+from api.chute.schemas import Chute
 from api.job.schemas import Job
 from api.exceptions import EnvdumpMissing
 from sqlalchemy import text, update, func, select
@@ -1037,63 +1036,6 @@ async def remove_bad_chutes():
             logger.success(f"Chute seems fine: {chute.chute_id=} {chute.name=}")
 
 
-async def rolling_update_cleanup():
-    """
-    Continuously clean up any stale rolling updates.
-    """
-    while True:
-        try:
-            logger.info("Checking for rolling update cleanup...")
-            async with get_session() as session:
-                old_updates = (
-                    (
-                        await session.execute(
-                            select(RollingUpdate).where(
-                                RollingUpdate.started_at <= func.now() - timedelta(hours=1)
-                            )
-                        )
-                    )
-                    .unique()
-                    .scalars()
-                    .all()
-                )
-                for update in old_updates:
-                    logger.warning(
-                        f"Found old/stale rolling update: {update.chute_id=} {update.started_at=}"
-                    )
-                    await session.delete(update)
-                if old_updates:
-                    await session.commit()
-
-                # Clean up old versions.
-                chutes = (
-                    (await session.execute(select(Chute).options(selectinload(Chute.instances))))
-                    .unique()
-                    .scalars()
-                    .all()
-                )
-                for chute in chutes:
-                    if chute.rolling_update:
-                        continue
-                    for instance in chute.instances:
-                        if instance.version and instance.version != chute.version:
-                            logger.warning(
-                                f"Would be deleting {instance.instance_id=} of {instance.miner_hotkey=} since {instance.version=} != {chute.version}"
-                            )
-                            await purge_and_notify(
-                                instance,
-                                reason=(
-                                    f"{instance.instance_id=} of {instance.miner_hotkey=} "
-                                    f"has an old version: {instance.version=} vs {chute.version=}"
-                                ),
-                            )
-
-        except Exception as exc:
-            logger.error(f"Error cleaning up rolling updates: {exc}")
-
-        await asyncio.sleep(60)
-
-
 async def procs_check():
     """
     Check processes.
@@ -1442,9 +1384,6 @@ async def main():
     """
     Main loop, continuously check all chutes and instances.
     """
-
-    # Rolling update cleanup.
-    asyncio.create_task(rolling_update_cleanup())
 
     # Secondary process check.
     asyncio.create_task(procs_check())
