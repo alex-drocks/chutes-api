@@ -1013,7 +1013,7 @@ async def _invoke_one(
                                 text = choice["text"]
                             elif isinstance(choice.get("message"), dict):
                                 text = choice["message"].get("content")
-                                if not text:
+                                if not text and chute.image.name != "sglang":
                                     text = choice["message"].get("reasoning_content")
                         if text:
                             if not verification_token or not cllmv_validate(
