@@ -824,7 +824,7 @@ async def _invoke_one(
                                 chute.revision,
                             ):
                                 logger.warning(
-                                    f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}: {data=}"
+                                    f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
                                 )
                                 if not chute.tee:
                                     raise InvalidCLLMV(
