@@ -63,7 +63,7 @@ class LockNotAcquired(Exception):
 
 
 @asynccontextmanager
-async def autoscaler_lock(soft_mode: bool = False):
+async def autoscaler_lock(soft_mode: bool = False, skip_lock: bool = False):
     """
     Distributed lock using Redis to prevent concurrent autoscaler runs.
 
@@ -71,25 +71,48 @@ async def autoscaler_lock(soft_mode: bool = False):
     Releases lock on exit (or lets it expire if process crashes).
 
     If soft_mode=True and lock is held, exits quietly instead of raising.
-    Full mode always raises if lock is held.
+    Full mode retries for up to 60 seconds before failing.
+    If skip_lock=True (for dry-run), yields immediately without acquiring lock.
     """
+    if skip_lock:
+        logger.info("Skipping lock acquisition (dry-run mode)")
+        yield
+        return
+
     lock_id = str(uuid.uuid4())
     acquired = False
+    max_retries = 12  # 12 retries * 5 seconds = 60 seconds
+    retry_delay = 5
 
     try:
-        acquired = await settings.redis_client.set(
-            AUTOSCALER_LOCK_KEY,
-            lock_id,
-            nx=True,
-            ex=AUTOSCALER_LOCK_TTL,
-        )
-        if not acquired:
+        for attempt in range(max_retries):
+            acquired = await settings.redis_client.set(
+                AUTOSCALER_LOCK_KEY,
+                lock_id,
+                nx=True,
+                ex=AUTOSCALER_LOCK_TTL,
+            )
+            if acquired:
+                break
+
             ttl = await settings.redis_client.ttl(AUTOSCALER_LOCK_KEY)
             if soft_mode:
                 logger.info(f"Lock held (TTL: {ttl}s), skipping soft mode run")
                 raise LockNotAcquired()
+
+            # Full mode: retry with backoff
+            if attempt < max_retries - 1:
+                logger.info(
+                    f"Lock held (TTL: {ttl}s), retrying in {retry_delay}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                await asyncio.sleep(retry_delay)
             else:
-                raise RuntimeError(f"Another autoscaler is running (lock TTL: {ttl}s). Aborting.")
+                raise RuntimeError(
+                    f"Another autoscaler is running (lock TTL: {ttl}s). "
+                    f"Gave up after {max_retries} retries (~{max_retries * retry_delay}s)."
+                )
+
         logger.info(f"Acquired autoscaler lock: {lock_id}")
         yield
     finally:
@@ -129,7 +152,7 @@ def retry_on_db_failure(max_retries=3, delay=1.0):
 
 @retry_on_db_failure()
 async def get_scale_down_permission(
-    chute_id: str, current_count: int, proposed_target: int
+    chute_id: str, current_count: int, proposed_target: int, current_rate_limit: float = 0
 ) -> Tuple[bool, str]:
     """
     Check if scale-down is permitted based on historical capacity_log trends.
@@ -139,10 +162,16 @@ async def get_scale_down_permission(
     Scale-down is permitted if:
     1. We have enough historical data (at least 3 samples)
     2. Proposed target isn't drastically below recent average (within SCALE_DOWN_MAX_DROP_RATIO)
-    3. No significant rate limiting occurred in the lookback window
+    3. No significant rate limiting is currently occurring (uses current metrics, not historical)
 
     This prevents thrashing and respects bursty traffic patterns.
     """
+    # Check for current rate limiting first (using live metrics passed from context)
+    # Previously this checked MAX(rate_limit) over 90 minutes which was too conservative -
+    # old rate limiting would block scale-downs even after traffic had subsided
+    if current_rate_limit >= 0.01:
+        return False, f"rate_limiting_in_window ({current_rate_limit:.1%})"
+
     async with get_session() as session:
         await session.execute(text("SET LOCAL statement_timeout = '5s'"))
         result = await session.execute(
@@ -151,11 +180,6 @@ async def get_scale_down_permission(
                     AVG(target_count) as avg_target,
                     MAX(target_count) as max_target,
                     AVG(utilization_15m) as avg_util,
-                    MAX(GREATEST(
-                        COALESCE(rate_limit_ratio_5m, 0),
-                        COALESCE(rate_limit_ratio_15m, 0),
-                        COALESCE(rate_limit_ratio_1h, 0)
-                    )) as max_rate_limit,
                     COUNT(*) as sample_count
                 FROM capacity_log
                 WHERE chute_id = :chute_id
@@ -167,10 +191,6 @@ async def get_scale_down_permission(
 
         if not row or row.sample_count < 3:
             return False, "insufficient_history"
-
-        # Check for rate limiting in the lookback window
-        if row.max_rate_limit and row.max_rate_limit >= 0.01:
-            return False, f"rate_limiting_in_window ({row.max_rate_limit:.1%})"
 
         # Check if proposed target is within acceptable range of rolling average
         min_allowed_target = max(1, int(float(row.avg_target) * SCALE_DOWN_MAX_DROP_RATIO))
@@ -1194,7 +1214,7 @@ async def perform_autoscale(
                         be if the updated compute multipliers were applied.
     """
     try:
-        async with autoscaler_lock(soft_mode=soft_mode):
+        async with autoscaler_lock(soft_mode=soft_mode, skip_lock=dry_run):
             await _perform_autoscale_impl(
                 dry_run, soft_mode, dry_run_csv, refresh_multipliers, simulate_scores
             )
@@ -1855,7 +1875,7 @@ async def _perform_autoscale_impl(
         # Skip this check in soft_mode since we won't execute scale-downs anyway
         if ctx.action == "scale_down_candidate" and ctx.downscale_amount > 0 and not soft_mode:
             permitted, reason = await get_scale_down_permission(
-                ctx.chute_id, ctx.current_count, ctx.target_count
+                ctx.chute_id, ctx.current_count, ctx.target_count, ctx.rate_limit_basis
             )
             if not permitted:
                 # Moving average check blocked voluntary scale-down
@@ -2365,23 +2385,42 @@ async def calculate_local_decision(ctx: AutoScaleContext):
         and ctx.current_count > failsafe_min
         and not ctx.any_rate_limiting
     ):
-        # Calculate what utilization would be after removing one instance
-        # Use raw utilization_basis for projection since it's about immediate capacity
-        if ctx.current_count > 1:
-            projected_util = (ctx.utilization_basis * ctx.current_count) / (ctx.current_count - 1)
-        else:
-            projected_util = 1.0
-
-        # Only scale down if projected utilization stays below scale-up threshold
-        if projected_util < ctx.threshold:
-            ctx.downscale_amount = 1
-            ctx.target_count = ctx.current_count - 1
-            ctx.action = "scale_down_candidate"
-            logger.info(
-                f"Scale down candidate: {ctx.chute_id} - smoothed_util={ctx.smoothed_util:.1%} < {ctx.scale_down_threshold:.1%}, "
-                f"raw_util={ctx.utilization_basis:.1%}, projected_util={projected_util:.1%}, target={ctx.target_count}"
+        # Calculate ideal target count that would bring utilization up to threshold
+        # ideal_count = current_count * (util / threshold)
+        # Example: 29 instances at 6.2% util with 40% threshold -> 29 * 0.062/0.4 = 4.5 -> 5 instances
+        if ctx.utilization_basis > 0:
+            ideal_count = max(
+                failsafe_min, math.ceil(ctx.current_count * ctx.utilization_basis / ctx.threshold)
             )
-            return
+        else:
+            ideal_count = failsafe_min
+
+        excess = ctx.current_count - ideal_count
+
+        # Remove 1/4 of excess per cycle to avoid thrashing
+        # This allows gradual convergence while still being responsive
+        # e.g., 29 instances, ideal=5, excess=24 -> remove 6 this cycle
+        # Next cycle: ~23 instances, utilization adjusts, recalculate
+        num_to_remove = max(1, excess // 4)
+
+        # Ensure we don't go below failsafe
+        num_to_remove = min(num_to_remove, ctx.current_count - failsafe_min)
+
+        if num_to_remove > 0:
+            proposed_target = ctx.current_count - num_to_remove
+            # Verify projected utilization stays below scale-up threshold
+            projected_util = (ctx.utilization_basis * ctx.current_count) / proposed_target
+
+            if projected_util < ctx.threshold:
+                ctx.downscale_amount = num_to_remove
+                ctx.target_count = proposed_target
+                ctx.action = "scale_down_candidate"
+                logger.info(
+                    f"Scale down candidate: {ctx.chute_id} - smoothed_util={ctx.smoothed_util:.1%} < {ctx.scale_down_threshold:.1%}, "
+                    f"raw_util={ctx.utilization_basis:.1%}, ideal_count={ideal_count}, excess={excess}, "
+                    f"removing {num_to_remove} (1/3 of excess), projected_util={projected_util:.1%}, target={ctx.target_count}"
+                )
+                return
 
     # Moderate Scale-Up: at/above threshold but not starving or rate limiting.
     # Scale to bring utilization back to the target threshold.

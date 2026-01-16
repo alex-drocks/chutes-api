@@ -48,7 +48,7 @@ UTILIZATION_SCALE_UP = 0.5
 
 # Utilization threshold below which scale-down is considered.
 # Gap between SCALE_DOWN and SCALE_UP creates a "stable zone".
-UTILIZATION_SCALE_DOWN = 0.35
+UTILIZATION_SCALE_DOWN = 0.3
 
 # Cap on number of instances for an underutilized public chute.
 UNDERUTILIZED_CAP = 2
@@ -60,7 +60,7 @@ RATE_LIMIT_SCALE_UP = 0.03
 # How far back to look in capacity_log for trend analysis.
 SCALE_DOWN_LOOKBACK_MINUTES = 90
 # Can't drop more than this ratio below the rolling average target count.
-SCALE_DOWN_MAX_DROP_RATIO = 0.8
+SCALE_DOWN_MAX_DROP_RATIO = 0.6
 
 # Maximum size of VLM asset (video/image).
 VLM_MAX_SIZE = 100 * 1024 * 1024
