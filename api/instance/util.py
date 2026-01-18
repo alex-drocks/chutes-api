@@ -432,12 +432,13 @@ class LeastConnManager:
         result = sorted(
             [self.instances[iid] for iid in routable if iid in self.instances],
             key=lambda inst: counts[inst.instance_id],
-        )[:3]
+        )[:2]
+        r_inst_ids = {r.instance_id for r in result}
 
         # Add remaining instances
         for count in sorted(grouped_by_count.keys()):
             result.extend(
-                [inst for inst in grouped_by_count[count] if inst.instance_id not in routable]
+                [inst for inst in grouped_by_count[count] if inst.instance_id not in r_inst_ids]
             )
 
         return result

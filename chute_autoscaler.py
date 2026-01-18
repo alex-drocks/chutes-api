@@ -211,11 +211,11 @@ AUTOSCALER_FULL_INTERVAL_SECONDS = int(os.getenv("AUTOSCALER_FULL_INTERVAL_SECON
 AUTOSCALER_SOFT_INTERVAL_SECONDS = int(os.getenv("AUTOSCALER_SOFT_INTERVAL_SECONDS", "120"))
 
 # Higher min instance counts for some chutes...
-LIMIT_OVERRIDES = {
-    "0d7184a2-32a3-53e0-9607-058c37edaab5": 36,
-}
+LIMIT_OVERRIDES = {}
 FAILSAFE = {
+    "0d7184a2-32a3-53e0-9607-058c37edaab5": 40,
     "722df757-203b-58df-b54b-22130fd1fc53": 20,
+    "14a91d88-d6d6-5046-aaf4-eb3ad96b7247": 10,
     "4f82321e-3e58-55da-ba44-051686ddbfe5": 8,
 }
 
