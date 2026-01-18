@@ -886,32 +886,28 @@ async def process_pending_stakes():
 
                     async with get_session() as session:
                         if is_complete:
-                            # Staking complete (chain exhausted), burn alpha if applicable
-                            # For alpha payments (any netuid != 0), stake moves to settings.netuid
-                            # so we always burn on settings.netuid after move_stake completes
-                            if pending_stake.netuid != 0:
-                                # Burn alpha on our subnet (settings.netuid)
-                                burn_success = await burn_alpha(substrate, keypair)
-                                if not burn_success:
-                                    await session.execute(
-                                        update(PendingStake)
-                                        .where(
-                                            and_(
-                                                PendingStake.wallet_address
-                                                == pending_stake.wallet_address,
-                                                PendingStake.netuid == pending_stake.netuid,
-                                                PendingStake.source_hotkey
-                                                == pending_stake.source_hotkey,
-                                            )
-                                        )
-                                        .values(
-                                            status="pending",
-                                            last_processed_at=func.now(),
-                                            error_message="Alpha burn failed, will retry",
+                            # Once we've got all stake on our netuid, we can burn...
+                            burn_success = await burn_alpha(substrate, keypair)
+                            if not burn_success:
+                                await session.execute(
+                                    update(PendingStake)
+                                    .where(
+                                        and_(
+                                            PendingStake.wallet_address
+                                            == pending_stake.wallet_address,
+                                            PendingStake.netuid == pending_stake.netuid,
+                                            PendingStake.source_hotkey
+                                            == pending_stake.source_hotkey,
                                         )
                                     )
-                                    await session.commit()
-                                    return
+                                    .values(
+                                        status="pending",
+                                        last_processed_at=func.now(),
+                                        error_message="Alpha burn failed, will retry",
+                                    )
+                                )
+                                await session.commit()
+                                return
 
                             # Atomically decrement by original amount (not set to 0) to handle
                             # concurrent upserts that may have added to pending_balance.
