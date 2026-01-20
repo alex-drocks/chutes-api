@@ -37,6 +37,7 @@ from api.constants import (
     INTEGRATED_SUBNET_BONUS,
 )
 from api.node.schemas import Node
+from api.permissions import Permissioning
 from api.payment.util import decrypt_secret
 from api.node.util import get_node_by_id
 from api.chute.schemas import Chute, NodeSelector
@@ -1624,12 +1625,11 @@ async def stream_logs(
     current_user: User = Depends(get_current_user()),
 ):
     """
-    Fetch the raw kubernetes pod logs, but only if the chute is private.
+    Fetch raw kubernetes pod logs.
 
-    These are application-level logs, which for example would not include
-    any prompts/responses/etc. by default for any sglang/vllm container.
-
-    The caveat is that affine admins can view any affine chute pod logs.
+    NOTE: These are pod logs, not request data/etc., so it will never
+    include prompts, responses, etc. Used for troubleshooting and checking
+    status of warmup, etc.
     """
     # These are raw application (k8s pod) logs
     instance = (
@@ -1648,15 +1648,16 @@ async def stream_logs(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Instance not found.",
         )
-    if (
-        instance.chute.user_id != current_user.user_id
-        and not await is_shared(instance.chute.chute_id, current_user.user_id)
-    ) or instance.chute.public:
-        if not subnet_role_accessible(instance.chute, current_user, admin=True):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You may only view logs for your own (private) chutes.",
-            )
+    if not current_user.has_role(Permissioning.chutes_support):
+        if (
+            instance.chute.user_id != current_user.user_id
+            and not await is_shared(instance.chute.chute_id, current_user.user_id)
+        ) or instance.chute.public:
+            if not subnet_role_accessible(instance.chute, current_user, admin=True):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You may only view logs for your own (private) chutes.",
+                )
     if not 0 <= backfill <= 10000:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

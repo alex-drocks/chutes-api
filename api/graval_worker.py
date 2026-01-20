@@ -37,6 +37,7 @@ from api.database import get_session
 from api.node.schemas import Node
 from api.bounty.util import create_bounty_if_not_exists, get_bounty_amount, send_bounty_notification
 from api.instance.schemas import Instance
+from api.image.schemas import Image
 from sqlalchemy import update, func
 from sqlalchemy.future import select
 from taskiq_redis import ListQueueBroker, RedisAsyncResultBackend
@@ -605,8 +606,18 @@ async def generate_fs_hash(
     if not os.getenv("CFSV_OP"):
         return "__disabled__"
 
+    # Get the chutes version to determine the cfsv binary to use.
+    async with get_session() as session:
+        chutes_version = (
+            (await session.execute(select(Image.chutes_version).where(Image.image_id == image_id)))
+            .unique()
+            .scalar_one_or_none()
+        )
+
+    bin_name = "cfsv" if semcomp(chutes_version or "0.0.0", "0.4.7") < 0 else "cfsv_v2"
+
     chutes_location = pkg_resources.get_distribution("chutes").location
-    cfsv_path = os.path.join(chutes_location, "chutes", "cfsv")
+    cfsv_path = os.path.join(chutes_location, "chutes", bin_name)
     mode = "sparse" if sparse else "full"
     seed_str = str(seed)
 
