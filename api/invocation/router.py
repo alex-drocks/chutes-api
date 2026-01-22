@@ -926,12 +926,6 @@ async def hostname_invocation(
             payload.pop("logprobs", None)
             payload.pop("top_logprobs", None)
 
-        # Turbo consolidation.
-        if model in ("zai-org/GLM-4.6-turbo", "zai-org/GLM-4.6-FP8"):
-            payload["model"] = "zai-org/GLM-4.6"
-        if model in ("zai-org/GLM-4.5-turbo", "zai-org/GLM-4.5-FP8"):
-            payload["model"] = "zai-org/GLM-4.5"
-
         # Header and/or model name options to enable thinking mode for various models.
         enable_thinking = False
         if (request.headers.get("X-Enable-Thinking") or "").lower() == "true":
