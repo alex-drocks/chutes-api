@@ -1253,9 +1253,12 @@ async def activate_launch_config_instance(
             )
 
         # Verify filesystem.
-        if semcomp(chute.chutes_version, "0.4.0") >= 0:
+        if semcomp(chute.chutes_version, "0.4.9") >= 0:
             if not await verify_fs_hash(instance):
-                reason = f"Instance has failed filesystem verification: {instance.instance_id=} {instance.miner_hotkey=}"
+                reason = (
+                    "Instance has failed filesystem verification: "
+                    f"{instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=} {chute.standard_template=}"
+                )
                 logger.warning(reason)
                 await db.delete(instance)
                 await asyncio.create_task(notify_deleted(instance))

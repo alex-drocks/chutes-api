@@ -32,7 +32,6 @@ from api.chute.schemas import Chute
 from api.image.schemas import Image
 from api.job.schemas import Job
 from api.exceptions import EnvdumpMissing
-from api.graval_worker import generate_fs_hash
 from sqlalchemy import text, update, func, select
 from sqlalchemy.orm import joinedload, selectinload
 import api.database.orms  # noqa
@@ -1399,6 +1398,8 @@ async def get_expected_fs_hash(chute_id: str, seed: str):
             .unique()
             .scalar_one_or_none()
         )
+    from api.graval_worker import generate_fs_hash
+
     expected_hash = await generate_fs_hash(
         image_id, patch_version, seed=seed, sparse=False, exclude_path=f"/app/{filename}"
     )
@@ -1420,7 +1421,7 @@ async def verify_fs_hash(instance):
             instance.miner_hotkey,
             f"http://{instance.host}:{instance.port}/{path}",
             enc_payload,
-            timeout=25.0,
+            timeout=60.0,
         ) as resp:
             fs_hash = (await resp.json())["result"]
             expected = await get_expected_fs_hash(instance.chute_id, seed)
