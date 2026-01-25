@@ -60,6 +60,9 @@ class LaunchConfigArgs(BaseModel):
     netnanny_hash: Optional[str] = None
     run_path: Optional[str] = None
     py_dirs: Optional[list[str]] = None
+    rint_commitment: Optional[str] = None
+    rint_nonce: Optional[str] = None
+    rint_pubkey: Optional[str] = None
 
 
 class GravalLaunchConfigArgs(LaunchConfigArgs):
@@ -110,6 +113,13 @@ class Instance(Base):
     env_creation = deferred(Column(JSONB, nullable=True))
     bounty = Column(Boolean, default=False)
 
+    # Runtime integrity (runint) commitment and nonce
+    rint_commitment = Column(String, nullable=True)
+    rint_nonce = Column(String, nullable=True)
+    # ECDH session encryption: miner's pubkey and derived session key
+    rint_pubkey = Column(String, nullable=True)
+    rint_session_key = Column(String, nullable=True)
+
     # Hourly rate charged to customer, which may differ from the hourly rate of the actual
     # GPUs used for this instance due to node selector. For example, if a chute supports
     # both H100 and A100, the user is only charged the A100 rate since the miners *could*
@@ -157,6 +167,7 @@ class LaunchConfig(Base):
     verified_at = Column(DateTime, nullable=True)
     failed_at = Column(DateTime, nullable=True)
     verification_error = Column(String, nullable=True)
+    nonce = Column(String, nullable=True)
 
     instance = relationship("Instance", back_populates="config", uselist=False, lazy="joined")
     job = relationship("Job", back_populates="launch_config")

@@ -19,6 +19,7 @@ import api.miner_client as miner_client
 from loguru import logger
 from typing import Optional, Tuple
 from datetime import datetime, timedelta
+from fastapi.responses import PlainTextResponse
 from fastapi import APIRouter, Depends, HTTPException, Response, status, Header, Request
 from sqlalchemy import select, text, func, update, and_
 from sqlalchemy.orm import joinedload
@@ -75,6 +76,8 @@ from api.util import (
     is_valid_host,
     generate_ip_token,
     aes_decrypt,
+    derive_ecdh_session_key,
+    decrypt_instance_response,
     notify_created,
     notify_deleted,
     notify_verified,
@@ -96,6 +99,65 @@ INSPECTO.verify_hash.restype = ctypes.c_char_p
 NETNANNY = ctypes.CDLL("/usr/local/lib/chutes-nnverify.so")
 NETNANNY.verify.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
 NETNANNY.verify.restype = ctypes.c_int
+
+
+def _verify_rint_commitment(commitment_hex: str, expected_nonce: str) -> bool:
+    """Verify the runtime integrity commitment (mini-cert)."""
+    try:
+        from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
+        import hashlib
+
+        if len(commitment_hex) != 324:
+            logger.error(f"RUNINT: commitment length mismatch: {len(commitment_hex)} != 324")
+            return False
+
+        commitment_bytes = bytes.fromhex(commitment_hex)
+        if len(commitment_bytes) != 162:
+            logger.error(
+                f"RUNINT: decoded commitment length mismatch: {len(commitment_bytes)} != 162"
+            )
+            return False
+
+        prefix = commitment_bytes[0]
+        if prefix != 0x03:
+            logger.error(f"RUNINT: invalid prefix: {prefix} != 0x03")
+            return False
+
+        version = commitment_bytes[1]
+        if version != 0x03:
+            logger.error(f"RUNINT: invalid version: {version} != 0x03")
+            return False
+
+        pubkey_bytes = commitment_bytes[2:66]
+        nonce_bytes = commitment_bytes[66:82]
+        lib_fp_bytes = commitment_bytes[82:98]
+        sig_bytes = commitment_bytes[98:162]
+
+        nonce_tag = b"rint-nonce-v3"
+        expected_nonce_value = hashlib.sha256(
+            nonce_tag + lib_fp_bytes + expected_nonce.encode()
+        ).digest()[:16]
+        if nonce_bytes != expected_nonce_value:
+            logger.error(
+                f"RUNINT: nonce mismatch: {nonce_bytes.hex()} != {expected_nonce_value.hex()}"
+            )
+            return False
+
+        vk = VerifyingKey.from_string(pubkey_bytes, curve=SECP256k1)
+        msg_to_verify = bytes([version]) + pubkey_bytes + nonce_bytes + lib_fp_bytes
+        msg_hash = hashlib.sha256(msg_to_verify).digest()
+
+        try:
+            vk.verify_digest(sig_bytes, msg_hash)
+            logger.info("RUNINT: commitment verification successful")
+            return True
+        except BadSignatureError:
+            logger.error("RUNINT: signature verification failed")
+            return False
+
+    except Exception as e:
+        logger.error(f"RUNINT: commitment verification error: {e}")
+        return False
 
 
 async def _load_chute(db, chute_id: str) -> Chute:
@@ -536,13 +598,16 @@ async def _validate_launch_config_inspecto(
                     inspecto_valid = False
                     fail_reason = "missing args.inspecto hash!"
                 else:
+                    seed = launch_config.config_id
+                    if semcomp(chute.chutes_version, "0.4.9") >= 0:
+                        seed = args.rint_nonce + seed
                     raw = INSPECTO.verify_hash(
                         inspecto_hash.encode("utf-8"),
-                        launch_config.config_id.encode("utf-8"),
+                        seed.encode("utf-8"),
                         args.inspecto.encode("utf-8"),
                     )
                     logger.info(
-                        f"INSPECTO: verify_hash({inspecto_hash=}, {launch_config.config_id=}, {args.inspecto=}) -> {raw=}",
+                        f"INSPECTO: verify_hash({inspecto_hash=}, {seed=}, {args.inspecto=}) -> {raw=}",
                     )
                     if not raw:
                         inspecto_valid = False
@@ -705,6 +770,37 @@ async def _validate_launch_config_instance(
                 detail=launch_config.verification_error,
             )
 
+    # Runtime integrity (runint) verification for version >= 0.4.9
+    if semcomp(chute.chutes_version, "0.4.9") >= 0:
+        if not launch_config.nonce or not args.rint_nonce:
+            logger.error(f"{log_prefix} missing runint nonce in launch config")
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "Missing runtime integrity nonce"
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=launch_config.verification_error,
+            )
+        if semcomp(chute.chutes_version, "0.5.0") >= 0:
+            if not args.rint_commitment:
+                logger.error(f"{log_prefix} missing runint commitment")
+                launch_config.failed_at = func.now()
+                launch_config.verification_error = "Missing runtime integrity commitment"
+                await db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=launch_config.verification_error,
+                )
+            if not _verify_rint_commitment(args.rint_commitment, launch_config.nonce):
+                logger.error(f"{log_prefix} invalid runint commitment")
+                launch_config.failed_at = func.now()
+                launch_config.verification_error = "Invalid runtime integrity commitment"
+                await db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=launch_config.verification_error,
+                )
+
     await _validate_launch_config_filesystem(db, launch_config, chute, args)
 
     # Assign the job to this launch config.
@@ -759,6 +855,9 @@ async def _validate_launch_config_instance(
         hourly_rate=(await node_selector.current_estimated_price())["usd"]["hour"],
         inspecto=getattr(args, "inspecto", None),
         env_creation=args.model_dump(),
+        rint_commitment=getattr(args, "rint_commitment", None),
+        rint_nonce=getattr(args, "rint_nonce", None),
+        rint_pubkey=getattr(args, "rint_pubkey", None),
     )
     if launch_config.job_id or (
         not chute.public
@@ -988,9 +1087,18 @@ async def get_launch_config(
         disk_gb = job.job_args["_disk_gb"]
 
     # Create the launch config and JWT.
+    config_id = str(uuid.uuid4())
+
+    # Generate runtime integrity nonce.
+    rint_nonce = None
+    if semcomp(chute.chutes_version or "0.0.0", "0.4.9") >= 0:
+        rint_nonce = secrets.token_hex(16)
+        # Store in Redis with 2-hour TTL, keyed by config_id
+        await settings.redis_client.set(f"rint_nonce:{config_id}", rint_nonce, ex=7200)
+
     try:
         launch_config = LaunchConfig(
-            config_id=str(uuid.uuid4()),
+            config_id=config_id,
             env_key=secrets.token_bytes(16).hex(),
             chute_id=chute_id,
             job_id=job_id,
@@ -999,6 +1107,7 @@ async def get_launch_config(
             miner_coldkey=miner.coldkey,
             env_type="tee" if chute.tee else "graval",
             seed=0,
+            nonce=rint_nonce,
         )
         db.add(launch_config)
         await db.commit()
@@ -1022,6 +1131,70 @@ async def get_launch_config(
         "token": token,
         "config_id": launch_config.config_id,
     }
+
+
+@router.get("/launch_config/{config_id}/nonce")
+async def get_rint_nonce(
+    config_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    authorization: str = Header(None, alias=AUTHORIZATION_HEADER),
+):
+    """
+    Get runtime integrity nonce for a launch config.
+
+    This endpoint consumes the nonce from Redis (one-time use).
+    Only available for chutes_version >= 0.4.9.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header required",
+        )
+
+    token = authorization.strip().split(" ")[-1]
+
+    # Decode the JWT to get the config_id
+    try:
+        import jwt
+
+        payload = jwt.decode(token, options={"verify_signature": False})
+        req_config_id = payload.get("sub")
+        if not req_config_id or req_config_id != config_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or missing token, expected launch JWT",
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid token: {exc}",
+        )
+
+    # Load the launch config
+    launch_config = (
+        (await db.execute(select(LaunchConfig).where(LaunchConfig.config_id == config_id)))
+        .unique()
+        .scalar_one_or_none()
+    )
+    if not launch_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Launch config {config_id} not found",
+        )
+
+    # Check if nonce exists in Redis (one-time use)
+    redis_key = f"rint_nonce:{config_id}"
+    nonce = await settings.redis_client.get(redis_key)
+    if not nonce:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Nonce for config {config_id} not found or already consumed",
+        )
+
+    # Consume the nonce (delete from Redis)
+    await settings.redis_client.delete(redis_key)
+
+    return PlainTextResponse(nonce.decode() if isinstance(nonce, bytes) else nonce)
 
 
 @router.post("/launch_config/{config_id}/attest")
@@ -1098,6 +1271,33 @@ async def claim_launch_config(
         config_id, args, request, db, authorization
     )
 
+    # Enforce rint_pubkey for chutes >= 0.5.1
+    if semcomp(instance.chutes_version or "0.0.0", "0.5.1") >= 0:
+        if not instance.rint_pubkey or not instance.rint_nonce:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="rint_pubkey and rint_nonce required for chutes >= 0.5.1",
+            )
+
+    # Generate ECDH session key if miner provided rint_pubkey
+    validator_pubkey = None
+    if instance.rint_pubkey and instance.rint_nonce:
+        try:
+            validator_pubkey, session_key = derive_ecdh_session_key(
+                instance.rint_pubkey, instance.rint_nonce
+            )
+            instance.rint_session_key = session_key
+            logger.info(
+                f"Derived ECDH session key for {instance.instance_id} "
+                f"validator_pubkey={validator_pubkey[:16]}..."
+            )
+        except Exception as exc:
+            logger.error(f"ECDH session key derivation failed: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ECDH session key derivation failed: {exc}",
+            )
+
     # Generate a ciphertext for this instance to decrypt.
     node = random.choice(nodes)
     iterations = SUPPORTED_GPUS[node.gpu_identifier]["graval"]["iterations"]
@@ -1137,7 +1337,7 @@ async def claim_launch_config(
 
     # The miner must decrypt the proposed symmetric key from this response payload,
     # then encrypt something using this symmetric key within the expected graval timeout.
-    return {
+    response = {
         "seed": launch_config.seed,
         "iterations": iterations,
         "job_id": launch_config.job_id,
@@ -1147,6 +1347,43 @@ async def claim_launch_config(
             "response_plaintext": f"secret is {launch_config.config_id} {launch_config.seed}",
         },
     }
+
+    # Include validator pubkey if ECDH was used
+    if validator_pubkey:
+        response["validator_pubkey"] = validator_pubkey
+
+    return response
+
+
+async def delayed_instance_fs_check(instance_id: str):
+    await asyncio.sleep(10)  # XXX wait for uvicorn to be listening.
+
+    async with get_session() as session:
+        instance = (
+            (await session.execute(select(Instance).where(Instance.instance_id == instance_id)))
+            .unique()
+            .scalar_one_or_none()
+        )
+        if not instance:
+            return
+        if not await verify_fs_hash(instance):
+            reason = (
+                "Instance has failed filesystem verification: "
+                f"{instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=}"
+            )
+            logger.warning(reason)
+            await session.delete(instance)
+            await asyncio.create_task(notify_deleted(instance))
+            await session.execute(
+                text(
+                    "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
+                ),
+                {"instance_id": instance.instance_id, "reason": reason},
+            )
+        else:
+            logger.success(
+                f"Successfully verified FS hash {instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=}"
+            )
 
 
 @router.get("/launch_config/{config_id}/activate")
@@ -1252,26 +1489,28 @@ async def activate_launch_config_instance(
                 f"bounty_boost={bounty_boost:.2f}x, total compute_multiplier={instance.compute_multiplier}"
             )
 
-        # Verify filesystem.
-        if semcomp(chute.chutes_version, "0.4.9") >= 0:
-            if not await verify_fs_hash(instance):
-                reason = (
-                    "Instance has failed filesystem verification: "
-                    f"{instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=} {chute.standard_template=}"
-                )
-                logger.warning(reason)
-                await db.delete(instance)
-                await asyncio.create_task(notify_deleted(instance))
-                await db.execute(
-                    text(
-                        "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
-                    ),
-                    {"instance_id": instance.instance_id, "reason": reason},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=reason,
-                )
+        ## Verify filesystem.
+        # if semcomp(chute.chutes_version, "0.4.9") >= 0:
+        #    if not await verify_fs_hash(instance):
+        #        reason = (
+        #            "Instance has failed filesystem verification: "
+        #            f"{instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=} {chute.standard_template=}"
+        #        )
+        #        logger.warning(reason)
+        #        await db.delete(instance)
+        #        await asyncio.create_task(notify_deleted(instance))
+        #        await db.execute(
+        #            text(
+        #                "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
+        #            ),
+        #            {"instance_id": instance.instance_id, "reason": reason},
+        #        )
+        #        raise HTTPException(
+        #            status_code=status.HTTP_403_FORBIDDEN,
+        #            detail=reason,
+        #        )
+        # elif semcomp(chute.chutes_version, "0.4.0") >= 0:
+        #    asyncio.create_task(delayed_instance_fs_check(instance.instance_id))
 
         instance.active = True
         instance.activated_at = func.now()
@@ -1542,8 +1781,11 @@ async def verify_launch_config_instance(
     response_body = await request.json()
     try:
         ciphertext = response_body["response"]
-        iv = response_body["iv"]
-        response = await asyncio.to_thread(aes_decrypt, ciphertext, instance.symmetric_key, iv)
+        iv = response_body.get("iv")  # Only used for legacy AES-CBC
+        # PoVW always uses legacy AES-CBC with symmetric_key (graval decrypts it client-side)
+        response = await asyncio.to_thread(
+            decrypt_instance_response, ciphertext, instance, iv, force_legacy=True
+        )
         assert response == f"secret is {launch_config.config_id} {launch_config.seed}".encode()
     except Exception as exc:
         reason = (

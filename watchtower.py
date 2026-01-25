@@ -18,13 +18,11 @@ from contextlib import asynccontextmanager
 from loguru import logger
 from api.config import settings
 from api.util import (
-    aes_encrypt,
-    aes_decrypt,
+    decrypt_instance_response,
+    encrypt_instance_request,
     decrypt_envdump_cipher,
     semcomp,
     notify_deleted,
-    use_encryption_v2,
-    use_encrypted_path,
     notify_job_deleted,
 )
 from api.database import get_session
@@ -61,7 +59,7 @@ SHORT_LIVED_CHUTES = """
 SELECT instance_audit.chute_id AS chute_id, EXTRACT(EPOCH FROM MAX(instance_audit.deleted_at) - MIN(instance_audit.created_at)) AS lifetime
 FROM instance_audit
 LEFT OUTER JOIN chutes ON instance_audit.chute_id = chutes.chute_id
-WHERE chutes.name IS NULL 
+WHERE chutes.name IS NULL
 AND deleted_at >= now() - interval '7 days'
 GROUP BY instance_audit.chute_id
 HAVING EXTRACT(EPOCH FROM MAX(instance_audit.deleted_at) - MIN(instance_audit.created_at)) <= 86400
@@ -155,9 +153,8 @@ async def do_slurp(instance, payload, encrypted_slurp):
     """
     Slurp a remote file.
     """
-    enc_payload = aes_encrypt(json.dumps(payload), instance.symmetric_key)
-    iv = enc_payload[:32]
-    path = aes_encrypt("/_slurp", instance.symmetric_key, hex_encode=True)
+    enc_payload, iv = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_slurp", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
         f"http://{instance.host}:{instance.port}/{path}",
@@ -171,11 +168,9 @@ async def do_slurp(instance, payload, encrypted_slurp):
             )
             return None
         if encrypted_slurp:
-            return base64.b64decode(
-                json.loads(aes_decrypt((await resp.json())["json"], instance.symmetric_key, iv=iv))[
-                    "contents"
-                ]
-            )
+            resp_data = (await resp.json())["json"]
+            decrypted = decrypt_instance_response(resp_data, instance, iv=iv)
+            return base64.b64decode(json.loads(decrypted)["contents"])
         return base64.b64decode(await resp.text())
 
 
@@ -232,17 +227,21 @@ async def check_weight_files(
     if cached:
         file_size = int(cached.decode())
     else:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://huggingface.co/{model}/resolve/{revision}/{path}"
-            async with session.head(url) as resp:
-                content_length = resp.headers.get("x-linked-size")
-                if content_length:
-                    logger.info(f"Size of {model} -> {path}: {content_length}")
-                    file_size = int(content_length)
-                    await settings.redis_client.set(size_key, content_length)
-                else:
-                    logger.warning(f"Could not determine size of {model} -> {path}")
-                    return
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"https://huggingface.co/{model}/resolve/{revision}/{path}"
+                async with session.head(url) as resp:
+                    content_length = resp.headers.get("x-linked-size")
+                    if content_length:
+                        logger.info(f"Size of {model} -> {path}: {content_length}")
+                        file_size = int(content_length)
+                        await settings.redis_client.set(size_key, content_length)
+                    else:
+                        logger.warning(f"Could not determine size of {model} -> {path}")
+                        return
+        except Exception as exc:
+            logger.error(f"Error checking HF for {model=} {revision=} {path=}: {str(exc)}")
+            return
 
     # Now a random offset.
     start_byte = 0
@@ -252,13 +251,17 @@ async def check_weight_files(
         start_byte = random.randint(0, file_size - check_size)
         end_byte = start_byte + check_size
     expected_digest = None
-    async with aiohttp.ClientSession() as session:
-        url = f"https://huggingface.co/{model}/resolve/{revision}/{path}"
-        async with session.get(
-            url, headers={"Range": f"bytes={start_byte}-{end_byte - 1}"}
-        ) as resp:
-            content = await resp.read()
-            expected_digest = hashlib.sha256(content).hexdigest()
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://huggingface.co/{model}/resolve/{revision}/{path}"
+            async with session.get(
+                url, headers={"Range": f"bytes={start_byte}-{end_byte - 1}"}
+            ) as resp:
+                content = await resp.read()
+                expected_digest = hashlib.sha256(content).hexdigest()
+    except Exception as exc:
+        logger.error(f"Error checking HF for {model=} {revision=} and {path=}: {str(exc)}")
+        return
 
     # Verify each instance has the same.
     logger.info(
@@ -481,14 +484,8 @@ async def check_ping(chute, instance):
     Single instance ping test.
     """
     expected = str(uuid.uuid4())
-    payload = {"foo": expected}
-    iv = None
-    if use_encryption_v2(chute.chutes_version):
-        payload = aes_encrypt(json.dumps(payload), instance.symmetric_key)
-        iv = payload[:32]
-    path = "_ping"
-    if use_encrypted_path(chute.chutes_version):
-        path = aes_encrypt("/_ping", instance.symmetric_key, hex_encode=True)
+    payload, iv = encrypt_instance_request(json.dumps({"foo": expected}), instance)
+    path, _ = encrypt_instance_request("/_ping", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
         f"http://{instance.host}:{instance.port}/{path}",
@@ -496,12 +493,9 @@ async def check_ping(chute, instance):
         timeout=10.0,
     ) as resp:
         raw_content = await resp.read()
-        pong = None
-        if b'{"json":' in raw_content:
-            decrypted = aes_decrypt(json.loads(raw_content)["json"], instance.symmetric_key, iv)
-            pong = json.loads(decrypted)["foo"]
-        else:
-            pong = json.loads(raw_content)["foo"]
+        resp_data = json.loads(raw_content)
+        decrypted = decrypt_instance_response(resp_data["json"], instance, iv)
+        pong = json.loads(decrypted)["foo"]
         if pong != expected:
             logger.warning(f"Incorrect challenge response to ping: {pong=} vs {expected=}")
             return False
@@ -1062,7 +1056,7 @@ async def procs_check():
                 if await settings.redis_client.get(skip_key):
                     await settings.redis_client.expire(skip_key, 60 * 60 * 24 * 2)
                     continue
-                path = aes_encrypt("/_procs", instance.symmetric_key, hex_encode=True)
+                path, _ = encrypt_instance_request("/_procs", instance, hex_encode=True)
                 try:
                     async with miner_client.get(
                         instance.miner_hotkey,
@@ -1102,8 +1096,8 @@ async def get_env_dump(instance):
     """
     key = secrets.token_bytes(16)
     payload = {"key": key.hex()}
-    enc_payload = aes_encrypt(json.dumps(payload), instance.symmetric_key)
-    path = aes_encrypt("/_env_dump", instance.symmetric_key, hex_encode=True)
+    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_env_dump", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
         f"http://{instance.host}:{instance.port}/{path}",
@@ -1122,8 +1116,8 @@ async def get_env_sig(instance, salt):
     Load the environment signature from the remote instance.
     """
     payload = {"salt": salt}
-    enc_payload = aes_encrypt(json.dumps(payload), instance.symmetric_key)
-    path = aes_encrypt("/_env_sig", instance.symmetric_key, hex_encode=True)
+    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_env_sig", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
         f"http://{instance.host}:{instance.port}/{path}",
@@ -1145,8 +1139,8 @@ async def get_dump(instance, outdir: str = None):
 
     key = secrets.token_bytes(16).hex()
     payload = {"key": key}
-    enc_payload = aes_encrypt(json.dumps(payload), instance.symmetric_key)
-    path = aes_encrypt("/_dump", instance.symmetric_key, hex_encode=True)
+    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_dump", instance, hex_encode=True)
     logger.info(f"Querying {instance.instance_id=} envdump (dump)")
     try:
         async with miner_client.post(
@@ -1211,8 +1205,8 @@ async def get_sig(instance):
     """
     salt = secrets.token_bytes(16).hex()
     payload = {"salt": salt}
-    enc_payload = aes_encrypt(json.dumps(payload), instance.symmetric_key)
-    path = aes_encrypt("/_sig", instance.symmetric_key, hex_encode=True)
+    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_sig", instance, hex_encode=True)
     logger.info(f"Querying {instance.instance_id=} envdump (sig)")
     async with miner_client.post(
         instance.miner_hotkey,
@@ -1237,8 +1231,8 @@ async def slurp(instance, path, offset: int = 0, length: int = 0):
 
     key = secrets.token_bytes(16).hex()
     payload = {"key": key, "path": path, "offset": offset, "length": length}
-    enc_payload = aes_encrypt(json.dumps(payload), instance.symmetric_key)
-    path = aes_encrypt("/_eslurp", instance.symmetric_key, hex_encode=True)
+    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_eslurp", instance, hex_encode=True)
     logger.info(f"Querying {instance.instance_id=} envdump (slurp) {payload=}")
     async with miner_client.post(
         instance.miner_hotkey,
@@ -1414,14 +1408,14 @@ async def verify_fs_hash(instance):
         return True
 
     seed = secrets.token_bytes(16).hex()
-    enc_payload = aes_encrypt(json.dumps({"salt": seed, "mode": "full"}), instance.symmetric_key)
-    path = aes_encrypt("/_fs_hash", instance.symmetric_key, hex_encode=True)
+    enc_payload, _ = encrypt_instance_request(json.dumps({"salt": seed, "mode": "full"}), instance)
+    path, _ = encrypt_instance_request("/_fs_hash", instance, hex_encode=True)
     try:
         async with miner_client.post(
             instance.miner_hotkey,
             f"http://{instance.host}:{instance.port}/{path}",
             enc_payload,
-            timeout=60.0,
+            timeout=90.0,
         ) as resp:
             fs_hash = (await resp.json())["result"]
             expected = await get_expected_fs_hash(instance.chute_id, seed)
@@ -1436,6 +1430,114 @@ async def verify_fs_hash(instance):
         )
         return False
     return True
+
+
+async def check_runint(instance: Instance) -> bool:
+    """Verify runtime integrity of an instance via the /_rint endpoint."""
+    if semcomp(instance.chutes_version or "0.0.0", "0.5.0") < 0:
+        return True
+
+    if not instance.rint_commitment or not instance.rint_nonce:
+        logger.warning(
+            f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} missing commitment/nonce"
+        )
+        return False
+
+    try:
+        from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
+
+        challenge = secrets.token_hex(16)
+        payload = {"challenge": challenge}
+        enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+        path, _ = encrypt_instance_request("/_rint", instance, hex_encode=True)
+
+        async with miner_client.post(
+            instance.miner_hotkey,
+            f"http://{instance.host}:{instance.port}/{path}",
+            enc_payload,
+            timeout=15.0,
+        ) as resp:
+            if resp.status != 200:
+                logger.error(
+                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"returned {resp.status}"
+                )
+                return False
+
+            body = await resp.json()
+            if "error" in body:
+                logger.error(
+                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"error: {body['error']}"
+                )
+                return False
+
+            signature_hex = body.get("signature")
+            epoch = body.get("epoch")
+
+            if not signature_hex or epoch is None:
+                logger.error(
+                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"missing signature or epoch"
+                )
+                return False
+
+            commitment_bytes = bytes.fromhex(instance.rint_commitment)
+            if len(commitment_bytes) != 162 or commitment_bytes[0] != 0x03:
+                logger.error(
+                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"invalid commitment format: len={len(commitment_bytes)} prefix={commitment_bytes[0] if commitment_bytes else None}"
+                )
+                return False
+            if commitment_bytes[1] != 0x03:
+                logger.error(
+                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"invalid commitment version: {commitment_bytes[1]}"
+                )
+                return False
+            pubkey_bytes = commitment_bytes[2:66]
+            vk = VerifyingKey.from_string(pubkey_bytes, curve=SECP256k1)
+
+            # Message format: challenge || epoch (8 bytes LE)
+            epoch_bytes = epoch.to_bytes(8, byteorder="little")
+            msg = challenge.encode() + epoch_bytes
+            msg_hash = hashlib.sha256(msg).digest()
+            sig_bytes = bytes.fromhex(signature_hex)
+
+            try:
+                vk.verify_digest(sig_bytes, msg_hash)
+            except BadSignatureError:
+                logger.error(
+                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"signature verification failed"
+                )
+                return False
+
+            # Check epoch is advancing (detect replay attacks)
+            epoch_key = f"rint_epoch:{instance.instance_id}"
+            last_epoch = await settings.redis_client.get(epoch_key)
+            if last_epoch is not None:
+                last_epoch = int(last_epoch)
+                if epoch < last_epoch:
+                    logger.error(
+                        f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"epoch went backwards: {epoch} < {last_epoch}"
+                    )
+                    return False
+            await settings.redis_client.set(epoch_key, str(epoch), ex=86400)
+
+            logger.success(
+                f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                f"verification successful {epoch=}"
+            )
+            return True
+
+    except Exception as e:
+        logger.error(
+            f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+            f"error: {e}\n{traceback.format_exc()}"
+        )
+        return False
 
 
 async def main():
