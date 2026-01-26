@@ -692,7 +692,9 @@ async def _validate_launch_config_instance(
         ):
             await _check_scalable_private(db, chute, miner)
         else:
-            await _check_scalable(db, chute, launch_config.miner_hotkey)
+            await _check_scalable(
+                db, chute, launch_config.miner_hotkey, created_at=launch_config.created_at
+            )
 
     # IP matches?
     x_forwarded_for = request.headers.get("X-Forwarded-For")
@@ -1450,7 +1452,9 @@ async def activate_launch_config_instance(
                 detail=reason,
             )
     elif chute.public:
-        await _check_scalable(db, chute, launch_config.miner_hotkey, created_at=instance.created_at)
+        await _check_scalable(
+            db, chute, launch_config.miner_hotkey, created_at=launch_config.created_at
+        )
 
     # Activate the instance (and trigger tentative billing stop time).
     if not instance.active:
