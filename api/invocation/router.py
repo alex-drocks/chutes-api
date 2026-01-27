@@ -353,6 +353,7 @@ async def _invoke(
             "aef797d4-f375-5beb-9986-3ad245947469",
             "689d2caa-01c1-5de1-ba69-39c5398be0c6",
             "3048cf8d-67de-5a6d-9fdd-18ac9c560c05",
+            "391c8d5f-0d84-51fe-85cf-984ea6d7e49e",
         ]:
             logger.warning(
                 f"Attempt to invoke {chute.chute_id=} {chute.name=} from openrouter free account."
@@ -963,6 +964,7 @@ async def hostname_invocation(
                 (
                     "deepseek-ai/DeepSeek-V3.2-Speciale",
                     "zai-org/GLM-4.7",
+                    "moonshotai/Kimi-K2.5",
                 )
             ):
                 payload["chat_template_kwargs"]["thinking"] = True
@@ -972,6 +974,8 @@ async def hostname_invocation(
             "deepseek-ai/DeepSeek-V3.2-Speciale-TEE",
             "zai-org/GLM-4.7",
             "zai-org/GLM-4.7-TEE",
+            "moonshotai/Kimi-K2.5",
+            "moonshotai/Kimi-K2.5-TEE",
         ):
             payload["chat_template_kwargs"] = {"thinking": True, "enable_thinking": True}
 
