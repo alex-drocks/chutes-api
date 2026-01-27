@@ -82,7 +82,7 @@ async def model_to_dict(obj, bounty_info: Optional[dict] = None):
     data.pop("env_creation", None)
     for key in list(data.keys()):
         if key.startswith("rint_"):
-            data.pop(key, None)
+            del data[key]
     return data
 
 
