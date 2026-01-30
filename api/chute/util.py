@@ -799,12 +799,23 @@ async def _invoke_one(
 
                         # Verify the hash.
                         if text and verification_token:
+                            challenge_val = target.config_id
+                            if (
+                                semcomp(target.chutes_version, "0.5.3") >= 0
+                                and isinstance(chute.image.package_hashes, dict)
+                                and chute.image.package_hashes.get("package") == chute.image.name
+                            ):
+                                challenge_val = (
+                                    target.config_id
+                                    + target.runint_nonce
+                                    + chute.image.package_hashes["hash"]
+                                )
                             if not cllmv_validate(
                                 data.get("id") or "bad",
                                 data.get("created") or 0,
                                 text,
                                 verification_token,
-                                target.config_id,
+                                challenge_val,
                                 model_identifier,
                                 chute.revision,
                             ):
@@ -984,12 +995,23 @@ async def _invoke_one(
                                 if not text and chute.image.name != "sglang":
                                     text = choice["message"].get("reasoning_content")
                         if text:
+                            challenge_val = target.config_id
+                            if (
+                                semcomp(target.chutes_version, "0.5.3") >= 0
+                                and isinstance(chute.image.package_hashes, dict)
+                                and chute.image.package_hashes.get("package") == chute.image.name
+                            ):
+                                challenge_val = (
+                                    target.config_id
+                                    + target.runint_nonce
+                                    + chute.image.package_hashes["hash"]
+                                )
                             if not verification_token or not cllmv_validate(
                                 json_data.get("id") or "bad",
                                 json_data.get("created") or 0,
                                 text,
                                 verification_token,
-                                target.config_id,
+                                challenge_val,
                                 model_identifier,
                                 chute.revision,
                             ):
