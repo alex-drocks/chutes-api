@@ -2,7 +2,6 @@
 Tests for the TEE-ify transformation logic.
 """
 
-import pytest
 from api.chute.teeify import (
     transform_for_tee,
     _calculate_h200_gpu_count,
