@@ -916,14 +916,8 @@ async def hostname_invocation(
                 payload["continue_final_message"] = False
             logger.warning("Resolved continue_final_message/add_generation_prompt conflict")
 
-        # Disable logprobs for now on 3.2* models.
-        if model in (
-            "deepseek-ai/DeepSeek-V3.2-Speciale",
-            "deepseek-ai/DeepSeek-V3.2-Speciale-TEE",
-            "deepseek-ai/DeepSeek-V3.2",
-            "deepseek-ai/DeepSeek-V3.2-TEE",
-            "deepseek-ai/DeepSeek-V3.2-Exp",
-        ):
+        # Disable logprobs for all models, for now - 2026-01-29 JD
+        if "affine" not in model.lower():
             payload.pop("logprobs", None)
             payload.pop("top_logprobs", None)
 
