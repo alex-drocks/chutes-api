@@ -807,7 +807,7 @@ async def _invoke_one(
                             ):
                                 challenge_val = (
                                     target.config_id
-                                    + target.runint_nonce
+                                    + target.rint_nonce
                                     + chute.image.package_hashes["hash"]
                                 )
                             if not cllmv_validate(
@@ -1003,7 +1003,7 @@ async def _invoke_one(
                             ):
                                 challenge_val = (
                                     target.config_id
-                                    + target.runint_nonce
+                                    + target.rint_nonce
                                     + chute.image.package_hashes["hash"]
                                 )
                             if not verification_token or not cllmv_validate(
