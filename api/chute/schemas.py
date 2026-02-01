@@ -250,6 +250,7 @@ class Chute(Base):
     encrypted_fs = Column(Boolean, default=False)
     tee = Column(Boolean, default=False)
     immutable = Column(Boolean, default=False)
+    disabled = Column(Boolean, default=False)
 
     # Stats for sorting.
     invocation_count = Column(BigInteger, default=0)

@@ -1090,7 +1090,7 @@ async def _deploy_chute(
                 image, min_sglang_version=2025111902, min_vllm_version=2026011303
             )
             or image.user_id != await chutes_user_id()
-            or semcomp(image.chutes_version, "0.5.1") < 0
+            or semcomp(image.chutes_version, "0.5.3") < 0
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
