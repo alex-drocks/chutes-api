@@ -48,6 +48,7 @@ from api.chute.util import (
     calculate_effective_compute_multiplier,
     get_manual_boosts,
     invalidate_chute_cache,
+    update_usage_data,
 )
 from api.bounty.util import (
     get_bounty_info,
@@ -97,11 +98,15 @@ async def _inject_current_estimated_price(chute: Chute, response: ChuteResponse)
     Inject the current estimated price data into a response.
     """
     if chute.standard_template == "vllm":
-        per_million_in, per_million_out = await get_mtoken_price("global", chute.chute_id)
+        per_million_in, per_million_out, cache_discount = await get_mtoken_price(
+            "global", chute.chute_id
+        )
+        input_cache_read = per_million_in * (1 - cache_discount)
         response.current_estimated_price = {
             "per_million_tokens": {
                 "input": {"usd": per_million_in},
                 "output": {"usd": per_million_out},
+                "input_cache_read": {"usd": input_cache_read},
             }
         }
         tao_usd = await get_fetcher().get_price("tao")
@@ -111,6 +116,9 @@ async def _inject_current_estimated_price(chute: Chute, response: ChuteResponse)
             )
             response.current_estimated_price["per_million_tokens"]["output"]["tao"] = (
                 per_million_out / tao_usd
+            )
+            response.current_estimated_price["per_million_tokens"]["input_cache_read"]["tao"] = (
+                input_cache_read / tao_usd
             )
     elif chute.standard_template == "diffusion":
         hourly = await selector_hourly_price(chute.node_selector)
@@ -1292,14 +1300,13 @@ async def _deploy_chute(
             f"DEPLOYMENTFEE: {deployment_fee} for {current_user.username=} with "
             f"{chute_args.node_selector=} of {chute_args.name=}, new balance={current_user.balance - deployment_fee}"
         )
-        pipeline = settings.redis_client.pipeline()
-        chute_id = str(
-            uuid.uuid5(uuid.NAMESPACE_OID, f"{current_user.username}::chute::{chute_args.name}")
+        await update_usage_data(
+            current_user.user_id,
+            chute.chute_id,
+            deployment_fee,
+            metrics=None,
+            compute_time=0.0,
         )
-        key = f"balance:{current_user.user_id}:{chute_id}"
-        pipeline.hincrbyfloat(key, "amount", deployment_fee)
-        pipeline.hset(key, "timestamp", int(time.time()))
-        await pipeline.execute()
 
     if old_version:
         if use_rolling_update:
