@@ -56,6 +56,7 @@ from api.util import (
     decrypt_instance_response,
     encrypt_instance_request,
     notify_deleted,
+    nightly_gte,
     image_supports_cllmv,
     extract_hf_model_name,
     has_legacy_private_billing,
@@ -780,7 +781,7 @@ async def _invoke_one(
 
                     # CLLMV check.
                     if (
-                        (random.random() <= 0.005 or chunk_idx <= 3)
+                        (random.random() <= 0.01 or chunk_idx <= 3)
                         and image_supports_cllmv(chute.image)
                         and target.version == chute.version
                         and "model" in data
@@ -789,6 +790,7 @@ async def _invoke_one(
                         model_identifier = (
                             chute.name
                             if chute.image.name == "vllm"
+                            or nightly_gte(chute.image.tag, 2026020200)
                             else extract_hf_model_name(chute.chute_id, chute.code)
                         )
                         verification_token = data.get("chutes_verification")
@@ -997,6 +999,7 @@ async def _invoke_one(
                         model_identifier = (
                             chute.name
                             if chute.image.name == "vllm"
+                            or nightly_gte(chute.image.tag, 2026020200)
                             else extract_hf_model_name(chute.chute_id, chute.code)
                         )
                         verification_token = json_data.get("chutes_verification")

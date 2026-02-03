@@ -1000,10 +1000,7 @@ async def is_cloudflare_ip(ip_address):
     return False
 
 
-def _image_supports_cllmv(image, name: str, min_version: int) -> bool:
-    if image.name != name:
-        return False
-    tag = image.tag.lower()
+def nightly_gte(tag: str, min_version: int) -> bool:
     if not tag.startswith("nightly-") or len(tag) < 18:
         return False
     date_part = tag[8:][:10]
@@ -1012,6 +1009,13 @@ def _image_supports_cllmv(image, name: str, min_version: int) -> bool:
         return date_num >= min_version
     except (ValueError, Exception):
         return False
+
+
+def _image_supports_cllmv(image, name: str, min_version: int) -> bool:
+    if image.name != name:
+        return False
+    tag = image.tag.lower()
+    return nightly_gte(tag, min_version=min_version)
 
 
 def image_supports_cllmv(
