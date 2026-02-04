@@ -845,6 +845,7 @@ async def refresh_instance_compute_multipliers(chute_ids: List[str] = None):
                         AND ia.deleted_at IS NOT NULL
                         AND ia.deleted_at > i.created_at - INTERVAL ':window_hours hours'
                         AND ia.deleted_at <= i.created_at
+                        AND NOT ia.valid_termination
                   )
             """.replace(":penalty_hours", str(THRASH_PENALTY_HOURS)).replace(
                     ":window_hours", str(THRASH_WINDOW_HOURS)
@@ -952,6 +953,7 @@ async def _log_thrashing_instances():
                       AND ia.deleted_at IS NOT NULL
                       AND ia.deleted_at > i.created_at - INTERVAL ':window_hours hours'
                       AND ia.deleted_at <= i.created_at
+                      AND NOT ia.valid_termination
                     ORDER BY ia.deleted_at DESC
                     LIMIT 1
                 ) prior ON true
