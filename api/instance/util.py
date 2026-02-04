@@ -890,6 +890,7 @@ async def is_thrashing_miner(
                       AND deleted_at IS NOT NULL
                       AND deleted_at > NOW() - INTERVAL '{THRASH_WINDOW_HOURS} hours'
                       AND deleted_at <= NOW()
+                      AND NOT valid_termination
                 )
             """),
             {
