@@ -915,7 +915,7 @@ async def _log_thrashing_instances():
     Shows current multiplier vs what it would be without thrash penalty.
     """
     from api.constants import THRASH_WINDOW_HOURS, THRASH_PENALTY_HOURS
-    from api.bounty.util import get_bounty_info, calculate_bounty_boost
+    from api.bounty.util import get_bounty_info
 
     async with get_session() as session:
         await session.execute(text("SET LOCAL statement_timeout = '10s'"))

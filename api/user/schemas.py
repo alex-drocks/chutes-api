@@ -307,7 +307,7 @@ class PriceOverride(Base):
 
     @staticmethod
     async def get(user_id: str, chute_id: str):
-        key = f"priceoverride:{user_id}:{chute_id}"
+        key = f"priceoverride2:{user_id}:{chute_id}"
         cached = (await settings.redis_client.get(key) or b"").decode()
         if cached:
             try:

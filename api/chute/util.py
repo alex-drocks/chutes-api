@@ -810,9 +810,14 @@ async def _invoke_one(
                                         and choice["delta"]
                                         and isinstance(choice["delta"], dict)
                                     ):
-                                        text = choice["delta"].get("content")
-                                        if not text:
-                                            text = choice["delta"].get("reasoning_content")
+                                        for content_key in [
+                                            "content",
+                                            "reasoning",
+                                            "reasoning_content",
+                                        ]:
+                                            text = choice["delta"].get(content_key)
+                                            if text:
+                                                break
                                 else:
                                     text = choice.get("text")
 
@@ -1025,7 +1030,9 @@ async def _invoke_one(
                             elif isinstance(choice.get("message"), dict):
                                 text = choice["message"].get("content")
                                 if not text and chute.image.name != "sglang":
-                                    text = choice["message"].get("reasoning_content")
+                                    text = choice["message"].get(
+                                        "reasoning", choice["message"].get("reasoning_content")
+                                    )
                         if text:
                             challenge_val = target.config_id
                             if (
@@ -1062,9 +1069,10 @@ async def _invoke_one(
                     output_text = None
                     if plain_path == "chat":
                         try:
-                            output_text = json_data["choices"][0]["message"]["content"] or ""
-                            reasoning_content = json_data["choices"][0]["message"].get(
-                                "reasoning_content"
+                            message_obj = json_data["choices"][0]["message"]
+                            output_text = message_obj.get("content") or ""
+                            reasoning_content = message_obj.get(
+                                "reasoning", message_obj.get("reasoning_content")
                             )
                             if reasoning_content:
                                 output_text += " " + reasoning_content
@@ -1332,7 +1340,7 @@ async def invoke(
                         if cached_tokens > 0 and prompt_tokens > 0:
                             cache_hit_rate = round(cached_tokens / prompt_tokens * 100, 1)
                             logger.info(
-                                f"Cache hit: model={chute.name} prompt_tokens={prompt_tokens} "
+                                f"Cache hit: model={chute.name}:{chute.chute_id} prompt_tokens={prompt_tokens} user={user.user_id} "
                                 f"cached_tokens={cached_tokens} hit_rate={cache_hit_rate}% discount={cache_discount}"
                             )
 
@@ -1699,7 +1707,7 @@ async def get_mtoken_price(user_id: str, chute_id: str) -> tuple[float, float, f
 
     Returns: (per_million_in, per_million_out, cache_discount)
     """
-    cache_key = f"mtokenprice2:{user_id}:{chute_id}"
+    cache_key = f"mtokenprice3:{user_id}:{chute_id}"
     cached = await settings.redis_client.get(cache_key)
     if cached is not None:
         try:
