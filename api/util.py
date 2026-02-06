@@ -1093,3 +1093,9 @@ def load_shared_object(pkg_name: str, filename: str):
     pkg_dir = spec.submodule_search_locations[0]
     path = os.path.join(pkg_dir, filename)
     return ctypes.CDLL(path)
+
+
+def is_integrated_subnet(chute) -> bool:
+    return any(
+        config["model_substring"] in chute.name.lower() for config in INTEGRATED_SUBNETS.values()
+    )

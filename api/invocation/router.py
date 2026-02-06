@@ -369,6 +369,7 @@ async def _invoke(
             "689d2caa-01c1-5de1-ba69-39c5398be0c6",
             "3048cf8d-67de-5a6d-9fdd-18ac9c560c05",
             "391c8d5f-0d84-51fe-85cf-984ea6d7e49e",
+            "6d5ac865-d053-56b6-bd56-b1919f743be4",
         ]:
             logger.warning(
                 f"Attempt to invoke {chute.chute_id=} {chute.name=} from openrouter free account."
