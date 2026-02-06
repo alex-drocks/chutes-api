@@ -1779,11 +1779,13 @@ async def _build_launch_config_verified_response(
         .scalars()
         .all()
     )
+    return_value["secrets"] = {}
     if secrets:
-        return_value["secrets"] = {}
         for secret in secrets:
             value = await decrypt_secret(secret.value)
             return_value["secrets"][secret.key] = value
+
+    return_value["secrets"]["PYTHONDONTWRITEBYTECODE"] = "1"
 
     return_value["activation_url"] = (
         f"https://api.{settings.base_domain}/instances/launch_config/{launch_config.config_id}/activate"

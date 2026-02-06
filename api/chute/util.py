@@ -1540,7 +1540,6 @@ async def invoke(
                     error_message = "KEY_EXCHANGE_REQUIRED"
                 elif isinstance(exc, EmptyLLMResponse):
                     error_message = "EMPTY_STREAM"
-                    instant_delete = True
                 elif isinstance(exc, InvalidCLLMV):
                     error_message = "CLLMV_FAILURE"
                     instant_delete = True

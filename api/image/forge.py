@@ -243,6 +243,7 @@ ARG CFSV_OP
 ARG PS_OP
 ENV LD_PRELOAD=""
 COPY cfsv /cfsv
+ENV PYTHONDONTWRITEBYTECODE=1
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 USER root
 RUN cp -f /tmp/chutesfs.index /etc/chutesfs.index && chmod a+r /etc/chutesfs.index
@@ -998,6 +999,7 @@ ARG CFSV_OP
 ARG PS_OP
 ENV LD_PRELOAD=""
 COPY cfsv /cfsv
+ENV PYTHONDONTWRITEBYTECODE=1
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 USER root
 RUN cp -f /tmp/chutesfs.index /etc/chutesfs.index && chmod a+r /etc/chutesfs.index
