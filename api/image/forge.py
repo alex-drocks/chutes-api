@@ -242,8 +242,10 @@ WORKDIR /app
 ARG CFSV_OP
 ARG PS_OP
 ENV LD_PRELOAD=""
-COPY cfsv /cfsv
 ENV PYTHONDONTWRITEBYTECODE=1
+RUN rm -rf does_not_exist.py does_not_exist
+RUN PS_OP="${PS_OP}" chutes run does_not_exist:chute --generate-inspecto-hash > /tmp/inspecto.hash
+COPY cfsv /cfsv
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 USER root
 RUN cp -f /tmp/chutesfs.index /etc/chutesfs.index && chmod a+r /etc/chutesfs.index
@@ -256,11 +258,6 @@ RUN CFSV_OP="${{CFSV_OP}}" /cfsv collect / /etc/chutesfs.index /tmp/chutesfs.dat
             if image.user_id == await chutes_user_id():
                 fsv_dockerfile_content += """
 RUN python -m cllmv.pkg_hash > /tmp/package_hashes.json
-"""
-        fsv_dockerfile_content += """
-RUN rm -rf does_not_exist.py does_not_exist
-RUN PS_OP="${PS_OP}" chutes run does_not_exist:chute --generate-inspecto-hash > /tmp/inspecto.hash
-RUN ls -la /tmp/chutesfs.*
 """
         fsv_dockerfile_path = os.path.join(build_dir, "Dockerfile.fsv")
         with open(fsv_dockerfile_path, "w") as f:
@@ -315,6 +312,7 @@ RUN ls -la /tmp/chutesfs.*
         final_dockerfile_content = f"""FROM {verification_tag} as fsv
 FROM {chutes_tag}
 COPY --from=fsv /etc/chutesfs.index /etc/chutesfs.index
+ENV PYTHONDONTWRITEBYTECODE=1
 ENTRYPOINT []
 """
         final_dockerfile_path = os.path.join(build_dir, "Dockerfile.final")
@@ -998,8 +996,10 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-loginterc
 ARG CFSV_OP
 ARG PS_OP
 ENV LD_PRELOAD=""
-COPY cfsv /cfsv
 ENV PYTHONDONTWRITEBYTECODE=1
+RUN rm -rf does_not_exist.py does_not_exist
+RUN PS_OP="${PS_OP}" chutes run does_not_exist:chute --generate-inspecto-hash > /tmp/inspecto.hash
+COPY cfsv /cfsv
 RUN CFSV_OP="${{CFSV_OP}}" /cfsv index / /tmp/chutesfs.index
 USER root
 RUN cp -f /tmp/chutesfs.index /etc/chutesfs.index && chmod a+r /etc/chutesfs.index
@@ -1012,11 +1012,6 @@ RUN CFSV_OP="${{CFSV_OP}}" /cfsv collect / /etc/chutesfs.index /tmp/chutesfs.dat
                 if image.user_id == await chutes_user_id():
                     fsv_dockerfile_content += """
 RUN python -m cllmv.pkg_hash > /tmp/package_hashes.json
-"""
-            fsv_dockerfile_content += """
-RUN rm -rf does_not_exist.py does_not_exist
-RUN PS_OP="${PS_OP}" chutes run does_not_exist:chute --generate-inspecto-hash > /tmp/inspecto.hash
-RUN ls -la /tmp/chutesfs.*
 """
             fsv_dockerfile_path = os.path.join(build_dir, "Dockerfile.fsv")
             with open(fsv_dockerfile_path, "w") as f:
@@ -1079,6 +1074,7 @@ RUN ls -la /tmp/chutesfs.*
             final_dockerfile_content = f"""FROM {verification_tag} as fsv
 FROM {updated_tag} as base
 COPY --from=fsv /tmp/chutesfs.index /etc/chutesfs.index
+ENV PYTHONDONTWRITEBYTECODE=1
 ENTRYPOINT []
 """
             final_dockerfile_path = os.path.join(build_dir, "Dockerfile.final")

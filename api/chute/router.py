@@ -1105,13 +1105,13 @@ async def _deploy_chute(
                 image, min_sglang_version=2025111902, min_vllm_version=2026011303
             )
             or image.user_id != await chutes_user_id()
-            or semcomp(image.chutes_version, "0.5.3") < 0
+            or semcomp(image.chutes_version, "0.5.4") < 0
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    'Must use image="chutes/sglang:nightly-2025111902.p1" or nightly tag after 20260120*, '
-                    'or image="chutes/vllm:nightly-2026012000" (or more recent nightly vllm) for affine deployments.'
+                    'Must use image="chutes/sglang:nightly-2025111902.p2" or nightly tag after 20260206*, '
+                    'or image="chutes/vllm:nightly-20260206*" (or more recent nightly vllm) for affine deployments.'
                 ),
             )
 
