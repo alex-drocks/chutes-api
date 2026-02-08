@@ -607,7 +607,7 @@ async def get_thrash_cooldowns(
               AND ia.activated_at IS NOT NULL
               AND ia.deleted_at IS NOT NULL
               AND ia.deleted_at > NOW() - INTERVAL '{THRASH_WINDOW_HOURS} hours'
-              AND NOT ia.valid_termination
+              AND ia.valid_termination IS NOT TRUE
             ORDER BY ia.deleted_at DESC
         """),
         {"hotkey": hotkey},
