@@ -1141,7 +1141,7 @@ async def manage_rolling_updates(
             instance_ids = [instance.instance_id for instance in to_delete]
             await session.execute(
                 text(
-                    "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = ANY(:instance_ids)"
+                    "UPDATE instance_audit SET deletion_reason = :reason, valid_termination = true WHERE instance_id = ANY(:instance_ids)"
                 ),
                 {"reason": reason, "instance_ids": instance_ids},
             )
