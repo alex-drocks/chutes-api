@@ -2,6 +2,7 @@
 Routes for chutes.
 """
 
+import asyncio
 import re
 import random
 import string
@@ -50,6 +51,10 @@ from api.chute.util import (
     invalidate_chute_cache,
     update_usage_data,
 )
+from api.server.service import get_chute_instances_evidence
+from api.server.schemas import TeeChuteEvidence
+from api.server.exceptions import ChuteNotTeeError, GetEvidenceError
+from api.rate_limit import rate_limit
 from api.bounty.util import (
     get_bounty_info,
     get_bounty_infos,
@@ -81,6 +86,7 @@ from api.constants import (
 from api.util import (
     semcomp,
     limit_deployments,
+    extract_hf_model_name,
     get_current_hf_commit,
     is_registered_to_subnet,
     notify_deleted,
@@ -88,6 +94,7 @@ from api.util import (
 )
 from api.affine import check_affine_code
 from api.guesser import guesser
+from aiocache import cached, Cache
 from api.chute.teeify import transform_for_tee
 
 router = APIRouter()
@@ -692,6 +699,47 @@ async def get_chute_code(
     return Response(content=chute.code, media_type="text/plain")
 
 
+HF_INFO_CACHE_TTL = 300  # 5 minutes
+
+
+@cached(ttl=HF_INFO_CACHE_TTL, cache=Cache.MEMORY, skip_cache_func=lambda r: r is None)
+async def _get_chute_hf_info(chute_id: str):
+    """
+    Load repo_id and revision for a chute. Returns None if chute not found or has no HF model.
+    Cached by chute_id via aiocache.
+    """
+    chute = await get_one(chute_id)
+    if not chute:
+        return None
+    repo_id = extract_hf_model_name(chute.chute_id, chute.code)
+    if not repo_id:
+        return None
+    revision = (
+        chute.revision
+        if chute.revision
+        else await asyncio.to_thread(get_current_hf_commit, repo_id)
+    )
+    return {"repo_id": repo_id, "revision": revision}
+
+
+@router.get("/{chute_id}/hf_info")
+async def get_chute_hf_info(
+    chute_id: str,
+    _: User = Depends(get_current_user(purpose="cache", registered_to=settings.netuid)),
+):
+    """
+    Return Hugging Face repo_id and revision for a chute so miners can predownload the model.
+    Miner-only; responses are cached by chute_id via aiocache.
+    """
+    result = await _get_chute_hf_info(chute_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chute not found or does not use a Hugging Face model",
+        )
+    return result
+
+
 @router.get("/warmup/{chute_id_or_name:path}")
 async def warm_up_chute(
     chute_id_or_name: str,
@@ -790,6 +838,70 @@ async def get_chute_utilization(request: Request):
             item["total_rate_limit_errors"] = item.get("rate_limited_requests_1h", 0)
             utilization_data.append(item)
         return utilization_data
+
+
+@router.get("/{chute_id_or_name:path}/evidence", response_model=TeeChuteEvidence)
+async def get_tee_chute_evidence(
+    chute_id_or_name: str,
+    nonce: str,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user(purpose="chutes", raise_not_found=False)),
+    _: None = Depends(rate_limit("tee_evidence", 60)),
+):
+    """
+    Get TEE evidence for all instances of a chute (TDX quote, GPU evidence, certificate per instance).
+
+    Args:
+        chute_id_or_name: Chute ID or name
+        nonce: User-provided nonce (64 hex characters, 32 bytes)
+
+    Returns:
+        TeeChuteEvidence with array of TEE instance evidence per instance
+
+    Raises:
+        404: Chute not found
+        400: Invalid nonce format or chute not TEE-enabled
+        403: User cannot access chute
+        429: Rate limit exceeded
+        500: Server attestation failures
+    """
+    chute = await get_one(chute_id_or_name)
+    if not chute:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chute not found",
+        )
+
+    # Auth check - same logic as get_chute
+    authorized = False
+    if (
+        chute.public
+        or (current_user and chute.user_id == current_user.user_id)
+        or (current_user and await is_shared(chute.chute_id, current_user.user_id))
+        or (current_user and subnet_role_accessible(chute, current_user))
+        or "affine" in chute.name.lower()
+    ):
+        authorized = True
+
+    if not authorized:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chute not found, or does not belong to you",
+        )
+
+    try:
+        evidence_list, failed_instance_ids = await get_chute_instances_evidence(
+            db, chute.chute_id, nonce
+        )
+        return TeeChuteEvidence(evidence=evidence_list, failed_instance_ids=failed_instance_ids)
+    except ChuteNotTeeError as e:
+        raise e
+    except GetEvidenceError as e:
+        logger.error(f"Failed to get evidence for chute {chute.chute_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Attestation service unavailable. The attestation proxy could not be reached or returned an error.",
+        )
 
 
 @router.get("/{chute_id_or_name:path}", response_model=ChuteResponse)

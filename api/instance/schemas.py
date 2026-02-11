@@ -63,9 +63,6 @@ class LaunchConfigArgs(BaseModel):
     rint_commitment: Optional[str] = None
     rint_nonce: Optional[str] = None
     rint_pubkey: Optional[str] = None
-
-
-class GravalLaunchConfigArgs(LaunchConfigArgs):
     env: str
     code: Optional[str] = None
     run_code: Optional[str] = None
@@ -73,8 +70,11 @@ class GravalLaunchConfigArgs(LaunchConfigArgs):
 
 
 class TeeLaunchConfigArgs(LaunchConfigArgs):
+    deployment_id: str
+
+
+class LegacyTeeLaunchConfigArgs(LaunchConfigArgs):
     gpu_evidence: list[dict]
-    inspecto: Optional[str] = None
 
 
 class Instance(Base):
@@ -106,6 +106,11 @@ class Instance(Base):
         ForeignKey("launch_configs.config_id", ondelete="SET NULL"),
         nullable=True,
         unique=True,
+    )
+    # Chute deployment ID; set when instance claims TEE launch config and is verified.
+    deployment_id = Column(
+        String,
+        nullable=True,
     )
     cacert = Column(String, nullable=True)
     port_mappings = Column(JSONB, nullable=True)

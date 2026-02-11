@@ -1,3 +1,14 @@
+from enum import Enum
+
+
+class NoncePurpose(str, Enum):
+    """Purpose values for attestation nonces to prevent cross-purpose reuse."""
+
+    BOOT = "boot"
+    RUNTIME = "runtime"
+    INSTANCE_VERIFICATION = "instance_verification"
+
+
 ZERO_ADDRESS_HOTKEY = "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"  # Public key is 0x00000...
 HOTKEY_HEADER = "X-Chutes-Hotkey"
 COLDKEY_HEADER = "X-Chutes-Coldkey"
@@ -8,6 +19,9 @@ PURPOSE_HEADER = "X-Chutes-Purpose"
 MINER_HEADER = "X-Chutes-Miner"
 VALIDATOR_HEADER = "X-Chutes-Validator"
 ENCRYPTED_HEADER = "X-Chutes-Encrypted"
+
+# LUKS volume names allowed in GET/POST (extendable)
+SUPPORTED_LUKS_VOLUMES = ("storage", "tdx-cache")
 
 # Min balance to register via the CLI (tao units)
 MIN_REG_BALANCE = 0.25
