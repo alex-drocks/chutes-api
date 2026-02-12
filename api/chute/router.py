@@ -1617,10 +1617,10 @@ async def deploy_chute(
         )
 
     # Affine chutes cannot be created with tee=True directly - must use /teeify endpoint
-    if "affine" in chute_args.name.lower() and chute_args.tee:
+    if chute_args.tee and not current_user.has_role(Permissioning.unlimited_dev):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Affine chutes cannot be created with tee=True. Deploy without TEE first, then use the /teeify endpoint to promote to TEE.",
+            detail="TEE private deployments are limited at this time due to infrastructure capacity limitations.",
         )
 
     # No-DoS-Plz.
