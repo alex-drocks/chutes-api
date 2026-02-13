@@ -1011,11 +1011,11 @@ async def _invoke_one(
                     # Make sure model name response is valid/matches chute name.
                     if "model" not in json_data or json_data.get("model") != chute.name:
                         logger.warning(
-                            f"NOSTREAM_BADMODEL: {chute.name=} {chute.chute_id=} response had invalid/missing model: {target.instance_id=}: json_data['model']={json_data.get('model')}"
+                            f"NOSTREAM_BADMODEL: {chute.name=} {chute.chute_id=} response had invalid/missing model: {target.instance_id=}: {json_data=}"
                         )
-                        # raise EmptyLLMResponse(
-                        #    f"BAD_RESPONSE {target.instance_id=} {chute.name} returned invalid chunk (model name)"
-                        # )
+                        raise EmptyLLMResponse(
+                            f"BAD_RESPONSE {target.instance_id=} {chute.name} returned invalid chunk (model name)"
+                        )
 
                     # New verification hash.
                     if (
