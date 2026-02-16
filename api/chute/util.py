@@ -1895,33 +1895,42 @@ async def refresh_all_llm_details():
     return successful
 
 
-async def get_llms(refresh: bool = False):
+async def get_llms(refresh: bool = False, request=None):
     """
     Get the combined /v1/models return value for chutes that are public and belong to chutes user.
     """
+    openrouter = False
+    if request is not None:
+        or_param = request.query_params.get("or")
+        if or_param is not None:
+            openrouter = or_param.lower() in ("true", "1", "yes")
+    cache_key = f"all_llms_{openrouter}"
     if not refresh:
-        cached = await settings.redis_client.get("all_llms")
+        cached = await settings.redis_client.get(cache_key)
         if cached:
             return json.loads(cached)
     else:
         await refresh_all_llm_details()
 
     async with get_session() as session:
+        filters = [
+            Chute.standard_template == "vllm",
+            Chute.public.is_(True),
+            Chute.user_id == await chutes_user_id(),
+            LLMDetail.details.is_not(None),
+        ]
+        if openrouter:
+            filters.append(Chute.openrouter.is_(True))
+
         result = await session.execute(
             select(LLMDetail.details)
             .join(Chute, LLMDetail.chute_id == Chute.chute_id)
-            .where(
-                Chute.standard_template == "vllm",
-                Chute.public.is_(True),
-                Chute.user_id == await chutes_user_id(),
-                Chute.chute_id != "561e4875-254d-588f-a36f-57c9cdef8961",
-                LLMDetail.details.is_not(None),
-            )
+            .where(*filters)
             .order_by(Chute.invocation_count.desc())
         )
         model_details = [row[0] for row in result if row[0]]
         return_value = {"object": "list", "data": model_details}
-        await settings.redis_client.set("all_llms", json.dumps(return_value), ex=300)
+        await settings.redis_client.set(cache_key, json.dumps(return_value), ex=300)
         return return_value
 
 

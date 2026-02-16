@@ -222,7 +222,11 @@ LIMIT_OVERRIDES = {}
 FAILSAFE = {
     "0d7184a2-32a3-53e0-9607-058c37edaab5": 40,
     "722df757-203b-58df-b54b-22130fd1fc53": 20,
-    "14a91d88-d6d6-5046-aaf4-eb3ad96b7247": 10,
+    "398651e1-5f85-5e50-a513-7c5324e8e839": 15,
+    "2ff25e81-4586-5ec8-b892-3a6f342693d7": 10,
+    "e51e818e-fa63-570d-9f68-49d7d1b4d12f": 10,
+    "08a7a60f-6956-5a9e-9983-5603c3ac5a38": 10,
+    "8f3bb827-b9e6-5487-88bc-ee8f0c6f5810": 8,
     "4f82321e-3e58-55da-ba44-051686ddbfe5": 8,
 }
 
@@ -344,11 +348,11 @@ async def instance_cleanup():
                         or_(
                             and_(
                                 Instance.config_id.isnot(None),
-                                Instance.created_at <= func.now() - timedelta(hours=2, minutes=0),
+                                Instance.created_at <= func.now() - timedelta(hours=3, minutes=0),
                             ),
                             and_(
                                 Instance.config_id.is_(None),
-                                Instance.created_at <= func.now() - timedelta(hours=2, minutes=0),
+                                Instance.created_at <= func.now() - timedelta(hours=3, minutes=0),
                             ),
                         ),
                     ),
@@ -356,7 +360,7 @@ async def instance_cleanup():
                         Instance.verified.is_(True),
                         Instance.active.is_(False),
                         Instance.config_id.isnot(None),
-                        LaunchConfig.verified_at <= func.now() - timedelta(hours=2, minutes=0),
+                        LaunchConfig.verified_at <= func.now() - timedelta(hours=3, minutes=0),
                     ),
                 )
             )
@@ -1028,7 +1032,7 @@ async def manage_rolling_updates(
     Manage rolling updates by replacing old-version instances with new-version capacity.
     Enforces a hard 3-hour cap; after that, all remaining old instances are deleted.
     """
-    max_duration = timedelta(hours=3)
+    max_duration = timedelta(hours=12)
     async with get_session() as session:
         await session.execute(text("SET LOCAL statement_timeout = '10s'"))
         result = await session.execute(select(RollingUpdate))
