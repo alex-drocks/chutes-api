@@ -901,6 +901,8 @@ async def hostname_invocation(
             payload["model"] = "OpenGVLab/InternVL3-78B-TEE"
         elif model == "mistralai/Devstral-2-123B-Instruct-2512":
             payload["model"] = "mistralai/Devstral-2-123B-Instruct-2512-TEE"
+        elif model == "Qwen/Qwen3-Coder-Next":
+            payload["model"] = "Qwen/Qwen3-Coder-Next-TEE"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):
