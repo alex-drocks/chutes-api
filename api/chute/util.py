@@ -73,6 +73,7 @@ from api.instance.util import (
     invalidate_instance_cache,
     disable_instance,
     clear_instance_disable_state,
+    cleanup_instance_conn_tracking,
 )
 from api.gpu import COMPUTE_UNIT_PRICE_BASIS
 from api.metrics.vllm import track_usage as track_vllm_usage
@@ -733,6 +734,20 @@ async def _invoke_one(
 
         # Check if the instance is overwhelmed.
         if response.status == status.HTTP_429_TOO_MANY_REQUESTS:
+            # Set this instance's connection count to concurrency so the
+            # Redis counters and utilization gauges reflect the real overload.
+            if manager:
+                try:
+                    key = f"cc:{manager.chute_id}:{target.instance_id}"
+                    await manager.redis_client.client.set(
+                        key, manager.concurrency, ex=manager.connection_expiry
+                    )
+                    await track_capacity(
+                        manager.chute_id, manager.concurrency, manager.concurrency,
+                        instance_utilization=1.0,
+                    )
+                except Exception:
+                    pass
             raise InstanceRateLimit(
                 f"Instance {target.instance_id=} has returned a rate limit error!"
             )
@@ -1626,6 +1641,9 @@ async def invoke(
                             await session.commit()
                             await invalidate_instance_cache(
                                 target.chute_id, instance_id=target.instance_id
+                            )
+                            await cleanup_instance_conn_tracking(
+                                target.chute_id, target.instance_id
                             )
                             asyncio.create_task(
                                 notify_deleted(
