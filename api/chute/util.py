@@ -1251,7 +1251,7 @@ async def invoke(
     infra_overload = False
     avoid = []
     manual_boost = await get_manual_boost(chute_id)
-    for attempt_idx in range(5):
+    for attempt_idx in range(3):
         async with manager.get_target(avoid=avoid, prefixes=prefixes) as (target, error_message):
             try:
                 if attempt_idx == 0 and manager.mean_count is not None:
