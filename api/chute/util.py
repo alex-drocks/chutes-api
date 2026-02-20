@@ -73,6 +73,7 @@ from api.instance.util import (
     invalidate_instance_cache,
     disable_instance,
     clear_instance_disable_state,
+    cleanup_instance_conn_tracking,
 )
 from api.gpu import COMPUTE_UNIT_PRICE_BASIS
 from api.metrics.vllm import track_usage as track_vllm_usage
@@ -1626,6 +1627,9 @@ async def invoke(
                             await session.commit()
                             await invalidate_instance_cache(
                                 target.chute_id, instance_id=target.instance_id
+                            )
+                            await cleanup_instance_conn_tracking(
+                                target.chute_id, target.instance_id
                             )
                             asyncio.create_task(
                                 notify_deleted(

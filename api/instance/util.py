@@ -69,6 +69,19 @@ async def load_chute_target_ids(chute_id: str, nonce: int) -> list[str]:
         result = await session.execute(query)
         instance_ids = [row[0] for row in result.all()]
         await settings.redis_client.set(cache_key, "|".join(instance_ids), ex=300)
+
+        # Prune stale instance IDs from Redis connection tracking.
+        try:
+            tracked_raw = await settings.redis_client.smembers(f"cc_inst:{chute_id}")
+            if tracked_raw:
+                live_ids = set(instance_ids)
+                for raw_iid in tracked_raw:
+                    iid = raw_iid if isinstance(raw_iid, str) else raw_iid.decode()
+                    if iid not in live_ids:
+                        await cleanup_instance_conn_tracking(chute_id, iid)
+        except Exception:
+            pass
+
         return instance_ids
 
 
@@ -157,6 +170,17 @@ class _InstanceInfo:
         self.config_id = config_id
 
 
+async def cleanup_instance_conn_tracking(chute_id: str, instance_id: str):
+    """Remove a deleted instance from Redis connection tracking sets/keys."""
+    try:
+        pipe = settings.redis_client.client.pipeline()
+        pipe.srem(f"cc_inst:{chute_id}", instance_id)
+        pipe.delete(f"cc:{chute_id}:{instance_id}")
+        await pipe.execute()
+    except Exception as e:
+        logger.warning(f"Failed to clean up connection tracking for {instance_id}: {e}")
+
+
 async def _execute_instance_deletion(
     instance_id: str,
     chute_id: str,
@@ -180,6 +204,9 @@ async def _execute_instance_deletion(
             )
             await session.commit()
             logger.warning(f"INSTANCE DELETED: {instance_id}: {reason}")
+
+            await cleanup_instance_conn_tracking(chute_id, instance_id)
+
             asyncio.create_task(
                 notify_deleted(
                     _InstanceInfo(instance_id, miner_hotkey, chute_id, config_id),
