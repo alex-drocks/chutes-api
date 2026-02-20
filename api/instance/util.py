@@ -24,7 +24,7 @@ from api.constants import (
     THRASH_WINDOW_HOURS,
     THRASH_PENALTY_HOURS,
 )
-from api.exceptions import InfraOverload
+
 from api.chute.schemas import Chute
 from api.instance.schemas import Instance, LaunchConfig
 from api.config import settings
@@ -351,27 +351,27 @@ class LeastConnManager:
                 f"{time_taken=}"
             )
 
-        # Check if all instances are overwhelmed
-        if min_count >= self.concurrency:
-            raise InfraOverload(
-                f"All instances overwhelmed for {self.chute_id}: min_count={min_count}"
-            )
+        # Group instances into "near min" (within 2 of min_count) vs "rest",
+        # and randomize within each band to avoid thundering herd on the
+        # single lowest-count instance.
+        near_min = []
+        rest = []
+        for instance_id, count in counts.items():
+            if instance := self.instances.get(instance_id):
+                if count <= min_count + 2:
+                    near_min.append(instance)
+                else:
+                    rest.append(instance)
+        random.shuffle(near_min)
+        random.shuffle(rest)
 
-        # Group instances by connection count
+        # Handle prefix-aware routing if enabled
         grouped_by_count = {}
         for instance_id, count in counts.items():
-            if count >= self.concurrency:
-                continue
             if count not in grouped_by_count:
                 grouped_by_count[count] = []
             if instance := self.instances.get(instance_id):
                 grouped_by_count[count].append(instance)
-
-        # Randomize within each count group
-        for instances in grouped_by_count.values():
-            random.shuffle(instances)
-
-        # Handle prefix-aware routing if enabled
         if prefixes:
             result = await self._handle_prefix_routing(
                 counts, grouped_by_count, min_count, prefixes
@@ -379,12 +379,7 @@ class LeastConnManager:
             if result:
                 return result
 
-        # Return instances sorted by connection count
-        result = []
-        for count in sorted(grouped_by_count.keys()):
-            result.extend(grouped_by_count[count])
-
-        return result
+        return near_min + rest
 
     async def _handle_prefix_routing(self, counts, grouped_by_count, min_count, prefixes):
         likely_cached = set()
@@ -488,9 +483,6 @@ class LeastConnManager:
             else:
                 yield None, "No infrastructure available to serve request"
         except Exception as e:
-            if isinstance(e, InfraOverload):
-                yield None, "infra_overload"
-                return
             logger.error("Error getting target")
             logger.error(str(e))
             logger.error(traceback.format_exc())

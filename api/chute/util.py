@@ -751,6 +751,17 @@ async def _invoke_one(
             manager._last_instance_utilization = response.headers.get("X-Chutes-Conn-Utilization")
             manager._last_conn_used = response.headers.get("X-Chutes-Conn-Used")
 
+            # Reconcile the redis connection counter with ground truth from the instance.
+            conn_used = response.headers.get("X-Chutes-Conn-Used")
+            if conn_used is not None:
+                try:
+                    key = f"cc:{manager.chute_id}:{target.instance_id}"
+                    await manager.redis_client.client.set(
+                        key, int(conn_used), ex=manager.connection_expiry
+                    )
+                except Exception:
+                    pass
+
         # All good, send back the response.
         if stream:
             last_chunk = None

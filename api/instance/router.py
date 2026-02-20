@@ -291,7 +291,7 @@ async def _check_scalable_private(db, chute, miner):
 
     ## Require the miner to have at least one activated public chute instance
     ## from one week ago or older before allowing private chute instances.
-    #public_history_query = text("""
+    # public_history_query = text("""
     #    SELECT COUNT(*) AS public_count
     #    FROM instance_audit ia
     #    JOIN chutes c ON c.chute_id = ia.chute_id
@@ -299,11 +299,11 @@ async def _check_scalable_private(db, chute, miner):
     #      AND c.public IS TRUE
     #      AND ia.activated_at IS NOT NULL
     #      AND ia.activated_at <= NOW() - INTERVAL '7 days'
-    #""")
-    #public_result = (
+    # """)
+    # public_result = (
     #    (await db.execute(public_history_query, {"hotkey": miner.hotkey})).mappings().first()
-    #)
-    #if not public_result or public_result["public_count"] == 0:
+    # )
+    # if not public_result or public_result["public_count"] == 0:
     #    logger.warning(
     #        f"PRIVATE_GATE: miner {miner.hotkey} denied private chute {chute_id}: "
     #        f"no public chute instance activated >= 7 days ago"
@@ -316,7 +316,7 @@ async def _check_scalable_private(db, chute, miner):
     #    )
 
     ## Require at least 3 active public instances with >= 8 total GPUs.
-    #active_public_query = text("""
+    # active_public_query = text("""
     #    SELECT
     #        COUNT(DISTINCT i.instance_id) AS active_instance_count,
     #        COUNT(inodes.node_id) AS total_gpus
@@ -326,13 +326,13 @@ async def _check_scalable_private(db, chute, miner):
     #    WHERE i.miner_hotkey = :hotkey
     #      AND i.active = TRUE
     #      AND i.billed_to IS NULL
-    #""")
-    #active_public_result = (
+    # """)
+    # active_public_result = (
     #    (await db.execute(active_public_query, {"hotkey": miner.hotkey})).mappings().first()
-    #)
-    #instance_count = active_public_result["active_instance_count"] if active_public_result else 0
-    #total_gpus = active_public_result["total_gpus"] if active_public_result else 0
-    #if instance_count < 3 or total_gpus < 8:
+    # )
+    # instance_count = active_public_result["active_instance_count"] if active_public_result else 0
+    # total_gpus = active_public_result["total_gpus"] if active_public_result else 0
+    # if instance_count < 3 or total_gpus < 8:
     #    logger.warning(
     #        f"PRIVATE_GATE: miner {miner.hotkey} denied private chute {chute_id}: "
     #        f"{instance_count} active public instances with {total_gpus} GPUs "
