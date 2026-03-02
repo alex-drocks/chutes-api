@@ -1,4 +1,5 @@
 import gc
+import os
 import uuid
 import orjson as json
 import asyncio
@@ -15,7 +16,7 @@ from api.config import settings
 from api.chute.schemas import RollingUpdate, Chute
 from api.database import get_session
 from api.instance.schemas import Instance
-from api.instance.util import invalidate_instance_cache
+from api.instance.util import invalidate_instance_cache, cleanup_instance_conn_tracking
 from api.util import encrypt_instance_request, notify_deleted, semcomp
 from api.chute.util import get_one
 from watchtower import check_runint
@@ -29,15 +30,22 @@ NETNANNY = ctypes.CDLL("/usr/local/lib/chutes-nnverify.so")
 NETNANNY.verify.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
 NETNANNY.verify.restype = ctypes.c_int
 
+import chutes as _chutes_pkg  # noqa: E402
+
+_aegis_verify_path = os.path.join(os.path.dirname(_chutes_pkg.__file__), "chutes-aegis-verify.so")
+AEGIS_VERIFY = ctypes.CDLL(_aegis_verify_path)
+AEGIS_VERIFY.verify.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
+AEGIS_VERIFY.verify.restype = ctypes.c_int
+
 
 async def _post_connectivity(instance: Instance, endpoint: str) -> Dict[str, Any]:
     enc_path, _ = encrypt_instance_request("/_connectivity", instance, hex_encode=True)
-    url = f"http://{instance.host}:{instance.port}/{enc_path}"
     payload, _ = encrypt_instance_request(json.dumps({"endpoint": endpoint}), instance)
     async with miner_client.post(
         instance.miner_hotkey,
-        url,
+        f"/{enc_path}",
         payload,
+        instance=instance,
         timeout=30.0,
     ) as resp:
         resp.raise_for_status()
@@ -46,12 +54,12 @@ async def _post_connectivity(instance: Instance, endpoint: str) -> Dict[str, Any
 
 async def _post_netnanny_challenge(instance: Instance, challenge: str) -> Dict[str, Any]:
     enc_path, _ = encrypt_instance_request("/_netnanny_challenge", instance, hex_encode=True)
-    url = f"http://{instance.host}:{instance.port}/{enc_path}"
     payload, _ = encrypt_instance_request(json.dumps({"challenge": challenge}), instance)
     async with miner_client.post(
         instance.miner_hotkey,
-        url,
+        f"/{enc_path}",
         payload,
+        instance=instance,
         timeout=15.0,
     ) as resp:
         resp.raise_for_status()
@@ -98,6 +106,7 @@ async def _hard_delete_instance(session, instance: Instance, reason: str) -> Non
     await notify_deleted(instance, message=reason)
     await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
     await session.commit()
+    await cleanup_instance_conn_tracking(instance.chute_id, instance.instance_id)
 
 
 async def _record_failure_or_delete(session, instance: Instance, hard_reason: str | None) -> None:
@@ -136,10 +145,17 @@ async def _verify_netnanny(instance: Instance, allow_external_egress: bool) -> N
             f"Netnanny reported allow_external_egress={miner_egress} "
             f"but chute requires {allow_external_egress}."
         )
-    if not NETNANNY.verify(
-        challenge.encode(), miner_hash.encode(), ctypes.c_uint8(allow_external_egress)
-    ):
-        raise RuntimeError("Netnanny verify() returned failure.")
+    # Use aegis-verify for >= 0.5.5, netnanny for older instances.
+    if semcomp(instance.chutes_version or "0.0.0", "0.5.5") >= 0:
+        if not AEGIS_VERIFY.verify(
+            challenge.encode(), miner_hash.encode(), ctypes.c_uint8(allow_external_egress)
+        ):
+            raise RuntimeError("Aegis verify() returned failure.")
+    else:
+        if not NETNANNY.verify(
+            challenge.encode(), miner_hash.encode(), ctypes.c_uint8(allow_external_egress)
+        ):
+            raise RuntimeError("Netnanny verify() returned failure.")
 
 
 async def check_instance_connectivity(

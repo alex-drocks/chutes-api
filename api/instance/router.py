@@ -90,11 +90,13 @@ from api.util import (
     generate_ip_token,
     aes_decrypt,
     derive_ecdh_session_key,
+    derive_x25519_session_key,
     decrypt_instance_response,
     notify_created,
     notify_deleted,
     notify_verified,
     notify_activated,
+    notify_disabled,
     load_shared_object,
     has_legacy_private_billing,
     extract_ip,
@@ -114,9 +116,92 @@ NETNANNY = ctypes.CDLL("/usr/local/lib/chutes-nnverify.so")
 NETNANNY.verify.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
 NETNANNY.verify.restype = ctypes.c_int
 
+# Aegis v4 verification library is required.
+import chutes as _chutes_pkg  # noqa: E402
+
+_aegis_verify_path = os.path.join(os.path.dirname(_chutes_pkg.__file__), "chutes-aegis-verify.so")
+AEGIS_VERIFY = ctypes.CDLL(_aegis_verify_path)
+AEGIS_VERIFY.verify.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
+AEGIS_VERIFY.verify.restype = ctypes.c_int
+AEGIS_VERIFY.decrypt_session_key.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_size_t,
+]
+AEGIS_VERIFY.decrypt_session_key.restype = ctypes.c_int
+logger.info(f"Loaded chutes-aegis-verify.so from {_aegis_verify_path}")
+
+
+def _decrypt_cllmv_session_key(blob_hex: str, x25519_priv_hex: str) -> str | None:
+    """Decrypt miner's ephemeral HMAC key from the CLLMV V2 init blob."""
+    key_buf = ctypes.create_string_buffer(65)
+    ret = AEGIS_VERIFY.decrypt_session_key(
+        blob_hex.encode(),
+        x25519_priv_hex.encode(),
+        key_buf,
+        65,
+    )
+    if ret != 0:
+        return None
+    return key_buf.value.decode()
+
+
+def _verify_rint_commitment_v4(commitment_hex: str) -> bool:
+    """Verify a v4 runtime integrity commitment (aegis/Ed25519)."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        if len(commitment_hex) != 292:
+            logger.error(f"RUNINT v4: commitment length mismatch: {len(commitment_hex)} != 292")
+            return False
+
+        commitment_bytes = bytes.fromhex(commitment_hex)
+        if len(commitment_bytes) != 146:
+            logger.error(
+                f"RUNINT v4: decoded commitment length mismatch: {len(commitment_bytes)} != 146"
+            )
+            return False
+
+        prefix = commitment_bytes[0]
+        if prefix != 0x04:
+            logger.error(f"RUNINT v4: invalid prefix: {prefix} != 0x04")
+            return False
+
+        version = commitment_bytes[1]
+        if version != 0x04:
+            logger.error(f"RUNINT v4: invalid version: {version} != 0x04")
+            return False
+
+        pubkey_bytes = commitment_bytes[2:34]  # Ed25519 pubkey (32 bytes)
+        nonce_bytes = commitment_bytes[34:50]  # nonce (16 bytes)
+        lib_proof_bytes = commitment_bytes[50:82]  # lib_proof HMAC-SHA256 (32 bytes)
+        sig_bytes = commitment_bytes[82:146]  # Ed25519 signature (64 bytes)
+
+        # Verify: Ed25519_verify(pubkey, version||pubkey||nonce||lib_proof, signature)
+        msg_to_verify = bytes([version]) + pubkey_bytes + nonce_bytes + lib_proof_bytes
+        pk = Ed25519PublicKey.from_public_bytes(pubkey_bytes)
+
+        try:
+            pk.verify(sig_bytes, msg_to_verify)
+            logger.info("RUNINT v4: commitment verification successful")
+            return True
+        except Exception:
+            logger.error("RUNINT v4: signature verification failed")
+            return False
+
+    except Exception as e:
+        logger.error(f"RUNINT v4: commitment verification error: {e}")
+        return False
+
 
 def _verify_rint_commitment(commitment_hex: str, expected_nonce: str) -> bool:
-    """Verify the runtime integrity commitment (mini-cert)."""
+    """Verify the runtime integrity commitment (mini-cert). Auto-detects v3/v4."""
+    # v4 commitments start with "04" prefix
+    if commitment_hex[:2] == "04":
+        return _verify_rint_commitment_v4(commitment_hex)
+
+    # v3 (SECP256k1) path
     try:
         from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
         import hashlib
@@ -171,6 +256,103 @@ def _verify_rint_commitment(commitment_hex: str, expected_nonce: str) -> bool:
 
     except Exception as e:
         logger.error(f"RUNINT: commitment verification error: {e}")
+        return False
+
+
+def _validate_tls_cert(
+    tls_cert_pem: str, tls_cert_sig_hex: str, rint_commitment_hex: str, nonce: str | None = None
+) -> bool:
+    """Validate TLS cert signature against the aegis Ed25519 key from rint_commitment.
+
+    For v4 commitments, verifies sign(cert_pem || nonce) using the Ed25519 pubkey
+    embedded at bytes 2:34 of the commitment. Also verifies the nonce is embedded
+    in the cert as an X.509 extension if present.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography import x509
+
+    try:
+        commitment_bytes = bytes.fromhex(rint_commitment_hex)
+        if commitment_bytes[0] != 0x04:
+            logger.error("TLS cert validation: not a v4 commitment")
+            return False
+        pubkey_bytes = commitment_bytes[2:34]
+
+        pk = Ed25519PublicKey.from_public_bytes(pubkey_bytes)
+        sig_bytes = bytes.fromhex(tls_cert_sig_hex)
+
+        # Verify signature over cert_pem || nonce (nonce-bound) or just cert_pem (legacy).
+        signed_data = tls_cert_pem.encode()
+        if nonce:
+            signed_data += nonce.encode()
+        pk.verify(sig_bytes, signed_data)
+
+        # If nonce provided, verify it's embedded in the cert as X.509 extension.
+        if nonce:
+            CHUTES_NONCE_OID = x509.ObjectIdentifier("1.3.6.1.4.1.59888.1")
+            cert = x509.load_pem_x509_certificate(tls_cert_pem.encode())
+            try:
+                ext = cert.extensions.get_extension_for_oid(CHUTES_NONCE_OID)
+                raw = ext.value.value
+                # Extension value is DER: UTF8String(nonce). Parse tag+length.
+                if raw[0] == 0x0C:  # UTF8String tag
+                    # Short form length
+                    if raw[1] < 0x80:
+                        cert_nonce = raw[2 : 2 + raw[1]].decode()
+                    elif raw[1] == 0x81:
+                        cert_nonce = raw[3 : 3 + raw[2]].decode()
+                    else:
+                        cert_nonce = raw.decode()  # fallback
+                else:
+                    cert_nonce = raw.decode()  # fallback for raw OCTET STRING
+                if cert_nonce != nonce:
+                    logger.error(f"TLS cert nonce mismatch: cert={cert_nonce} expected={nonce}")
+                    return False
+            except x509.ExtensionNotFound:
+                # Legacy cert without nonce extension — allow if sig verified.
+                logger.warning("TLS cert has no nonce extension, skipping nonce embedding check")
+
+        logger.info("TLS cert signature validation successful")
+        return True
+    except Exception as e:
+        logger.error(f"TLS cert validation failed: {e}")
+        return False
+
+
+async def _verify_instance_tls_live(host: str, port: int, expected_cert_pem: str) -> bool:
+    """Connect to the instance's logging port and verify the served cert matches expected."""
+    import ssl
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+
+    try:
+        expected_cert = x509.load_pem_x509_certificate(expected_cert_pem.encode())
+        expected_fingerprint = expected_cert.fingerprint(hashes.SHA256())
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=ctx),
+            timeout=10.0,
+        )
+        ssl_object = writer.get_extra_info("ssl_object")
+        served_der = ssl_object.getpeercert(binary_form=True)
+        served_cert = x509.load_der_x509_certificate(served_der)
+        served_fingerprint = served_cert.fingerprint(hashes.SHA256())
+        writer.close()
+        await writer.wait_closed()
+
+        if served_fingerprint != expected_fingerprint:
+            logger.warning(
+                f"TLS cert mismatch: served {served_fingerprint.hex()} != expected {expected_fingerprint.hex()}"
+            )
+            return False
+        logger.info(f"Live TLS cert verification passed for {host}:{port}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to verify TLS cert live at {host}:{port}: {e}")
         return False
 
 
@@ -714,10 +896,11 @@ async def _validate_launch_config_inspecto(
                 detail=launch_config.verification_error,
             )
 
-        enforce_inspecto = "PS_OP" in os.environ
+        check_inspecto = "PS_OP" in os.environ
+        enforce_inspecto = check_inspecto and semcomp(chute.chutes_version, "0.5.5") < 0
         inspecto_valid = True
         fail_reason = None
-        if enforce_inspecto:
+        if check_inspecto:
             inspecto_hash = await get_inspecto_hash(chute.image_id)
             if not inspecto_hash:
                 logger.info(f"INSPECTO: image_id={chute.image_id} has no inspecto hash; allowing.")
@@ -752,14 +935,19 @@ async def _validate_launch_config_inspecto(
                                 inspecto_valid = False
                                 fail_reason = f"inspecto verification failed: {payload}"
         if not inspecto_valid:
-            logger.error(f"{log_prefix} has invalid inspecto verification: {fail_reason}")
-            launch_config.failed_at = func.now()
-            launch_config.verification_error = "Failed inspecto environment/lib verification."
-            await db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=launch_config.verification_error,
-            )
+            if enforce_inspecto:
+                logger.error(f"{log_prefix} has invalid inspecto verification: {fail_reason}")
+                launch_config.failed_at = func.now()
+                launch_config.verification_error = "Failed inspecto environment/lib verification."
+                await db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=launch_config.verification_error,
+                )
+            else:
+                logger.warning(
+                    f"{log_prefix} inspecto mismatch (not enforced, chutes_version={chute.chutes_version}): {fail_reason}"
+                )
 
 
 async def _validate_launch_config_filesystem(
@@ -871,9 +1059,46 @@ async def _validate_launch_config_instance(
                 detail=launch_config.verification_error,
             )
 
-        # NetNanny (match egress config and hash).
+        # NetNanny / Aegis verification (match egress config and hash).
         nn_valid = True
-        if chute.allow_external_egress != args.egress or not args.netnanny_hash:
+        if semcomp(chute.chutes_version or "0.0.0", "0.5.5") >= 0:
+            # v4 (aegis): netnanny_hash comes from aegis-verify; also verify egress config.
+            if chute.allow_external_egress != args.egress:
+                logger.error(
+                    f"{log_prefix} egress mismatch for v4 instance: {chute.allow_external_egress=} vs {args.egress=}"
+                )
+                nn_valid = False
+            elif not args.netnanny_hash:
+                nn_valid = False
+            elif AEGIS_VERIFY is not None:
+                if not AEGIS_VERIFY.verify(
+                    launch_config.config_id.encode(),
+                    args.netnanny_hash.encode(),
+                    1,
+                ):
+                    logger.error(
+                        f"{log_prefix} aegis-verify hash mismatch for {launch_config.config_id=}"
+                    )
+                    nn_valid = False
+                else:
+                    logger.success(
+                        f"{log_prefix} aegis-verify hash challenge success: {launch_config.config_id=} {args.netnanny_hash=}"
+                    )
+            else:
+                # aegis-verify .so must be deployed for v4 instances — hard fail.
+                logger.error(
+                    f"{log_prefix} aegis-verify library not available, cannot verify v4 instance"
+                )
+                launch_config.failed_at = func.now()
+                launch_config.verification_error = (
+                    "aegis-verify library not available for v4 verification"
+                )
+                await db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="aegis-verify library not available, cannot verify v4 instances",
+                )
+        elif chute.allow_external_egress != args.egress or not args.netnanny_hash:
             nn_valid = False
         else:
             if not NETNANNY.verify(
@@ -894,7 +1119,7 @@ async def _validate_launch_config_instance(
                 f"{log_prefix} has tampered with netnanny? {args.netnanny_hash=} {args.egress=} {chute.allow_external_egress=}"
             )
             launch_config.failed_at = func.now()
-            launch_config.verification_error = "Failed netnanny validation."
+            launch_config.verification_error = "Failed aegis validation."
             await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -963,8 +1188,61 @@ async def _validate_launch_config_instance(
                 detail=f"Job {launch_config.job_id} has already been claimed by another miner!",
             )
 
+    # Validate TLS certificate for v4 instances (>= 0.5.5).
+    validated_cacert = None
+    is_v4 = semcomp(chute.chutes_version or "0.0.0", "0.5.5") >= 0
+    tls_cert = getattr(args, "tls_cert", None)
+    tls_cert_sig = getattr(args, "tls_cert_sig", None)
+    rint_commitment = getattr(args, "rint_commitment", None)
+
+    if is_v4:
+        if not rint_commitment or rint_commitment[:2] != "04":
+            logger.error(
+                f"{log_prefix} v4 instance (>= 0.5.5) must provide v4 (04-prefix) rint_commitment"
+            )
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "v4 instance must provide v4 rint_commitment"
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="chutes >= 0.5.5 must provide a v4 runtime integrity commitment",
+            )
+        if not tls_cert or not tls_cert_sig:
+            logger.error(f"{log_prefix} v4 instance missing tls_cert or tls_cert_sig")
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "v4 instance must provide TLS certificate"
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="v4 instances must provide a TLS certificate and signature",
+            )
+        if not _validate_tls_cert(tls_cert, tls_cert_sig, rint_commitment, launch_config.nonce):
+            logger.error(f"{log_prefix} TLS cert signature validation failed")
+            launch_config.failed_at = func.now()
+            launch_config.verification_error = "TLS certificate signature validation failed"
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="TLS certificate signature validation failed",
+            )
+        validated_cacert = tls_cert
+
     # Create the instance now that we've verified the envdump/k8s env.
     node_selector = NodeSelector(**chute.node_selector)
+    extra_fields = {
+        "e2e_pubkey": getattr(args, "e2e_pubkey", None),
+    }
+    # Store CA cert for SSL verification (separate from server cert in cacert).
+    tls_ca_cert = getattr(args, "tls_ca_cert", None)
+    if tls_ca_cert:
+        extra_fields["ca_cert"] = tls_ca_cert
+    # Store mTLS client cert + key for API-to-instance connections.
+    # Client key is unencrypted (no passphrase).
+    tls_client_cert = getattr(args, "tls_client_cert", None)
+    if tls_client_cert:
+        extra_fields["client_cert"] = tls_client_cert
+        extra_fields["client_key"] = getattr(args, "tls_client_key", None)
+
     instance = Instance(
         instance_id=new_instance_id,
         host=args.host,
@@ -986,9 +1264,11 @@ async def _validate_launch_config_instance(
         hourly_rate=(await node_selector.current_estimated_price())["usd"]["hour"],
         inspecto=getattr(args, "inspecto", None),
         env_creation=args.model_dump(),
-        rint_commitment=getattr(args, "rint_commitment", None),
+        rint_commitment=rint_commitment,
         rint_nonce=getattr(args, "rint_nonce", None),
         rint_pubkey=getattr(args, "rint_pubkey", None),
+        cacert=validated_cacert,
+        extra={k: v for k, v in extra_fields.items() if v is not None} or None,
     )
     if launch_config.job_id or (
         not chute.public
@@ -1116,24 +1396,76 @@ async def _validate_launch_config_instance(
                 detail="rint_pubkey and rint_nonce required for chutes >= 0.5.1",
             )
 
-    # Generate ECDH session key if miner provided rint_pubkey
+    # Generate session key if miner provided rint_pubkey
     validator_pubkey = None
     if instance.rint_pubkey and instance.rint_nonce:
         try:
-            validator_pubkey, session_key = derive_ecdh_session_key(
-                instance.rint_pubkey, instance.rint_nonce
-            )
+            if semcomp(instance.chutes_version or "0.0.0", "0.5.5") >= 0:
+                validator_pubkey, session_key = derive_x25519_session_key(
+                    instance.rint_pubkey, instance.rint_nonce
+                )
+            else:
+                validator_pubkey, session_key = derive_ecdh_session_key(
+                    instance.rint_pubkey, instance.rint_nonce
+                )
             instance.rint_session_key = session_key
             logger.info(
-                f"Derived ECDH session key for {instance.instance_id} "
+                f"Derived session key for {instance.instance_id} "
                 f"validator_pubkey={validator_pubkey[:16]}..."
             )
         except Exception as exc:
-            logger.error(f"ECDH session key derivation failed: {exc}")
+            logger.error(f"Session key derivation failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"ECDH session key derivation failed: {exc}",
+                detail=f"Session key derivation failed: {exc}",
             )
+
+    # CLLMV V2: decrypt miner's ephemeral HMAC session key from init blob
+    cllmv_init = getattr(args, "cllmv_session_init", None)
+    is_v4_instance = semcomp(instance.chutes_version or "0.0.0", "0.5.5") >= 0
+    if is_v4_instance:
+        if not cllmv_init:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cllmv_session_init required for chutes >= 0.5.5",
+            )
+        x25519_priv = os.environ.get("CLLMV_X25519_PRIVATE_KEY")
+        if not x25519_priv:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="CLLMV V2 not configured on validator",
+            )
+        try:
+            cllmv_session_key = _decrypt_cllmv_session_key(cllmv_init, x25519_priv)
+            if not cllmv_session_key:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="CLLMV V2 session key decryption failed (invalid init blob or signature)",
+                )
+            if instance.extra is None:
+                instance.extra = {}
+            instance.extra = {**instance.extra, "cllmv_session_key": cllmv_session_key}
+            logger.info(f"CLLMV V2 session key decrypted for {instance.instance_id}")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"CLLMV V2 session key decryption error: {exc}",
+            )
+    elif cllmv_init:
+        # Pre-0.5.5 instance sent cllmv_init anyway — best-effort decrypt
+        x25519_priv = os.environ.get("CLLMV_X25519_PRIVATE_KEY")
+        if x25519_priv:
+            try:
+                cllmv_session_key = _decrypt_cllmv_session_key(cllmv_init, x25519_priv)
+                if cllmv_session_key:
+                    if instance.extra is None:
+                        instance.extra = {}
+                    instance.extra = {**instance.extra, "cllmv_session_key": cllmv_session_key}
+                    logger.info(f"CLLMV V2 session key decrypted for {instance.instance_id}")
+            except Exception as exc:
+                logger.warning(f"CLLMV V2 session key decryption error (pre-0.5.5): {exc}")
 
     return launch_config, nodes, instance, validator_pubkey
 
@@ -1335,7 +1667,12 @@ async def get_launch_config(
     token = None
     if semcomp(chute.chutes_version or "0.0.0", "0.3.61") >= 0:
         token = create_launch_jwt_v2(
-            launch_config, egress=chute.allow_external_egress, disk_gb=disk_gb
+            launch_config,
+            egress=chute.allow_external_egress,
+            lock_modules=True
+            if chute.standard_template
+            else (chute.lock_modules if chute.lock_modules is not None else False),
+            disk_gb=disk_gb,
         )
     else:
         token = create_launch_jwt(launch_config, disk_gb=disk_gb)
@@ -1619,6 +1956,43 @@ async def claim_graval_launch_config(
     return response
 
 
+async def delayed_instance_tls_check(instance_id: str):
+    """Verify the chute port serves the expected TLS cert after activation."""
+    await asyncio.sleep(10)  # Wait for uvicorn to be listening.
+
+    async with get_session() as session:
+        instance = (
+            (await session.execute(select(Instance).where(Instance.instance_id == instance_id)))
+            .unique()
+            .scalar_one_or_none()
+        )
+        if not instance or not instance.active:
+            return
+        if not instance.cacert:
+            return
+        live_ok = await _verify_instance_tls_live(instance.host, instance.port, instance.cacert)
+        if not live_ok:
+            reason = (
+                f"Live TLS cert verification failed: "
+                f"{instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=}"
+            )
+            logger.error(reason)
+            await session.delete(instance)
+            await session.execute(
+                text(
+                    "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
+                ),
+                {"instance_id": instance.instance_id, "reason": reason},
+            )
+            await session.commit()
+            await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
+            asyncio.create_task(notify_deleted(instance))
+        else:
+            logger.success(
+                f"Live TLS cert verification passed: {instance.instance_id=} on {instance.host}:{instance.port}"
+            )
+
+
 async def delayed_instance_fs_check(instance_id: str):
     await asyncio.sleep(10)  # XXX wait for uvicorn to be listening.
 
@@ -1637,13 +2011,14 @@ async def delayed_instance_fs_check(instance_id: str):
             )
             logger.warning(reason)
             await session.delete(instance)
-            await asyncio.create_task(notify_deleted(instance))
             await session.execute(
                 text(
                     "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
                 ),
                 {"instance_id": instance.instance_id, "reason": reason},
             )
+            await session.commit()
+            asyncio.create_task(notify_deleted(instance))
         else:
             logger.success(
                 f"Successfully verified FS hash {instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=}"
@@ -1803,6 +2178,8 @@ async def activate_launch_config_instance(
         await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
         await delete_bounty(chute.chute_id)
         asyncio.create_task(notify_activated(instance))
+        if instance.cacert:
+            asyncio.create_task(delayed_instance_tls_check(instance.instance_id))
     return {"ok": True}
 
 
@@ -2336,15 +2713,26 @@ async def stream_logs(
         log_port = next(p for p in instance.port_mappings if p["internal_port"] == 8001)[
             "external_port"
         ]
-        async with miner_client.get(
-            instance.miner_hotkey,
-            f"http://{instance.host}:{log_port}/logs/stream",
-            timeout=0,
-            purpose="chutes",
-            params={"backfill": str(backfill)},
-        ) as resp:
-            async for chunk in resp.content:
-                yield chunk
+        # Build a temporary client for the log port (always plain HTTP, even for v4/TLS instances).
+        import httpx as _httpx
+
+        client = _httpx.AsyncClient(
+            base_url=f"http://{instance.host}:{log_port}",
+            timeout=_httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0),
+        )
+
+        headers, _ = miner_client.sign_request(instance.miner_hotkey, purpose="chutes")
+        try:
+            async with client.stream(
+                "GET",
+                "/logs/stream",
+                headers=headers,
+                params={"backfill": str(backfill)},
+            ) as resp:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+        finally:
+            await client.aclose()
 
     return StreamingResponse(
         _stream(),
@@ -2354,6 +2742,28 @@ async def stream_logs(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/{chute_id}/{instance_id}/disable")
+async def disable_instance_endpoint(
+    chute_id: str,
+    instance_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
+    _: User = Depends(get_current_user(purpose="instances", registered_to=settings.netuid)),
+):
+    instance = await get_instance_by_chute_and_id(db, instance_id, chute_id, hotkey)
+    if not instance:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Instance with {chute_id=} {instance_id=} associated with {hotkey=} not found",
+        )
+    logger.info(f"INSTANCE DISABLE: {instance_id=} {hotkey=}")
+    instance.active = False
+    await db.commit()
+    await invalidate_instance_cache(chute_id, instance_id=instance_id)
+    asyncio.create_task(notify_disabled(instance))
+    return {"instance_id": instance_id, "disabled": True}
 
 
 @router.delete("/{chute_id}/{instance_id}")
@@ -2436,6 +2846,11 @@ async def delete_instance(
             """),
             {"instance_id": instance_id, "penalty": compute_multiplier_penalty},
         )
+
+    # Evict cached SSL context and httpx client for this instance.
+    from api.instance.connection import evict_instance_ssl
+
+    evict_instance_ssl(instance_id)
 
     await db.delete(instance)
 

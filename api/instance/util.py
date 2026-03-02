@@ -153,6 +153,21 @@ async def is_instance_disabled(instance_id: str) -> bool:
     return disabled is not None
 
 
+async def batch_check_disabled(instance_ids: list[str]) -> set[str]:
+    """Return the set of instance IDs that are currently disabled (single MGET)."""
+    if not instance_ids:
+        return set()
+    keys = [f"instance_disabled:{iid}" for iid in instance_ids]
+    try:
+        values = await settings.redis_client.client.mget(keys)
+        if not values:
+            return set()
+        return {iid for iid, v in zip(instance_ids, values) if v is not None}
+    except Exception as e:
+        logger.error(f"Error batch checking disabled instances: {e}")
+        return set()
+
+
 async def get_instance_disable_count(instance_id: str) -> int:
     count = await settings.redis_client.get(f"instance_disable_count:{instance_id}")
     if count is None:
@@ -170,13 +185,20 @@ class _InstanceInfo:
         self.config_id = config_id
 
 
+def cm_redis_shard(chute_id: str):
+    """Get the sharded cm_redis client for a chute's connection counting.
+    Uses first 8 hex chars of the UUID for deterministic sharding
+    (Python's hash() is randomized per-process via PYTHONHASHSEED)."""
+    clients = settings.cm_redis_client
+    return clients[int(chute_id[:8], 16) % len(clients)]
+
+
 async def cleanup_instance_conn_tracking(chute_id: str, instance_id: str):
     """Remove a deleted instance from Redis connection tracking sets/keys."""
     try:
-        pipe = settings.redis_client.client.pipeline()
-        pipe.srem(f"cc_inst:{chute_id}", instance_id)
-        pipe.delete(f"cc:{chute_id}:{instance_id}")
-        await pipe.execute()
+        # Enumeration key on primary redis.
+        await settings.redis_client.client.srem(f"cc_inst:{chute_id}", instance_id)
+        await cm_redis_shard(chute_id).delete(f"cc:{chute_id}:{instance_id}")
     except Exception as e:
         logger.warning(f"Failed to clean up connection tracking for {instance_id}: {e}")
 
@@ -320,6 +342,76 @@ async def clear_instance_disable_state(instance_id: str) -> None:
 MANAGERS = {}
 
 
+async def remove_instance_from_manager(chute_id: str, instance_id: str):
+    """Remove a deleted instance from the local MANAGERS dict."""
+    manager = MANAGERS.get(chute_id)
+    if manager:
+        async with manager.lock:
+            manager.instances.pop(instance_id, None)
+
+
+async def start_instance_invalidation_listener():
+    """
+    Subscribe to Redis 'events' channel and invalidate local caches
+    when instances are deleted, so all API pods stay in sync.
+    """
+    import redis.asyncio as aioredis
+    import orjson
+
+    while True:
+        pubsub = None
+        try:
+            client = aioredis.Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                db=settings.redis_db,
+                password=settings.redis_password,
+                socket_connect_timeout=2.5,
+                socket_timeout=60,
+                socket_keepalive=True,
+                retry_on_timeout=True,
+            )
+            pubsub = client.pubsub()
+            await pubsub.subscribe("events")
+            logger.info("Instance invalidation listener subscribed to 'events' channel")
+
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                try:
+                    data = orjson.loads(message["data"])
+                    reason = data.get("reason")
+                    if reason not in (
+                        "instance_deleted",
+                        "instance_activated",
+                        "instance_disabled",
+                    ):
+                        continue
+                    payload = data.get("data", {})
+                    chute_id = payload.get("chute_id")
+                    instance_id = payload.get("instance_id")
+                    if not chute_id or not instance_id:
+                        continue
+                    logger.info(
+                        f"Pubsub: invalidating cache for {reason} instance {instance_id} "
+                        f"of chute {chute_id}"
+                    )
+                    await invalidate_instance_cache(chute_id, instance_id=instance_id)
+                    if reason in ("instance_deleted", "instance_disabled"):
+                        await remove_instance_from_manager(chute_id, instance_id)
+                except Exception as exc:
+                    logger.warning(f"Error processing pubsub message: {exc}")
+        except Exception as exc:
+            logger.warning(f"Instance invalidation listener error: {exc}, reconnecting in 2s")
+        finally:
+            if pubsub:
+                try:
+                    await pubsub.close()
+                except Exception:
+                    pass
+        await asyncio.sleep(2)
+
+
 class LeastConnManager:
     def __init__(
         self,
@@ -330,7 +422,8 @@ class LeastConnManager:
     ):
         self.concurrency = concurrency or 1
         self.chute_id = chute_id
-        self.redis_client = settings.redis_client
+        # Shard connection counting across cm_redis backends.
+        self.redis_client = cm_redis_shard(chute_id)
         self.instances = {instance.instance_id: instance for instance in instances}
         self.connection_expiry = connection_expiry
         self.mean_count = None
@@ -352,8 +445,10 @@ class LeastConnManager:
             logger.error(f"Error getting connection counts: {e}")
             return {iid: 0 for iid in instance_ids}
 
-    async def get_targets(self, avoid=[], prefixes=None):
+    async def get_targets(self, avoid=None, prefixes=None):
         # Get instances not in avoid list
+        if avoid is None:
+            avoid = []
         available_instances = [iid for iid in self.instances.keys() if iid not in avoid]
         if not available_instances:
             return []
@@ -449,9 +544,10 @@ class LeastConnManager:
         return result
 
     async def _track_active(self, instance_id: str):
-        """Fire-and-forget tracking of active chutes/instances for gauge enumeration."""
+        """Fire-and-forget tracking of active chutes/instances for gauge enumeration.
+        Uses primary redis for enumeration keys (low-throughput metadata)."""
         try:
-            pipe = self.redis_client.client.pipeline()
+            pipe = settings.redis_client.client.pipeline()
             pipe.sadd("active_chutes", self.chute_id)
             pipe.expire("active_chutes", self.connection_expiry)
             pipe.sadd(f"cc_inst:{self.chute_id}", instance_id)
@@ -462,7 +558,51 @@ class LeastConnManager:
             logger.error(f"Error tracking active chute/instance: {e}")
 
     @asynccontextmanager
-    async def get_target(self, avoid=[], prefixes=None):
+    async def get_target(self, avoid=None, prefixes=None):
+        if avoid is None:
+            avoid = []
+        # Single-instance fast path: check disabled and track connections.
+        if len(self.instances) == 1:
+            instance = next(iter(self.instances.values()))
+            if instance.instance_id in avoid:
+                yield None, "No infrastructure available to serve request"
+                return
+            disabled_ids = await batch_check_disabled([instance.instance_id])
+            if instance.instance_id in disabled_ids:
+                yield None, "infra_overload"
+                return
+
+            key = f"cc:{self.chute_id}:{instance.instance_id}"
+            try:
+                pipe = self.redis_client.client.pipeline()
+                pipe.incr(key)
+                pipe.expire(key, self.connection_expiry)
+                await asyncio.wait_for(pipe.execute(), timeout=3.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Timeout incrementing connection count for {instance.instance_id}, proceeding anyway"
+                )
+            except Exception as e:
+                logger.error(f"Error tracking connection: {e}")
+
+            asyncio.create_task(self._track_active(instance.instance_id))
+            try:
+                yield instance, None
+            finally:
+                try:
+
+                    async def _decr():
+                        val = await self.redis_client.client.decr(key)
+                        if val < 0:
+                            await self.redis_client.client.set(key, 0, ex=self.connection_expiry)
+
+                    await asyncio.shield(_decr())
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout cleaning up connection for {instance.instance_id}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up connection for {instance.instance_id}: {e}")
+            return
+
         instance = None
         try:
             targets = await asyncio.wait_for(
@@ -472,24 +612,29 @@ class LeastConnManager:
                 yield None, "No infrastructure available to serve request"
                 return
 
-            # Find first non-disabled instance (lazy check with caching)
+            # Find first non-disabled instance (single MGET instead of N GETs)
+            disabled_ids = await batch_check_disabled([t.instance_id for t in targets])
             instance = None
             for candidate in targets:
-                if not await is_instance_disabled(candidate.instance_id):
+                if candidate.instance_id not in disabled_ids:
                     instance = candidate
                     break
 
             if not instance:
-                yield None, "infra_overload"
+                # Check if there are actually any active instances (bypass LRU cache).
+                real_ids = await load_chute_target_ids(self.chute_id, nonce=int(time.time()))
+                if not real_ids:
+                    yield None, "No infrastructure available to serve request"
+                else:
+                    yield None, "infra_overload"
                 return
 
             key = f"cc:{self.chute_id}:{instance.instance_id}"
             try:
-                await asyncio.wait_for(
-                    self.redis_client.client.incr(key),
-                    timeout=3.0,
-                )
-                await self.redis_client.expire(key, self.connection_expiry)
+                pipe = self.redis_client.client.pipeline()
+                pipe.incr(key)
+                pipe.expire(key, self.connection_expiry)
+                await asyncio.wait_for(pipe.execute(), timeout=3.0)
             except asyncio.TimeoutError:
                 logger.warning(
                     f"Timeout incrementing connection count for {instance.instance_id}, proceeding anyway"
@@ -642,7 +787,10 @@ def _decode_chutes_jwt(token: str, *, require_exp: bool) -> dict:
 
 
 def create_launch_jwt_v2(
-    launch_config: LaunchConfig, disk_gb: int = None, egress: bool = False
+    launch_config: LaunchConfig,
+    disk_gb: int = None,
+    egress: bool = False,
+    lock_modules: bool = False,
 ) -> str:
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=3)
@@ -656,6 +804,7 @@ def create_launch_jwt_v2(
         "env_key": launch_config.env_key,
         "iss": "chutes",
         "egress": egress,
+        "lock_modules": lock_modules,
         "env_type": env_type,
     }
     if launch_config.job_id:

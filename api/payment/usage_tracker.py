@@ -205,7 +205,14 @@ async def _warm_sub_cap_cache(aggregated: dict) -> None:
         async with get_session(readonly=True) as session:
             month_result = await session.execute(
                 text("""
-                    SELECT ud.user_id, COALESCE(SUM(GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0)), 0)
+                    SELECT
+                        ud.user_id,
+                        COALESCE(
+                            SUM(
+                                GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0)
+                            ),
+                            0
+                        )
                     FROM usage_data ud
                     JOIN chutes c ON c.chute_id = ud.chute_id
                     WHERE ud.user_id = ANY(:user_ids)
@@ -219,7 +226,14 @@ async def _warm_sub_cap_cache(aggregated: dict) -> None:
 
             four_hour_result = await session.execute(
                 text("""
-                    SELECT ud.user_id, COALESCE(SUM(GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0)), 0)
+                    SELECT
+                        ud.user_id,
+                        COALESCE(
+                            SUM(
+                                GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0)
+                            ),
+                            0
+                        )
                     FROM usage_data ud
                     JOIN chutes c ON c.chute_id = ud.chute_id
                     WHERE ud.user_id = ANY(:user_ids)

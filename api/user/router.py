@@ -809,8 +809,22 @@ async def my_subscription_usage(
         result = await db.execute(
             text("""
                 SELECT
-                    COALESCE(SUM(GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0)), 0) AS monthly,
-                    COALESCE(SUM(CASE WHEN ud.bucket >= now() - interval '4 hours' THEN GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0) ELSE 0 END), 0) AS four_hour
+                    COALESCE(
+                        SUM(
+                            GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0)
+                        ),
+                        0
+                    ) AS monthly,
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN ud.bucket >= now() - interval '4 hours'
+                                THEN GREATEST(COALESCE(ud.paygo_amount, 0) - COALESCE(ud.amount, 0), 0)
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS four_hour
                 FROM usage_data ud
                 JOIN chutes c ON c.chute_id = ud.chute_id
                 WHERE ud.user_id = :user_id
