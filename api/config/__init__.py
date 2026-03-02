@@ -287,12 +287,6 @@ class Settings(BaseSettings):
     # API key for checking code.
     codecheck_key: Optional[str] = os.getenv("CODECHECK_KEY")
 
-    # Chutes decryption key bit.
-    envcheck_key: Optional[str] = os.getenv("ENVCHECK_KEY")
-    envcheck_salt: Optional[str] = os.getenv("ENVCHECK_SALT")
-    envcheck_52_key: Optional[str] = os.getenv("ENVCHECK_KEY_52")
-    envcheck_52_salt: Optional[str] = os.getenv("ENVCHECK_SALT_52")
-
     # Logos CDN hostname.
     logo_cdn: Optional[str] = os.getenv("LOGO_CDN", "https://logos.chutes.ai")
 

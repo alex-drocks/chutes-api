@@ -9,7 +9,6 @@ from collections import OrderedDict
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-from api.util import semcomp
 
 _POOL_MAX = 2048
 
