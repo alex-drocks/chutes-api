@@ -3,6 +3,7 @@ import re
 import os
 import uuid
 import time
+import gzip
 import pybase64 as base64
 import asyncio
 import aiohttp
@@ -510,6 +511,8 @@ async def check_ping(chute, instance):
         raw_content = await resp.read()
         resp_data = json.loads(raw_content)
         decrypted = decrypt_instance_response(resp_data["json"], instance, iv)
+        if semcomp(instance.chutes_version or "0.0.0", "0.5.5") >= 0:
+            decrypted = gzip.decompress(decrypted)
         pong = json.loads(decrypted)["foo"]
         if pong != expected:
             logger.warning(f"Incorrect challenge response to ping: {pong=} vs {expected=}")
