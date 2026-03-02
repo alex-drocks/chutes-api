@@ -472,7 +472,7 @@ async def check_live_code(instance, chute, encrypted_slurp) -> bool:
     seed = (
         None if semcomp(chute.chutes_version or "0.0.0", "0.3.0") >= 0 else instance.nodes[0].seed
     )
-    expected = get_expected_command(chute, instance.miner_hotkey, seed, tls=False)
+    expected = get_expected_command(chute, instance.miner_hotkey, seed)
     if command_line != expected:
         logger.error(
             f"Failed PID 1 lookup evaluation: {instance.instance_id=} {instance.miner_hotkey=}:\n\t{command_line}\n\t{expected}"
