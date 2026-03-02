@@ -3,6 +3,7 @@ import re
 import os
 import uuid
 import time
+import gzip
 import pybase64 as base64
 import asyncio
 import aiohttp
@@ -159,8 +160,9 @@ async def do_slurp(instance, payload, encrypted_slurp):
     path, _ = encrypt_instance_request("/_slurp", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
-        f"http://{instance.host}:{instance.port}/{path}",
+        f"/{path}",
         enc_payload,
+        instance=instance,
         timeout=15.0,
     ) as resp:
         if resp.status == 404:
@@ -382,7 +384,7 @@ async def check_llm_weights(chute, instances):
     max_durations = {"model.safetensors.index.json": 90}
     weight_map = None
     for target_path in target_paths:
-        max_duration = max_durations.get(target_path) or 25.0
+        max_duration = max_durations.get(target_path) or 35.0
         incorrect = []
         digest_counts = {}
         expected_digest, expected_content = await get_hf_content(model_name, revision, target_path)
@@ -471,7 +473,7 @@ async def check_live_code(instance, chute, encrypted_slurp) -> bool:
     seed = (
         None if semcomp(chute.chutes_version or "0.0.0", "0.3.0") >= 0 else instance.nodes[0].seed
     )
-    expected = get_expected_command(chute, instance.miner_hotkey, seed, tls=False)
+    expected = get_expected_command(chute, instance.miner_hotkey, seed)
     if command_line != expected:
         logger.error(
             f"Failed PID 1 lookup evaluation: {instance.instance_id=} {instance.miner_hotkey=}:\n\t{command_line}\n\t{expected}"
@@ -501,13 +503,16 @@ async def check_ping(chute, instance):
     path, _ = encrypt_instance_request("/_ping", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
-        f"http://{instance.host}:{instance.port}/{path}",
+        f"/{path}",
         payload,
+        instance=instance,
         timeout=10.0,
     ) as resp:
         raw_content = await resp.read()
         resp_data = json.loads(raw_content)
         decrypted = decrypt_instance_response(resp_data["json"], instance, iv)
+        if semcomp(instance.chutes_version or "0.0.0", "0.5.5") >= 0:
+            decrypted = gzip.decompress(decrypted)
         pong = json.loads(decrypted)["foo"]
         if pong != expected:
             logger.warning(f"Incorrect challenge response to ping: {pong=} vs {expected=}")
@@ -564,7 +569,7 @@ async def increment_soft_fail(instance, chute):
     fail_key = f"watchtower:fail:{instance.instance_id}"
     fail_count = await settings.redis_client.incr(fail_key)
     await settings.redis_client.expire(fail_key, 3600)
-    if fail_count and fail_count >= 3:
+    if fail_count and fail_count >= 4:
         logger.warning(
             f"Instance {instance.instance_id} "
             f"miner {instance.miner_hotkey} "
@@ -573,7 +578,7 @@ async def increment_soft_fail(instance, chute):
         await purge_and_notify(instance)
 
 
-def get_expected_command(chute, miner_hotkey: str, seed: int = None, tls: bool = False):
+def get_expected_command(chute, miner_hotkey: str, seed: int = None):
     """
     Get the command line for a given instance.
     """
@@ -591,13 +596,6 @@ def get_expected_command(chute, miner_hotkey: str, seed: int = None, tls: bool =
             "--validator-ss58",
             settings.validator_ss58,
         ]
-        if tls:
-            parts += [
-                "--keyfile",
-                "/app/.chutetls/key.pem",
-                "--certfile",
-                "/app/.chutetls/cert.pem",
-            ]
         return " ".join(parts).strip()
 
     # Legacy format.
@@ -619,15 +617,13 @@ def get_expected_command(chute, miner_hotkey: str, seed: int = None, tls: bool =
     ).strip()
 
 
-async def verify_expected_command(
-    dump: dict, chute: Chute, miner_hotkey: str, seed: int = None, tls: bool = False
-):
+async def verify_expected_command(dump: dict, chute: Chute, miner_hotkey: str, seed: int = None):
     process = dump["all_processes"][0]
     assert process["pid"] == 1, "Failed to find chutes comman as PID 1"
     assert process["username"] == "chutes", "Not running as chutes user"
     command_line = re.sub(r"([^ ]+/)?python3?(\.[0-9]+)?", "python", process["cmdline"]).strip()
     command_line = re.sub(r"([^ ]+/)?chutes\b", "chutes", command_line)
-    expected = get_expected_command(chute, miner_hotkey=miner_hotkey, seed=seed, tls=tls)
+    expected = get_expected_command(chute, miner_hotkey=miner_hotkey, seed=seed)
     assert command_line == expected, f"Unexpected command: {command_line=} vs {expected=}"
     logger.success(f"Verified command line: {miner_hotkey=} {command_line=}")
 
@@ -675,8 +671,14 @@ def is_kubernetes_env(
             logger.warning(f"{log_prefix} Invalid environment found: PYTHON env override(s): {bad}")
             return False
 
-    # Verify our LD_PRELOAD (netnanny and logger).
-    if semcomp(instance.chutes_version or "0.0.0", "0.3.61") >= 0:
+    # Verify our LD_PRELOAD (netnanny+logintercept for v3, aegis for v4).
+    if semcomp(instance.chutes_version or "0.0.0", "0.5.5") >= 0:
+        if dump["env"].get("LD_PRELOAD") != "/usr/local/lib/chutes-aegis.so":
+            logger.warning(
+                f"{log_prefix} Invalid environment found: LD_PRELOAD tampering (expected aegis)"
+            )
+            return False
+    elif semcomp(instance.chutes_version or "0.0.0", "0.3.61") >= 0:
         if (
             dump["env"].get("LD_PRELOAD")
             != "/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-logintercept.so"
@@ -833,7 +835,6 @@ async def check_chute(chute_id):
                         chute,
                         miner_hotkey=instance.miner_hotkey,
                         seed=instance.nodes[0].seed,
-                        tls=False,
                     )
                 except AssertionError as exc:
                     logger.error(f"{log_prefix} failed running command check: {exc=}")
@@ -922,6 +923,9 @@ async def check_chute(chute_id):
             )
             await session.execute(stmt)
             await session.commit()
+        for inst in to_update:
+            fail_key = f"watchtower:fail:{inst.instance_id}"
+            await settings.redis_client.delete(fail_key)
 
 
 async def check_all_chutes():
@@ -1093,8 +1097,9 @@ async def procs_check():
                 try:
                     async with miner_client.get(
                         instance.miner_hotkey,
-                        f"http://{instance.host}:{instance.port}/{path}",
+                        f"/{path}",
                         purpose="chutes",
+                        instance=instance,
                         timeout=15.0,
                     ) as resp:
                         data = await resp.json()
@@ -1133,8 +1138,9 @@ async def get_env_dump(instance):
     path, _ = encrypt_instance_request("/_env_dump", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
-        f"http://{instance.host}:{instance.port}/{path}",
+        f"/{path}",
         enc_payload,
+        instance=instance,
         timeout=30.0,
     ) as resp:
         if resp.status != 200:
@@ -1153,8 +1159,9 @@ async def get_env_sig(instance, salt):
     path, _ = encrypt_instance_request("/_env_sig", instance, hex_encode=True)
     async with miner_client.post(
         instance.miner_hotkey,
-        f"http://{instance.host}:{instance.port}/{path}",
+        f"/{path}",
         enc_payload,
+        instance=instance,
         timeout=5.0,
     ) as resp:
         if resp.status != 200:
@@ -1178,8 +1185,9 @@ async def get_dump(instance, outdir: str = None):
     try:
         async with miner_client.post(
             instance.miner_hotkey,
-            f"http://{instance.host}:{instance.port}/{path}",
+            f"/{path}",
             enc_payload,
+            instance=instance,
             timeout=400.0,
         ) as resp:
             if resp.status != 200:
@@ -1243,8 +1251,9 @@ async def get_sig(instance):
     logger.info(f"Querying {instance.instance_id=} envdump (sig)")
     async with miner_client.post(
         instance.miner_hotkey,
-        f"http://{instance.host}:{instance.port}/{path}",
+        f"/{path}",
         enc_payload,
+        instance=instance,
         timeout=15.0,
     ) as resp:
         if resp.status != 200:
@@ -1269,8 +1278,9 @@ async def slurp(instance, path, offset: int = 0, length: int = 0):
     logger.info(f"Querying {instance.instance_id=} envdump (slurp) {payload=}")
     async with miner_client.post(
         instance.miner_hotkey,
-        f"http://{instance.host}:{instance.port}/{path}",
+        f"/{path}",
         enc_payload,
+        instance=instance,
         timeout=30.0,
     ) as resp:
         if resp.status != 200:
@@ -1446,8 +1456,9 @@ async def verify_fs_hash(instance):
     try:
         async with miner_client.post(
             instance.miner_hotkey,
-            f"http://{instance.host}:{instance.port}/{path}",
+            f"/{path}",
             enc_payload,
+            instance=instance,
             timeout=90.0,
         ) as resp:
             fs_hash = (await resp.json())["result"]
@@ -1477,8 +1488,6 @@ async def check_runint(instance: Instance) -> bool:
         return False
 
     try:
-        from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
-
         challenge = secrets.token_hex(16)
         payload = {"challenge": challenge}
         enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
@@ -1486,8 +1495,9 @@ async def check_runint(instance: Instance) -> bool:
 
         async with miner_client.post(
             instance.miner_hotkey,
-            f"http://{instance.host}:{instance.port}/{path}",
+            f"/{path}",
             enc_payload,
+            instance=instance,
             timeout=15.0,
         ) as resp:
             if resp.status != 200:
@@ -1516,39 +1526,83 @@ async def check_runint(instance: Instance) -> bool:
                 return False
 
             commitment_bytes = bytes.fromhex(instance.rint_commitment)
-            if len(commitment_bytes) != 162 or commitment_bytes[0] != 0x03:
-                logger.error(
-                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
-                    f"invalid commitment format: len={len(commitment_bytes)} prefix={commitment_bytes[0] if commitment_bytes else None}"
-                )
-                return False
-            if commitment_bytes[1] != 0x03:
-                logger.error(
-                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
-                    f"invalid commitment version: {commitment_bytes[1]}"
-                )
-                return False
-            pubkey_bytes = commitment_bytes[2:66]
-            vk = VerifyingKey.from_string(pubkey_bytes, curve=SECP256k1)
 
-            # Message format: challenge || epoch (8 bytes LE)
-            epoch_bytes = epoch.to_bytes(8, byteorder="little")
-            msg = challenge.encode() + epoch_bytes
-            msg_hash = hashlib.sha256(msg).digest()
-            sig_bytes = bytes.fromhex(signature_hex)
+            # Detect v4 (Ed25519) vs v3 (SECP256k1) commitment
+            is_v4 = commitment_bytes[0] == 0x04
 
-            try:
-                vk.verify_digest(sig_bytes, msg_hash)
-            except BadSignatureError:
-                logger.error(
-                    f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
-                    f"signature verification failed"
-                )
-                return False
+            if is_v4:
+                # v4: Ed25519 commitment (146 bytes)
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-            # Check epoch is advancing (detect replay attacks)
+                if len(commitment_bytes) != 146:
+                    logger.error(
+                        f"RUNINT v4: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"invalid commitment length: {len(commitment_bytes)} != 146"
+                    )
+                    return False
+                if commitment_bytes[1] != 0x04:
+                    logger.error(
+                        f"RUNINT v4: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"invalid commitment version: {commitment_bytes[1]}"
+                    )
+                    return False
+                pubkey_bytes = commitment_bytes[2:34]  # Ed25519 (32 bytes)
+
+                # Challenge-response: SHA256(challenge_string || epoch_bytes_8_LE)
+                epoch_bytes = epoch.to_bytes(8, byteorder="little")
+                msg_hash = hashlib.sha256(challenge.encode() + epoch_bytes).digest()
+                sig_bytes = bytes.fromhex(signature_hex)
+
+                pk = Ed25519PublicKey.from_public_bytes(pubkey_bytes)
+                try:
+                    # aegis pre-hashes with SHA256 then signs the hash
+                    pk.verify(sig_bytes, msg_hash)
+                except Exception:
+                    logger.error(
+                        f"RUNINT v4: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"signature verification failed"
+                    )
+                    return False
+            else:
+                # v3: SECP256k1 commitment (162 bytes)
+                from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
+
+                if len(commitment_bytes) != 162 or commitment_bytes[0] != 0x03:
+                    logger.error(
+                        f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"invalid commitment format: len={len(commitment_bytes)} prefix={commitment_bytes[0] if commitment_bytes else None}"
+                    )
+                    return False
+                if commitment_bytes[1] != 0x03:
+                    logger.error(
+                        f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"invalid commitment version: {commitment_bytes[1]}"
+                    )
+                    return False
+                pubkey_bytes = commitment_bytes[2:66]
+                vk = VerifyingKey.from_string(pubkey_bytes, curve=SECP256k1)
+
+                # Message format: challenge || epoch (8 bytes LE)
+                epoch_bytes = epoch.to_bytes(8, byteorder="little")
+                msg = challenge.encode() + epoch_bytes
+                msg_hash = hashlib.sha256(msg).digest()
+                sig_bytes = bytes.fromhex(signature_hex)
+
+                try:
+                    vk.verify_digest(sig_bytes, msg_hash)
+                except BadSignatureError:
+                    logger.error(
+                        f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"signature verification failed"
+                    )
+                    return False
+
+            # Check epoch is advancing (detect replay attacks and ticker-stall)
             epoch_key = f"rint_epoch:{instance.instance_id}"
+            epoch_ts_key = f"rint_epoch_ts:{instance.instance_id}"
             last_epoch = await settings.redis_client.get(epoch_key)
+            last_ts = await settings.redis_client.get(epoch_ts_key)
+            now = time.time()
             if last_epoch is not None:
                 last_epoch = int(last_epoch)
                 if epoch < last_epoch:
@@ -1557,11 +1611,34 @@ async def check_runint(instance: Instance) -> bool:
                         f"epoch went backwards: {epoch} < {last_epoch}"
                     )
                     return False
+                if epoch == last_epoch:
+                    logger.error(
+                        f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                        f"epoch stalled (ticker frozen?): {epoch} == {last_epoch}"
+                    )
+                    return False
+                # Ticker runs at 10 Hz, so epoch should advance ~10 per second.
+                # Check that it advanced at least 10% of expected to catch
+                # severe stalls while being very generous with tolerance.
+                if last_ts is not None:
+                    elapsed = now - float(last_ts)
+                    if elapsed > 30.0:
+                        expected_advance = elapsed * 10  # _BUF_EPOCH_RATE = 10
+                        actual_advance = epoch - last_epoch
+                        rate = actual_advance / expected_advance if expected_advance > 0 else 1.0
+                        if rate < 0.10:
+                            logger.error(
+                                f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
+                                f"epoch advancing too slowly: {actual_advance} in {elapsed:.0f}s "
+                                f"(expected ~{expected_advance:.0f}, rate={rate:.2%})"
+                            )
+                            return False
             await settings.redis_client.set(epoch_key, str(epoch), ex=86400)
+            await settings.redis_client.set(epoch_ts_key, str(now), ex=86400)
 
             logger.success(
                 f"RUNINT: {instance.instance_id=} {instance.miner_hotkey=} "
-                f"verification successful {epoch=}"
+                f"verification successful {epoch=} {'v4' if is_v4 else 'v3'}"
             )
             return True
 
@@ -1571,6 +1648,205 @@ async def check_runint(instance: Instance) -> bool:
             f"error: {e}\n{traceback.format_exc()}"
         )
         return False
+
+
+async def verify_bytecode_integrity(instance: Instance, chute: Chute) -> bool:
+    """
+    Verify bytecode integrity of a running instance.
+
+    Flow:
+    1. Generate random challenge
+    2. Call miner's /_integrity_verify with target modules
+    3. Download manifest from S3 (via graval_worker, cached)
+    4. Compare miner's reported hashes against manifest ground truth
+
+    NOT wired into automation — call manually or from a future watchtower check.
+    """
+    if semcomp(chute.chutes_version or "0.0.0", "0.5.5") < 0:
+        return True  # V2 manifest only for >= 0.5.5
+
+    challenge = secrets.token_hex(16)
+
+    # Target critical modules based on template.
+    if "sglang" in (chute.standard_template or ""):
+        modules = "sglang.srt.entrypoints.openai.serving_chat,sglang.srt.server"
+    elif "vllm" in (chute.standard_template or ""):
+        modules = "vllm.entrypoints.openai.serving_chat,vllm.entrypoints.openai.api_server"
+    else:
+        modules = ""
+
+    # Call miner's /_integrity_verify endpoint.
+    payload = {"challenge": challenge, "modules": modules}
+    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_integrity_verify", instance, hex_encode=True)
+
+    try:
+        async with miner_client.post(
+            instance.miner_hotkey,
+            f"/{path}",
+            enc_payload,
+            instance=instance,
+            timeout=30.0,
+        ) as resp:
+            if resp.status != 200:
+                logger.error(
+                    f"BYTECODE: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"returned {resp.status}"
+                )
+                return False
+            miner_result = await resp.json()
+    except Exception as exc:
+        logger.error(
+            f"BYTECODE: {instance.instance_id=} {instance.miner_hotkey=} "
+            f"error calling /_integrity_verify: {exc}"
+        )
+        return False
+
+    if "error" in miner_result:
+        logger.error(
+            f"BYTECODE: {instance.instance_id=} {instance.miner_hotkey=} "
+            f"miner error: {miner_result['error']}"
+        )
+        return False
+
+    # Get expected manifest data from S3 via graval_worker task (called directly).
+    try:
+        async with get_session() as session:
+            image_id = (
+                (
+                    await session.execute(
+                        select(Chute.image_id).where(Chute.chute_id == chute.chute_id)
+                    )
+                )
+                .unique()
+                .scalar_one_or_none()
+            )
+            patch_version = (
+                (
+                    await session.execute(
+                        select(Image.patch_version).where(Image.image_id == image_id)
+                    )
+                )
+                .unique()
+                .scalar_one_or_none()
+            )
+
+        from api.graval_worker import verify_bytecode_integrity as verify_bytecode_integrity_task
+
+        expected_result = await verify_bytecode_integrity_task(
+            image_id, patch_version, challenge, modules
+        )
+    except Exception as exc:
+        logger.error(f"BYTECODE: {instance.instance_id=} failed to get expected manifest: {exc}")
+        return False
+
+    # Cross-reference: compare miner's disk_hash against manifest for each module.
+    for mod_name, mod_info in miner_result.get("modules", {}).items():
+        if not mod_info.get("in_manifest"):
+            continue
+
+        if not mod_info.get("disk_matches_manifest", False):
+            logger.error(
+                f"BYTECODE: integrity MISMATCH {mod_name} on "
+                f"{instance.instance_id=} {instance.miner_hotkey=}"
+            )
+            return False
+
+        # Verify the manifest_hash matches what we have on file from build time.
+        manifest_hash = mod_info.get("manifest_hash", "")
+        expected_entries = expected_result.get("entries", {})
+        mod_path = mod_info.get("path", "")
+        if mod_path in expected_entries:
+            expected_hash = expected_entries[mod_path].get("hash_hex", "")
+            if expected_hash and expected_hash != manifest_hash:
+                logger.error(
+                    f"BYTECODE: manifest hash doesn't match build-time manifest for "
+                    f"{mod_name} on {instance.instance_id=}: "
+                    f"miner={manifest_hash} expected={expected_hash}"
+                )
+                return False
+
+    logger.success(
+        f"BYTECODE: {instance.instance_id=} {instance.miner_hotkey=} verification successful"
+    )
+    return True
+
+
+async def verify_package_integrity(instance: Instance, chute: Chute) -> dict:
+    """
+    Get package-level integrity summary from a running instance.
+
+    Returns dict with manifest_version, total_packages, failed_packages, all_verified.
+
+    NOT wired into automation — call manually or from a future watchtower check.
+    """
+    if semcomp(chute.chutes_version or "0.0.0", "0.5.5") < 0:
+        return {
+            "manifest_version": 0,
+            "total_packages": 0,
+            "failed_packages": {},
+            "all_verified": True,
+        }
+
+    challenge = secrets.token_hex(16)
+    payload = {"challenge": challenge}
+    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
+    path, _ = encrypt_instance_request("/_integrity_packages", instance, hex_encode=True)
+
+    try:
+        async with miner_client.post(
+            instance.miner_hotkey,
+            f"/{path}",
+            enc_payload,
+            instance=instance,
+            timeout=60.0,
+        ) as resp:
+            if resp.status != 200:
+                logger.error(
+                    f"PKGINTEG: {instance.instance_id=} {instance.miner_hotkey=} "
+                    f"returned {resp.status}"
+                )
+                return {
+                    "manifest_version": 0,
+                    "total_packages": 0,
+                    "failed_packages": {},
+                    "all_verified": False,
+                }
+            result = await resp.json()
+    except Exception as exc:
+        logger.error(
+            f"PKGINTEG: {instance.instance_id=} {instance.miner_hotkey=} "
+            f"error calling /_integrity_packages: {exc}"
+        )
+        return {
+            "manifest_version": 0,
+            "total_packages": 0,
+            "failed_packages": {},
+            "all_verified": False,
+        }
+
+    packages = result.get("packages", {})
+    manifest_version = result.get("manifest_version", 0)
+
+    failed_packages = {name: info for name, info in packages.items() if info.get("errors", 0) > 0}
+
+    if failed_packages:
+        logger.warning(
+            f"PKGINTEG: package integrity errors on {instance.instance_id=}: "
+            f"{list(failed_packages.keys())}"
+        )
+    else:
+        logger.success(
+            f"PKGINTEG: {instance.instance_id=} {instance.miner_hotkey=} "
+            f"all {len(packages)} packages verified"
+        )
+
+    return {
+        "manifest_version": manifest_version,
+        "total_packages": len(packages),
+        "failed_packages": failed_packages,
+        "all_verified": len(failed_packages) == 0,
+    }
 
 
 async def main():

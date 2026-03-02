@@ -3,12 +3,15 @@ Application logic and utilities for chutes.
 """
 
 import os
-import aiohttp
+import ctypes
+import httpx
+import httpcore
 import asyncio
 import re
 import uuid
 import io
 import time
+from datetime import datetime
 import traceback
 import orjson as json
 import pybase64 as base64
@@ -83,7 +86,77 @@ from api.metrics.capacity import (
     track_request_completed,
     track_request_rate_limited,
 )
-from cllmv import validate as cllmv_validate
+import chutes as _chutes_pkg
+
+_aegis_verify_path = os.path.join(os.path.dirname(_chutes_pkg.__file__), "chutes-aegis-verify.so")
+_AEGIS_VERIFY = ctypes.CDLL(_aegis_verify_path)
+_AEGIS_VERIFY.validate.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+]
+_AEGIS_VERIFY.validate.restype = ctypes.c_int
+_AEGIS_VERIFY.validate_v2.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+]
+_AEGIS_VERIFY.validate_v2.restype = ctypes.c_int
+
+
+def cllmv_validate(
+    id: str,
+    created: int,
+    value: str,
+    expected_hash: str,
+    salt: str,
+    model: str,
+    revision: str,
+) -> bool:
+    return bool(
+        _AEGIS_VERIFY.validate(
+            id.encode(),
+            created,
+            value.encode() if value else None,
+            expected_hash.encode(),
+            salt.encode(),
+            model.encode(),
+            revision.encode(),
+        )
+    )
+
+
+def cllmv_validate_v2(
+    id: str,
+    created: int,
+    value: str,
+    expected_token: str,
+    session_key_hex: str,
+    sub: str,
+    model: str,
+    revision: str,
+) -> bool:
+    return bool(
+        _AEGIS_VERIFY.validate_v2(
+            id.encode(),
+            created,
+            value.encode() if value else None,
+            expected_token.encode(),
+            session_key_hex.encode(),
+            sub.encode(),
+            model.encode(),
+            revision.encode(),
+        )
+    )
 
 
 # Tokenizer for input/output token estimation.
@@ -148,20 +221,23 @@ UNIFIED_INVOCATION_INSERT_LEGACY = text(
 )
 UNIFIED_INVOCATION_INSERT = text(
     f"""{BASE_UNIFIED_INVOCATION_INSERT}
-ON CONFLICT (invocation_id, started_at)
-    DO UPDATE SET invocation_id = EXCLUDED.invocation_id
 {UNIFIED_INVOCATION_RV}""".format(table_name="invocations")
 )
 
 
 async def update_usage_data(
-    user_id: str, chute_id: str, balance_used: float, metrics: dict, compute_time: float = 0.0
+    user_id: str,
+    chute_id: str,
+    balance_used: float,
+    metrics: dict,
+    compute_time: float = 0.0,
+    paygo_amount: float = 0.0,
 ) -> None:
     """
     Push usage data metrics to redis for async processing.
 
     Uses compact format to minimize network/storage overhead:
-    - Short keys: u=user_id, c=chute_id, a=amount, i=input_tokens, o=output_tokens, x=cached_tokens, t=compute_time, s=timestamp
+    - Short keys: u=user_id, c=chute_id, a=amount, i=input_tokens, o=output_tokens, x=cached_tokens, t=compute_time, p=paygo_amount, s=timestamp
     - compute_time rounded to 4 decimal places (0.1ms precision)
     - count omitted (always 1, handled by consumer)
     """
@@ -179,6 +255,7 @@ async def update_usage_data(
             "o": metrics.get("ot", 0) if metrics else 0,
             "x": metrics.get("ct", 0) if metrics else 0,
             "t": round(compute_time, 4),
+            "p": paygo_amount,
             "s": int(time.time()),
         }
     ).decode()
@@ -235,15 +312,17 @@ async def safe_store_invocation(*args, **kwargs):
         logger.error(f"SAFE_STORE_INVOCATION: failed to insert new invocation record: {str(exc)}")
 
 
-async def get_miner_session(instance: Instance, timeout: int = 600) -> aiohttp.ClientSession:
+async def get_miner_session(
+    instance: Instance, timeout: int = 600
+) -> tuple[httpx.AsyncClient, bool]:
     """
-    Get or create an aiohttp session for an instance.
+    Get or create an httpx client for an instance (with TLS if available).
+
+    Returns (client, pooled) — caller must close the client when done if not pooled.
     """
-    return aiohttp.ClientSession(
-        base_url=f"http://{instance.host}:{instance.port}",
-        timeout=aiohttp.ClientTimeout(connect=10.0, total=timeout),
-        read_bufsize=8 * 1024 * 1024,
-    )
+    from api.instance.connection import get_instance_client
+
+    return await get_instance_client(instance, timeout=timeout)
 
 
 async def selector_hourly_price(node_selector) -> float:
@@ -675,6 +754,8 @@ async def _invoke_one(
     metrics: dict = {},
     prefixes: list = None,
     manager: LeastConnManager = None,
+    raw_payload: dict = None,
+    request: Request = None,
 ):
     """
     Try invoking a chute/cord with a single instance.
@@ -682,7 +763,6 @@ async def _invoke_one(
     # Call the miner's endpoint.
     path = path.lstrip("/")
     response = None
-    payload = {"args": args, "kwargs": kwargs}
 
     # Set the 'p' private flag on invocations.
     private_billing = (
@@ -693,47 +773,78 @@ async def _invoke_one(
 
     plain_path = path.lstrip("/").rstrip("/")
     path = "/" + path.lstrip("/")
-    payload, iv = await asyncio.to_thread(encrypt_instance_request, json.dumps(payload), target)
+
+    # Version-gate payload format: >= 0.5.5 uses plain JSON + gzip, < 0.5.5 uses pickle.
+    if raw_payload is not None and semcomp(target.chutes_version or "0.0.0", "0.5.5") >= 0:
+        # >= 0.5.5: plain JSON + gzip, no pickle
+        payload_bytes = gzip.compress(json.dumps(raw_payload))
+        use_serialized = False
+    else:
+        # < 0.5.5: pickle-wrapped args/kwargs, no gzip
+        payload_bytes = json.dumps({"args": args, "kwargs": kwargs})
+        use_serialized = True
+
+    payload, iv = await asyncio.to_thread(encrypt_instance_request, payload_bytes, target)
     encrypted_path, _ = await asyncio.to_thread(
         encrypt_instance_request, path.ljust(24, "?"), target, True
     )
     path = encrypted_path
 
-    session, response = None, None
+    response = None
+    stream_response = None
     timeout = 1800
     if (
         semcomp(target.chutes_version or "0.0.0", "0.4.3") >= 0
         and chute.standard_template == "vllm"
         and plain_path.endswith("_stream")
     ):
-        # No timeouts for streaming LLM calls with newer chutes lib versions.
+        # No read timeout for streaming LLM calls — prefill on large prompts
+        # can legitimately take minutes. Dead connections are caught by TCP
+        # keepalive probes on the socket instead (see connection.py).
         timeout = None
     if semcomp(target.chutes_version or "0.0.0", "0.3.59") < 0:
         timeout = 600
     elif semcomp(target.chutes_version or "0.0.0", "0.4.2") < 0:
         timeout = 900
+    pooled = True
+    req_timeout = httpx.Timeout(
+        connect=10.0, read=float(timeout) if timeout else None, write=30.0, pool=10.0
+    )
     try:
-        session = await get_miner_session(target, timeout=timeout)
+        session, pooled = await get_miner_session(target, timeout=timeout)
         headers, payload_string = sign_request(miner_ss58=target.miner_hotkey, payload=payload)
-        headers["X-Chutes-Serialized"] = "true"
-        response = await session.post(
-            f"/{path}",
-            data=payload_string,
-            headers=headers,
-        )
-        if response.status != 200:
+        if use_serialized:
+            headers["X-Chutes-Serialized"] = "true"
+
+        if stream:
+            stream_response = await session.send(
+                session.build_request(
+                    "POST", f"/{path}", content=payload_string, headers=headers, timeout=req_timeout
+                ),
+                stream=True,
+            )
+            response = stream_response
+        else:
+            response = await session.post(
+                f"/{path}",
+                content=payload_string,
+                headers=headers,
+                timeout=req_timeout,
+            )
+
+        if response.status_code != 200:
             logger.info(
-                f"Received response {response.status} from miner {target.miner_hotkey} instance_id={target.instance_id} of chute_id={target.chute_id}"
+                f"Received response {response.status_code} from miner {target.miner_hotkey} instance_id={target.instance_id} of chute_id={target.chute_id}"
             )
 
         # Check if the instance restarted and is using encryption V2.
-        if response.status == status.HTTP_426_UPGRADE_REQUIRED:
+        if response.status_code == status.HTTP_426_UPGRADE_REQUIRED:
             raise KeyExchangeRequired(
                 f"Instance {target.instance_id} responded with 426, new key exchange required."
             )
 
         # Check if the instance is overwhelmed.
-        if response.status == status.HTTP_429_TOO_MANY_REQUESTS:
+        if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
             # Set this instance's connection count to concurrency so the
             # Redis counters and utilization gauges reflect the real overload.
             if manager:
@@ -755,11 +866,15 @@ async def _invoke_one(
             )
 
         # Handle bad client requests.
-        if response.status == status.HTTP_400_BAD_REQUEST:
-            raise BadRequest("Invalid request: " + await response.text())
+        if response.status_code == status.HTTP_400_BAD_REQUEST:
+            if stream_response:
+                await stream_response.aread()
+            raise BadRequest("Invalid request: " + response.text)
 
-        if response.status == 451:
-            logger.info(f"BAD ENCRYPTION: {await response.text()} from {payload=}")
+        if response.status_code == 451:
+            if stream_response:
+                await stream_response.aread()
+            logger.info(f"BAD ENCRYPTION: {response.text} from {payload=}")
 
         response.raise_for_status()
 
@@ -785,8 +900,14 @@ async def _invoke_one(
             any_chunks = False
             chunk_idx = 0
             cllmv_verified = False
-            async for raw_chunk in response.content:
+            last_usage = None
+            disconnect_chunk_check = 0
+            async for raw_chunk in stream_response.aiter_lines():
+                if not raw_chunk:
+                    continue
                 chunk = await asyncio.to_thread(decrypt_instance_response, raw_chunk, target, iv)
+                if not use_serialized:
+                    chunk = gzip.decompress(chunk)
 
                 # Track time to first token and (approximate) token count; approximate
                 # here because in speculative decoding multiple tokens may be returned.
@@ -875,15 +996,38 @@ async def _invoke_one(
                                     + target.rint_nonce
                                     + chute.image.package_hashes["hash"]
                                 )
-                            if not cllmv_validate(
-                                data.get("id") or "bad",
-                                data.get("created") or 0,
-                                text,
-                                verification_token,
-                                challenge_val,
-                                model_identifier,
-                                chute.revision,
-                            ):
+                            # V2 (HMAC-SHA256 with session key) required for >= 0.5.5, V1 fallback for older
+                            cllmv_v2_key = (target.extra or {}).get("cllmv_session_key")
+                            is_v4_cllmv = semcomp(target.chutes_version or "0.0.0", "0.5.5") >= 0
+                            if cllmv_v2_key:
+                                cllmv_ok = cllmv_validate_v2(
+                                    data.get("id") or "bad",
+                                    data.get("created") or 0,
+                                    text,
+                                    verification_token,
+                                    cllmv_v2_key,
+                                    challenge_val,
+                                    model_identifier,
+                                    chute.revision,
+                                )
+                            elif is_v4_cllmv:
+                                # >= 0.5.5 must use V2; missing key means launch was broken
+                                logger.error(
+                                    f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} "
+                                    f"v4 instance missing cllmv_session_key"
+                                )
+                                cllmv_ok = False
+                            else:
+                                cllmv_ok = cllmv_validate(
+                                    data.get("id") or "bad",
+                                    data.get("created") or 0,
+                                    text,
+                                    verification_token,
+                                    challenge_val,
+                                    model_identifier,
+                                    chute.revision,
+                                )
+                            if not cllmv_ok:
                                 logger.warning(
                                     f"CLLMV FAILURE: STREAMED {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
                                 )
@@ -900,9 +1044,35 @@ async def _invoke_one(
                                 raise InvalidCLLMV(
                                     f"BAD_RESPONSE {target.instance_id=} {chute.name=} returned invalid chunk (failed cllmv check)"
                                 )
+                    # Track running usage from continuous_usage_stats.
+                    if isinstance(data, dict) and "usage" in data and data["usage"]:
+                        last_usage = data["usage"]
+
                     last_chunk = chunk
                 if b"data:" in chunk:
                     any_chunks = True
+
+                # Periodic disconnect check (every 5 chunks).
+                disconnect_chunk_check += 1
+                if request and disconnect_chunk_check % 5 == 0:
+                    if await request.is_disconnected():
+                        logger.info(
+                            f"Client disconnected mid-stream for {chute.name} "
+                            f"{target.instance_id=}, populating partial metrics"
+                        )
+                        if last_usage and metrics is not None:
+                            metrics["it"] = last_usage.get("prompt_tokens", 0)
+                            metrics["ot"] = last_usage.get("completion_tokens", 0)
+                            metrics["ct"] = (last_usage.get("prompt_tokens_details") or {}).get(
+                                "cached_tokens", 0
+                            )
+                            total_time = time.time() - started_at
+                            metrics["tt"] = round(total_time, 3)
+                            ot = metrics["ot"] or 1
+                            metrics["tps"] = round(ot / total_time, 3)
+                            metrics["ctps"] = round((metrics["it"] + ot) / total_time, 3)
+                        await stream_response.aclose()
+                        return
 
                 yield chunk.decode()
 
@@ -992,13 +1162,15 @@ async def _invoke_one(
         else:
             # Non-streamed responses - always encrypted.
             headers = response.headers
-            body_bytes = await response.read()
+            body_bytes = response.content
             data = {}
             response_data = json.loads(body_bytes)
             if "json" in response_data:
                 plaintext = await asyncio.to_thread(
                     decrypt_instance_response, response_data["json"], target, iv
                 )
+                if not use_serialized:
+                    plaintext = gzip.decompress(plaintext)
                 if chute.standard_template == "vllm" and plaintext.startswith(
                     b'{"object":"error","message":"input_ids cannot be empty."'
                 ):
@@ -1018,6 +1190,8 @@ async def _invoke_one(
                 plaintext = await asyncio.to_thread(
                     decrypt_instance_response, response_data["body"], target, iv
                 )
+                if not use_serialized:
+                    plaintext = gzip.decompress(plaintext)
                 headers = response_data["headers"]
                 data = {
                     "content_type": response_data.get(
@@ -1086,15 +1260,38 @@ async def _invoke_one(
                                     + target.rint_nonce
                                     + chute.image.package_hashes["hash"]
                                 )
-                            if not verification_token or not cllmv_validate(
-                                json_data.get("id") or "bad",
-                                json_data.get("created") or 0,
-                                text,
-                                verification_token,
-                                challenge_val,
-                                model_identifier,
-                                chute.revision,
-                            ):
+                            # V2 (HMAC-SHA256 with session key) required for >= 0.5.5, V1 fallback for older
+                            cllmv_v2_key = (target.extra or {}).get("cllmv_session_key")
+                            is_v4_cllmv = semcomp(target.chutes_version or "0.0.0", "0.5.5") >= 0
+                            if cllmv_v2_key:
+                                cllmv_ok = verification_token and cllmv_validate_v2(
+                                    json_data.get("id") or "bad",
+                                    json_data.get("created") or 0,
+                                    text,
+                                    verification_token,
+                                    cllmv_v2_key,
+                                    challenge_val,
+                                    model_identifier,
+                                    chute.revision,
+                                )
+                            elif is_v4_cllmv:
+                                # >= 0.5.5 must use V2; missing key means launch was broken
+                                logger.error(
+                                    f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} "
+                                    f"v4 instance missing cllmv_session_key"
+                                )
+                                cllmv_ok = False
+                            else:
+                                cllmv_ok = verification_token and cllmv_validate(
+                                    json_data.get("id") or "bad",
+                                    json_data.get("created") or 0,
+                                    text,
+                                    verification_token,
+                                    challenge_val,
+                                    model_identifier,
+                                    chute.revision,
+                                )
+                            if not cllmv_ok:
                                 logger.warning(
                                     f"CLLMV FAILURE: {target.instance_id=} {target.miner_hotkey=} {chute.name=}"
                                 )
@@ -1205,20 +1402,14 @@ async def _invoke_one(
 
             yield data
     finally:
-        if response:
+        if stream_response:
             try:
-                async for _ in response.content:
-                    pass
+                await stream_response.aclose()
             except Exception:
                 pass
-            finally:
-                try:
-                    response.close()
-                except Exception:
-                    pass
-        if session:
+        if not pooled:
             try:
-                await session.close()
+                await session.aclose()
             except Exception:
                 pass
 
@@ -1247,6 +1438,7 @@ async def invoke(
     metrics: dict = {},
     request: Request = None,
     prefixes: list = None,
+    raw_payload: dict = None,
 ):
     """
     Helper to actual perform function invocations, retrying when a target fails.
@@ -1330,6 +1522,8 @@ async def invoke(
                     metrics,
                     prefixes,
                     manager,
+                    raw_payload,
+                    request,
                 ):
                     try:
                         if "input_ids cannot be empty" in str(data):
@@ -1370,7 +1564,7 @@ async def invoke(
                 # otherwise it's just based on time used.
                 balance_used = 0.0
                 override_applied = False
-                if compute_units and not request.state.free_invocation:
+                if compute_units:
                     hourly_price = await selector_hourly_price(chute.node_selector)
 
                     # Per megatoken pricing.
@@ -1492,6 +1686,11 @@ async def invoke(
                     if user_discount:
                         balance_used -= balance_used * user_discount
 
+                # Subscriber paygo discount (when quota exceeded).
+                sub_paygo_discount = getattr(request.state, "subscriber_paygo_discount", 0.0)
+                if balance_used and sub_paygo_discount and not override_applied:
+                    balance_used -= balance_used * sub_paygo_discount
+
                 # Don't charge for private instances.
                 if (
                     not chute.public
@@ -1499,6 +1698,31 @@ async def invoke(
                     and chute.user_id != await chutes_user_id()
                 ):
                     balance_used = 0
+
+                # Always track paygo equivalent for subscription cap tracking.
+                paygo_equivalent = balance_used
+
+                # If free invocation, the actual charge is 0, but we track paygo equivalent.
+                if request.state.free_invocation:
+                    balance_used = 0
+
+                # Track subscription caps in Redis.
+                if request.state.free_invocation and paygo_equivalent > 0:
+                    from api.config import get_subscription_tier
+
+                    sub_quota = await InvocationQuota.get(user_id, chute.chute_id)
+                    if get_subscription_tier(sub_quota) is not None:
+                        month_key = f"sub_cap_m:{datetime.now().strftime('%Y%m')}:{user_id}"
+                        four_hour_bucket = int(time.time()) // (4 * 3600)
+                        four_hour_key = f"sub_cap_4h:{four_hour_bucket}:{user_id}"
+                        asyncio.create_task(
+                            settings.redis_client.incrbyfloat(month_key, paygo_equivalent)
+                        )
+                        asyncio.create_task(settings.redis_client.expire(month_key, 35 * 86400))
+                        asyncio.create_task(
+                            settings.redis_client.incrbyfloat(four_hour_key, paygo_equivalent)
+                        )
+                        asyncio.create_task(settings.redis_client.expire(four_hour_key, 5 * 3600))
 
                 # Add balance_used to metrics for persistence (key 'b' for compactness)
                 if metrics is None:
@@ -1534,6 +1758,7 @@ async def invoke(
                         balance_used,
                         metrics if chute.standard_template == "vllm" else None,
                         compute_time=duration,
+                        paygo_amount=paygo_equivalent,
                     )
                 )
 
@@ -1574,6 +1799,24 @@ async def invoke(
                 return
             except Exception as exc:
                 avoid.append(target.instance_id)
+
+                # Evict cached connection on transport/connection errors so
+                # subsequent retries or requests don't reuse a dead socket.
+                if isinstance(
+                    exc,
+                    (
+                        httpx.NetworkError,
+                        httpx.RemoteProtocolError,
+                        httpcore.NetworkError,
+                        httpcore.RemoteProtocolError,
+                        ConnectionError,
+                        OSError,
+                    ),
+                ):
+                    from api.instance.connection import evict_instance_ssl
+
+                    evict_instance_ssl(str(target.instance_id))
+
                 error_message = f"{exc}\n{traceback.format_exc()}"
                 error_message = error_message.replace(
                     f"{target.host}:{target.port}", "[host redacted]"
@@ -1599,8 +1842,8 @@ async def invoke(
                 elif isinstance(exc, InvalidResponse):
                     error_message = "INVALID_RESPONSE"
                     instant_delete = True
-                elif isinstance(exc, aiohttp.ClientResponseError) and exc.status >= 500:
-                    error_message = f"HTTP_{exc.status}: {error_message}"
+                elif isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
+                    error_message = f"HTTP_{exc.response.status_code}: {error_message}"
                     # Server returned an error - connection worked, server is broken
                     # skip_disable_loop = True
 
@@ -1730,30 +1973,41 @@ async def load_llm_details(chute, target):
     path, _ = await asyncio.to_thread(
         encrypt_instance_request, "/get_models".ljust(24, "?"), target, True
     )
-    payload = {
-        "args": base64.b64encode(gzip.compress(pickle.dumps(tuple()))).decode(),
-        "kwargs": base64.b64encode(gzip.compress(pickle.dumps({}))).decode(),
-    }
-    payload, iv = await asyncio.to_thread(encrypt_instance_request, json.dumps(payload), target)
+    use_new_format = semcomp(target.chutes_version or "0.0.0", "0.5.5") >= 0
+    if use_new_format:
+        payload_bytes = gzip.compress(json.dumps({}))
+    else:
+        payload_bytes = json.dumps(
+            {
+                "args": base64.b64encode(gzip.compress(pickle.dumps(tuple()))).decode(),
+                "kwargs": base64.b64encode(gzip.compress(pickle.dumps({}))).decode(),
+            }
+        )
+    payload, iv = await asyncio.to_thread(encrypt_instance_request, payload_bytes, target)
 
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(connect=5.0, total=60.0),
-        read_bufsize=8 * 1024 * 1024,
-        raise_for_status=True,
-    ) as session:
+    session, pooled = await get_miner_session(target, timeout=60)
+    llm_timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+    try:
         headers, payload_string = sign_request(miner_ss58=target.miner_hotkey, payload=payload)
-        headers["X-Chutes-Serialized"] = "true"
-        async with session.post(
-            f"http://{target.host}:{target.port}/{path}", data=payload_string, headers=headers
-        ) as resp:
-            raw_data = await resp.json()
-            logger.info(
-                f"{target.chute_id=} {target.instance_id=} {target.miner_hotkey=}: {raw_data=}"
-            )
-            info = json.loads(
-                await asyncio.to_thread(decrypt_instance_response, raw_data["json"], target, iv)
-            )
-            return info["data"][0]
+        if not use_new_format:
+            headers["X-Chutes-Serialized"] = "true"
+        resp = await session.post(
+            f"/{path}", content=payload_string, headers=headers, timeout=llm_timeout
+        )
+        resp.raise_for_status()
+        raw_data = resp.json()
+        logger.info(f"{target.chute_id=} {target.instance_id=} {target.miner_hotkey=}: {raw_data=}")
+        plaintext = await asyncio.to_thread(decrypt_instance_response, raw_data["json"], target, iv)
+        if use_new_format:
+            plaintext = gzip.decompress(plaintext)
+        info = json.loads(plaintext)
+        return info["data"][0]
+    finally:
+        if not pooled:
+            try:
+                await session.aclose()
+            except Exception:
+                pass
 
 
 async def get_mtoken_price(user_id: str, chute_id: str) -> tuple[float, float, float]:

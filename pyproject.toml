@@ -32,7 +32,7 @@ dependencies = [
   "python-slugify[unidecode]>=8.0.4,<9.0.0",
   "async-lru>=2.0.5,<3.0.0",
   "aiodns>=3.6.0,<4.0.0",
-  "chutes==0.5.4rc4",
+  "chutes==0.5.5rc45",
   "python-socketio[asyncio-client]>=5.15.0,<6.0.0",
   "pillow>=12.0.0,<13.0.0",
   "aioboto3==15.5.0",
@@ -54,6 +54,7 @@ dependencies = [
   "httptools>=0.7.1",
   "bittensor-drand>=1.2.0",
   "pyyaml>=6.0.1,<7.0.0",
+  "httpx[http2]>=0.28.0,<0.29.0",
 ]
 
 # Dev dependencies go under optional-dependencies

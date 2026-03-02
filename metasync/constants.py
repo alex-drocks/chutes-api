@@ -1,8 +1,8 @@
 SCORING_INTERVAL = "7 days"
 
 # Dynamic bounty boost based on bounty age at claim time (maxes out at 3 hours)
-BOUNTY_BOOST_MIN = 1.5
-BOUNTY_BOOST_MAX = 2.5
+BOUNTY_BOOST_MIN = 1.1
+BOUNTY_BOOST_MAX = 1.5
 BOUNTY_BOOST_RAMP_MINUTES = 180
 
 # After claiming, instance compute_multiplier gradually adjusts toward

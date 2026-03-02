@@ -9,10 +9,9 @@ to keep prometheus utilization gauges current between requests.
 import asyncio
 from loguru import logger
 from api.config import settings
-from api.instance.util import load_chute_target
+from api.instance.util import load_chute_target, cleanup_instance_conn_tracking, cm_redis_shard
 from api.miner_client import get as miner_get
 from api.metrics.capacity import track_capacity
-import aiohttp
 
 CONNECTION_EXPIRY = 3600
 GAUGE_REFRESH_INTERVAL = 10  # seconds
@@ -21,12 +20,12 @@ GAUGE_REFRESH_INTERVAL = 10  # seconds
 async def _query_conn_stats(instance) -> dict | None:
     """Query an instance's /_conn_stats endpoint for ground-truth connection info."""
     try:
-        url = f"http://{instance.host}:{instance.port}/_conn_stats"
         async with miner_get(
             miner_ss58=instance.miner_hotkey,
-            url=url,
+            url="/_conn_stats",
+            instance=instance,
             purpose="conn_stats",
-            timeout=aiohttp.ClientTimeout(total=5),
+            timeout=5,
         ) as resp:
             if resp.status == 200:
                 return await resp.json()
@@ -35,12 +34,18 @@ async def _query_conn_stats(instance) -> dict | None:
     return None
 
 
+def _get_cm_redis(chute_id: str):
+    """Get the sharded cm_redis client for a chute's connection counting."""
+    return cm_redis_shard(chute_id)
+
+
 async def _reconcile_instance(chute_id: str, instance_id: str) -> bool:
     """Reconcile a single instance. Returns True if corrected."""
-    redis_client = settings.redis_client
+    cm_redis = _get_cm_redis(chute_id)
     instance = await load_chute_target(instance_id)
     if not instance:
-        return False
+        await cleanup_instance_conn_tracking(chute_id, instance_id)
+        return True
 
     stats = await _query_conn_stats(instance)
     key = f"cc:{chute_id}:{instance_id}"
@@ -53,11 +58,11 @@ async def _reconcile_instance(chute_id: str, instance_id: str) -> bool:
     if in_flight is None:
         return False
 
-    current = await redis_client.get(key)
+    current = await cm_redis.get(key)
     current = int(current or 0)
 
     if current != in_flight:
-        await redis_client.set(key, in_flight, ex=CONNECTION_EXPIRY)
+        await cm_redis.set(key, in_flight, ex=CONNECTION_EXPIRY)
         return True
     return False
 
@@ -111,7 +116,8 @@ async def reconcile_connection_counts():
 async def _refresh_gauges_once():
     """
     Read connection counts + concurrency from Redis and update prometheus gauges.
-    Pure Redis reads — no DB queries. Safe to run on every API replica.
+    Enumeration keys (active_chutes, cc_inst, cc_conc) on primary redis,
+    cc: counters on sharded cm_redis. No DB queries.
     """
     redis_client = settings.redis_client
     chute_ids_raw = await redis_client.smembers("active_chutes")
@@ -138,7 +144,10 @@ async def _refresh_gauges_once():
                 iid = raw_iid if isinstance(raw_iid, str) else raw_iid.decode()
                 keys.append(f"cc:{chute_id}:{iid}")
 
-            values = await redis_client.mget(keys)
+            cm_redis = _get_cm_redis(chute_id)
+            values = await cm_redis.mget(keys)
+            if values is None:
+                continue
             total_conns = sum(int(v or 0) for v in values)
             instance_count = len(keys)
             mean_conn = total_conns / instance_count if instance_count else 0

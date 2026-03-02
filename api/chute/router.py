@@ -1098,6 +1098,14 @@ async def _deploy_chute(
     if "affine" in chute_args.name.lower() or "turbovision" in chute_args.name.lower():
         allow_egress = False
 
+    # Module locking: standard templates are always locked, otherwise default False.
+    if chute_args.standard_template:
+        lock_modules = True
+    elif chute_args.lock_modules is not None:
+        lock_modules = chute_args.lock_modules
+    else:
+        lock_modules = False
+
     # Cache encryption, currently not fully function so disabled.
     if chute_args.encrypted_fs is None:
         chute_args.encrypted_fs = False
@@ -1227,20 +1235,19 @@ async def _deploy_chute(
                 image, min_sglang_version=2025111902, min_vllm_version=2026011303
             )
             or image.user_id != await chutes_user_id()
-            or semcomp(image.chutes_version, "0.5.4") < 0
+            or semcomp(image.chutes_version, "0.5.5") < 0
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    'Must use image="chutes/sglang:nightly-2025111902.p2" or nightly tag after 20260206*, '
-                    'or image="chutes/vllm:nightly-20260206*" (or more recent nightly vllm) for affine deployments.'
+                    'Must use "sglang" or "vllm" image with chutes lib version >= 0.5.5'
                 ),
             )
 
     # Prevent deploying images with old chutes SDK versions.
     min_version = "0.3.61"
     if is_subnet_model:
-        min_version = "0.5.1"
+        min_version = "0.5.5"
     if current_user.user_id != await chutes_user_id() and (
         not image.chutes_version or semcomp(image.chutes_version, min_version) < 0
     ):
@@ -1326,6 +1333,7 @@ async def _deploy_chute(
         )
         chute.allow_external_egress = allow_egress
         chute.tee = chute_args.tee
+        chute.lock_modules = lock_modules
         chute.encrypted_fs = chute.encrypted_fs and chute_args.encrypted_fs  # XX prevent changing
     else:
         try:
@@ -1371,6 +1379,7 @@ async def _deploy_chute(
                 allow_external_egress=allow_egress,
                 encrypted_fs=chute_args.encrypted_fs,
                 tee=chute_args.tee,
+                lock_modules=lock_modules,
             )
         except ValueError as exc:
             raise HTTPException(
@@ -2029,6 +2038,7 @@ async def teeify_chute(
             allow_external_egress=chute.allow_external_egress,
             encrypted_fs=chute.encrypted_fs,
             tee=True,
+            lock_modules=chute.lock_modules if chute.lock_modules is not None else False,
             immutable=True,
         )
     except ValueError as exc:

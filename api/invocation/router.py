@@ -4,7 +4,6 @@ Invocations router.
 
 import re
 import pybase64 as base64
-import random
 import pickle
 import asyncio
 import gzip
@@ -16,7 +15,7 @@ import decimal
 import traceback
 from loguru import logger
 from pydantic import BaseModel, ValidationError, Field
-from datetime import date, datetime, timedelta, UTC
+from datetime import date, datetime
 from io import BytesIO, StringIO
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
@@ -31,18 +30,19 @@ from api.chute.util import (
     is_shared,
     count_prompt_tokens,
 )
-from api.util import (
-    recreate_vlm_payload,
-    has_legacy_private_billing,
-)
-from api.user.schemas import User, InvocationQuota
-from api.user.service import get_current_user, chutes_user_id, subnet_role_accessible
+from api.util import recreate_vlm_payload
+from api.user.schemas import User
+from api.user.service import get_current_user, subnet_role_accessible
 from api.report.schemas import Report, ReportArgs
 from api.database import get_db_session, get_session, get_inv_session, get_db_ro_session
 from api.instance.util import get_chute_target_manager
-from api.invocation.util import get_prompt_prefix_hashes, get_sponsored_chute_ids
+from api.invocation.util import (
+    get_prompt_prefix_hashes,
+    resolve_rate_limit_headers,
+    build_response_headers,
+    check_quota_and_balance,
+)
 from api.util import validate_tool_call_arguments
-from api.permissions import Permissioning
 
 router = APIRouter()
 host_invocation_router = APIRouter()
@@ -66,8 +66,28 @@ class DiffusionInput(BaseModel):
         extra = "forbid"
 
 
-async def initialize_quota_cache(cache_key: str) -> None:
-    await settings.redis_client.incrbyfloat(cache_key, 0.0)
+def _derive_upstream_status(error: object) -> int | None:
+    """
+    Map upstream error payloads to HTTP statuses used by retry/failover logic.
+    """
+    if isinstance(error, dict):
+        code = error.get("code")
+        if isinstance(code, int):
+            if 500 <= code < 600:
+                return status.HTTP_503_SERVICE_UNAVAILABLE
+            if 400 <= code < 500:
+                return code
+        return None
+
+    if isinstance(error, str):
+        if error in {"infra_overload", "no_targets"}:
+            return status.HTTP_429_TOO_MANY_REQUESTS
+        if error == "bad_request":
+            return status.HTTP_400_BAD_REQUEST
+        if error.startswith("HTTP_5"):
+            return status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return None
 
 
 @router.get("/usage")
@@ -308,6 +328,8 @@ async def _invoke(
             status_code=status.HTTP_404_NOT_FOUND, detail="No matching chute found!"
         )
 
+    resolve_rate_limit_headers(request, current_user, chute)
+
     # Check if the chute is disabled.
     if chute.disabled:
         raise HTTPException(
@@ -323,141 +345,7 @@ async def _invoke(
             detail="This chute does not have TEE enabled. Use the /teeify endpoint to promote the chute to TEE, or remove the X-TEE-Only header.",
         )
 
-    quota_date = date.today()
-    if chute.discount == 1.0:
-        request.state.free_invocation = True
-
-        # Limit free model usage independently of quota.
-        if current_user.permissions_bitmask == 0:
-            effective_balance = (
-                current_user.current_balance.effective_balance
-                if current_user.current_balance
-                else 0.0
-            )
-            unlimited = False
-            if effective_balance >= 10:
-                unlimited = True
-            else:
-                quota = await InvocationQuota.get(current_user.user_id, "__anychute__")
-                if quota > 2000:
-                    unlimited = True
-            if not unlimited:
-                free_usage = 0
-                try:
-                    qkey = f"free_usage:{quota_date}:{current_user.user_id}"
-                    free_usage = await settings.redis_client.incr(qkey)
-                    if free_usage <= 3:
-                        tomorrow = datetime.combine(quota_date, datetime.min.time()) + timedelta(
-                            days=1
-                        )
-                        exp = max(int((tomorrow - datetime.now()).total_seconds()), 1)  # noqa
-                except Exception as exc:
-                    logger.warning(
-                        f"Error checking free usage for {current_user.user_id=}: {str(exc)}"
-                    )
-                if free_usage > 100:
-                    logger.warning(
-                        f"{current_user.user_id=} {current_user.username=} has hit daily free limit: {chute.name=} {effective_balance=}"
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                        detail="Free models limit reached for today - maintain >= $10 balance or upgrade subscription to pro to unlock more.",
-                    )
-    elif current_user.user_id == settings.or_free_user_id:
-        sponsored_chutes = await get_sponsored_chute_ids(current_user.user_id)
-        if chute.chute_id not in sponsored_chutes:
-            logger.warning(
-                f"Attempt to invoke {chute.chute_id=} {chute.name=} from openrouter free account."
-            )
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Invalid free model, please select from the updated list of current chutes free models",
-            )
-
-    # Check account balance.
-    origin_ip = request.headers.get("x-forwarded-for", "").split(",")[0]
-
-    # Prevent calling private chutes when the owner has no balance.
-    if (
-        not chute.public
-        and not has_legacy_private_billing(chute)
-        and chute.user_id != await chutes_user_id()
-    ):
-        owner_balance = (
-            chute.user.current_balance.effective_balance if chute.user.current_balance else 0.0
-        )
-        if owner_balance <= 0:
-            logger.warning(
-                f"Preventing execution of chute {chute.name=} {chute.chute_id=}, "
-                f"creator has insufficient balance {owner_balance=}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail="Chute unavailable because the creator of this chute {chute.user_id=} has zero balance.",
-            )
-        request.state.free_invocation = True
-
-    # Check account quotas if not free/invoiced.
-    quota_date = date.today()
-    if not (
-        current_user.has_role(Permissioning.free_account)
-        or current_user.has_role(Permissioning.invoice_billing)
-        or request.state.free_invocation
-    ):
-        quota = await InvocationQuota.get(current_user.user_id, chute.chute_id)
-        key = await InvocationQuota.quota_key(current_user.user_id, chute.chute_id)
-        client_success, cached = await settings.redis_client.get_with_status(key)
-        request_count = 0.0
-        if cached is not None:
-            try:
-                request_count = float(cached.decode())
-            except ValueError:
-                await settings.redis_client.delete(key)
-        elif client_success:
-            asyncio.create_task(initialize_quota_cache(key))
-
-        # No quota for private/user-created chutes.
-        effective_balance = (
-            current_user.current_balance.effective_balance if current_user.current_balance else 0.0
-        )
-        if (
-            not chute.public
-            and not has_legacy_private_billing(chute)
-            and chute.user_id != await chutes_user_id()
-        ):
-            quota = 0
-
-        # Automatically switch to paygo when the quota is exceeded.
-        if request_count >= quota:
-            if effective_balance <= 0 and not request.state.free_invocation:
-                logger.warning(
-                    f"Payment required: attempted invocation of {chute.name} "
-                    f"from user {current_user.username} [{origin_ip}] with no balance "
-                    f"and {request_count=} of {quota=}"
-                )
-                error_kwargs = {
-                    "status_code": status.HTTP_402_PAYMENT_REQUIRED,
-                    "detail": {
-                        "message": (
-                            f"Quota exceeded and account balance is ${current_user.current_balance.effective_balance}, "
-                            f"please pay with fiat or send tao to {current_user.payment_address}"
-                        ),
-                    },
-                }
-                if quota:
-                    quota_reset = quota_date + timedelta(days=1)
-                    quota_reset = quota_reset = datetime(
-                        year=quota_reset.year,
-                        month=quota_reset.month,
-                        day=quota_reset.day,
-                        tzinfo=UTC,
-                    ).isoformat()
-                    error_kwargs["detail"]["quota_reset_timestamp"] = quota_reset
-
-                raise HTTPException(**error_kwargs)
-        else:
-            # When within the quota, mark the invocation as "free" so no balance is deducted when finished.
-            request.state.free_invocation = True
+    await check_quota_and_balance(request, current_user, chute)
 
     # Identify the cord that we'll trying to access by the public API path and method.
     selected_cord = None
@@ -508,6 +396,7 @@ async def _invoke(
                 request_body["stream_options"] = {}
             if not request_body["stream_options"].get("include_usage"):
                 request_body["stream_options"]["include_usage"] = True
+            request_body["stream_options"]["continuous_usage_stats"] = True
         if request_body.get("logprobs"):
             if not request_body.get("top_logprobs"):
                 request_body["top_logprobs"] = 1
@@ -556,7 +445,16 @@ async def _invoke(
         # Load prompt prefixes so we can do more intelligent routing.
         prefix_hashes = get_prompt_prefix_hashes(request_body)
 
-    if chute.standard_template in ("vllm", "tei") or selected_cord.get("passthrough", False):
+    is_passthrough = chute.standard_template in ("vllm", "tei") or selected_cord.get(
+        "passthrough", False
+    )
+    if is_passthrough:
+        raw_payload = {"json": request_body, "params": request_params}
+    else:
+        raw_payload = request_body
+
+    # Keep pickle for < 0.5.5 backwards compat
+    if is_passthrough:
         request_body = {"json": request_body, "params": request_params}
         args = base64.b64encode(gzip.compress(pickle.dumps(tuple()))).decode()
         kwargs = base64.b64encode(gzip.compress(pickle.dumps(request_body))).decode()
@@ -622,6 +520,7 @@ async def _invoke(
                     metrics=metrics,
                     request=request,
                     prefixes=prefix_hashes,
+                    raw_payload=raw_payload,
                 ):
                     if include_trace:
                         if not first_chunk_processed:
@@ -636,28 +535,14 @@ async def _invoke(
 
                         # If the error occurred on the first chunk, we can raise an HTTP exception.
                         if not first_chunk_processed:
-                            # SGLang errors.
-                            if isinstance(error, dict):
-                                if (
-                                    isinstance(error.get("code"), int)
-                                    and 400 <= error["code"] < 500
-                                ):
+                            mapped_status = _derive_upstream_status(error)
+                            if mapped_status is not None:
+                                if isinstance(error, dict) and 400 <= error.get("code", 0) < 500:
                                     logger.warning(
                                         f"Received error code from upstream streaming response: {error=}"
                                     )
-                                    raise HTTPException(
-                                        status_code=error["code"],
-                                        detail=error,
-                                    )
-
-                            if error in ("infra_overload", "no_targets"):
                                 raise HTTPException(
-                                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                                    detail=chunk_data.get("detail") or error,
-                                )
-                            elif error == "bad_request":
-                                raise HTTPException(
-                                    status_code=status.HTTP_400_BAD_REQUEST,
+                                    status_code=mapped_status,
                                     detail=chunk_data.get("detail") or error,
                                 )
                             raise HTTPException(
@@ -715,7 +600,9 @@ async def _invoke(
             return StreamingResponse(
                 _stream_with_first_chunk(),
                 media_type="text/event-stream",
-                headers={"X-Chutes-InvocationID": parent_invocation_id},
+                headers=build_response_headers(
+                    request, {"X-Chutes-InvocationID": parent_invocation_id}
+                ),
             )
 
         except HTTPException:
@@ -742,6 +629,7 @@ async def _invoke(
         metrics=metrics,
         request=request,
         prefixes=prefix_hashes,
+        raw_payload=raw_payload,
     ):
         if response:
             continue
@@ -756,34 +644,37 @@ async def _invoke(
                 response = StreamingResponse(
                     _streamfile(),
                     media_type=result["content_type"],
-                    headers={"X-Chutes-InvocationID": parent_invocation_id},
+                    headers=build_response_headers(
+                        request, {"X-Chutes-InvocationID": parent_invocation_id}
+                    ),
                 )
             elif "text" in result:
                 response = Response(
                     content=result["text"],
                     media_type=result["content_type"],
-                    headers={"X-Chutes-InvocationID": parent_invocation_id},
+                    headers=build_response_headers(
+                        request, {"X-Chutes-InvocationID": parent_invocation_id}
+                    ),
                 )
             else:
                 response = Response(
                     content=json.dumps(result.get("json", result)).decode(),
                     media_type="application/json",
-                    headers={
-                        "Content-type": "application/json",
-                        "X-Chutes-InvocationID": parent_invocation_id,
-                    },
+                    headers=build_response_headers(
+                        request,
+                        {
+                            "Content-type": "application/json",
+                            "X-Chutes-InvocationID": parent_invocation_id,
+                        },
+                    ),
                 )
         elif chunk.startswith('data: {"error"'):
             chunk_data = json.loads(chunk[6:])
             error = chunk_data["error"]
-            if error in ("infra_overload", "no_targets"):
+            mapped_status = _derive_upstream_status(error)
+            if mapped_status is not None:
                 raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=chunk_data.get("detail") or error,
-                )
-            elif error == "bad_request":
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
+                    status_code=mapped_status,
                     detail=chunk_data.get("detail") or error,
                 )
             raise HTTPException(
@@ -808,6 +699,7 @@ async def hostname_invocation(
     include_in_schema=False,
 ):
     request.state.started_at = time.time()
+    fallback_chutes = []
 
     # /v1/models endpoint for llm.chutes.ai is handled differently.
     if (
@@ -906,16 +798,8 @@ async def hostname_invocation(
             payload["model"] = "Qwen/Qwen3-Coder-Next-TEE"
         elif model == "XiaomiMiMo/MiMo-V2-Flash":
             payload["model"] = "XiaomiMiMo/MiMo-V2-Flash-TEE"
-
-        # XXX in case needed again.
-        elif (
-            model in ("deepseek-ai/DeepSeek-V3.2-Exp", "deepseek-ai/DeepSeek-V3.2-Exp:THINKING")
-            and random.random() <= 0.6
-        ):
-            if model.endswith("THINKING"):
-                payload["model"] = "deepseek-ai/DeepSeek-V3.2-Exp-TEE:THINKING"
-            else:
-                payload["model"] = "deepseek-ai/DeepSeek-V3.2-Exp-TEE"
+        elif model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF1":
+            payload["model"] = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-TEE"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):
@@ -1004,6 +888,7 @@ async def hostname_invocation(
 
         model = payload.get("model")
         chute = None
+        fallback_chutes = []
         template = (
             "vllm"
             if "llm" in request.state.chute_id
@@ -1012,35 +897,67 @@ async def hostname_invocation(
             else "diffusion"
         )
         if model:
-            if (chute := await get_one(model)) is None:
+            from api.model_routing import resolve_model_parameter
+
+            ranked_chutes, routing_mode = await resolve_model_parameter(
+                model, current_user.user_id, template
+            )
+            if not ranked_chutes:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"model not found: {model}",
                 )
-            if chute.standard_template != template or (
-                not chute.public
-                and (
-                    chute.user_id != current_user.user_id
-                    and not await is_shared(chute.chute_id, current_user.user_id)
-                )
-                and not subnet_role_accessible(chute, current_user)
-            ):
+            # Filter ranked chutes to only those accessible to this user.
+            accessible = []
+            for candidate in ranked_chutes:
+                if candidate.standard_template != template:
+                    continue
+                if (
+                    not candidate.public
+                    and candidate.user_id != current_user.user_id
+                    and not await is_shared(candidate.chute_id, current_user.user_id)
+                    and not subnet_role_accessible(candidate, current_user)
+                ):
+                    continue
+                accessible.append(candidate)
+
+            if not accessible:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"model not found: {model}",
                 )
+            chute = accessible[0]
+            fallback_chutes = accessible[1:]
+            if fallback_chutes or routing_mode:
+                payload["model"] = chute.name
             request.state.chute_id = chute.chute_id
             request.state.auth_object_id = chute.chute_id
 
-    # # Model disabled temporarily?
-    # if (
-    #     await settings.redis_client.get(f"model_disabled:{request.state.chute_id}")
-    #     and current_user.user_id != "dff3e6bb-3a6b-5a2b-9c48-da3abcd5ca5f"
-    # ):
-    #     logger.warning(f"MODEL DISABLED: {request.state.chute_id}")
-    #     raise HTTPException(
-    #         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-    #         detail="model is under maintenance",
-    #     )
+    # Try invocation with cross-chute failover for multi-model routing.
+    if fallback_chutes:
+        try:
+            return await _invoke(request, current_user)
+        except HTTPException as exc:
+            if exc.status_code not in (
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            ):
+                raise
+            # Try each fallback chute on infra_overload (already access-filtered).
+            for fallback in fallback_chutes:
+                request.state.chute_id = fallback.chute_id
+                request.state.auth_object_id = fallback.chute_id
+                payload["model"] = fallback.name
+                try:
+                    return await _invoke(request, current_user)
+                except HTTPException as inner_exc:
+                    if inner_exc.status_code not in (
+                        status.HTTP_429_TOO_MANY_REQUESTS,
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                    ):
+                        raise
+                    continue
+            # All chutes exhausted.
+            raise
 
     return await _invoke(request, current_user)

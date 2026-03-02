@@ -57,12 +57,21 @@ class LaunchConfigArgs(BaseModel):
     port_mappings: list[PortMap]
     fsv: Optional[str] = None
     egress: Optional[bool] = None
+    lock_modules: Optional[bool] = None
     netnanny_hash: Optional[str] = None
     run_path: Optional[str] = None
     py_dirs: Optional[list[str]] = None
     rint_commitment: Optional[str] = None
     rint_nonce: Optional[str] = None
     rint_pubkey: Optional[str] = None
+    tls_cert: Optional[str] = None
+    tls_cert_sig: Optional[str] = None
+    tls_ca_cert: Optional[str] = None
+    tls_client_cert: Optional[str] = None
+    tls_client_key: Optional[str] = None
+    tls_client_key_password: Optional[str] = None
+    e2e_pubkey: Optional[str] = None
+    cllmv_session_init: Optional[str] = None
     env: str
     code: Optional[str] = None
     run_code: Optional[str] = None
@@ -124,6 +133,9 @@ class Instance(Base):
     # ECDH session encryption: miner's pubkey and derived session key
     rint_pubkey = Column(String, nullable=True)
     rint_session_key = Column(String, nullable=True)
+
+    # Flexible extra data (aegis v4 fields, future extensions)
+    extra = Column(JSONB, nullable=True)
 
     # Hourly rate charged to customer, which may differ from the hourly rate of the actual
     # GPUs used for this instance due to node selector. For example, if a chute supports
