@@ -1239,7 +1239,7 @@ async def _deploy_chute(
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=('Must use "sglang" or "vllm" image with chutes lib version >= 0.5.5'),
+                detail='Must use "sglang" or "vllm" image with chutes lib version >= 0.5.5',
             )
 
     # Prevent deploying images with old chutes SDK versions.
