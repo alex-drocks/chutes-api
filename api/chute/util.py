@@ -1700,7 +1700,11 @@ async def invoke(
                     balance_used = 0
 
                 # Always track paygo equivalent for subscription cap tracking.
+                # Apply reroll discount to paygo_equivalent even when override_applied
+                # skipped the reroll discount on balance_used above.
                 paygo_equivalent = balance_used
+                if reroll and override_applied and balance_used:
+                    paygo_equivalent = balance_used * settings.reroll_multiplier
 
                 # If free invocation, the actual charge is 0, but we track paygo equivalent.
                 if request.state.free_invocation:
