@@ -28,8 +28,8 @@ _client_cache: OrderedDict[str, httpx.AsyncClient] = OrderedDict()
 
 
 def _should_pool(instance) -> bool:
-    """Only pool/cache when the instance has TLS (cacert) AND chutes_version >= 0.5.5."""
-    return bool(instance.cacert) and semcomp(instance.chutes_version or "0.0.0", "0.5.5") >= 0
+    """Pooling/HTTP2 disabled — always create a fresh client per request."""
+    return False
 
 
 def _get_ssl_and_cn(instance) -> tuple[ssl.SSLContext, str]:
@@ -222,7 +222,7 @@ async def get_instance_client(instance, timeout: int = 600) -> tuple[httpx.Async
         # never sent for idle-evicted connections.
         pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl_ctx,
-            http2=True,
+            http2=False,
             network_backend=_InstanceNetworkBackend(hostname=cn, ip=instance.host),
             socket_options=_KEEPALIVE_SOCK_OPTS,
             keepalive_expiry=75,
