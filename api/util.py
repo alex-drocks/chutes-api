@@ -39,7 +39,6 @@ from sqlalchemy import func, or_, and_, exists
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding, hashes
 from ipaddress import ip_address, IPv4Address, IPv6Address
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from scalecodec.utils.ss58 import is_valid_ss58_address, ss58_decode
 from async_substrate_interface.async_substrate import AsyncSubstrateInterface
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -684,50 +683,6 @@ def should_slurp_code(chutes_version: str):
     if int(minor) >= 2 and int(bug) >= 20 or int(minor) > 2:
         return True
     return False
-
-
-def derive_envdump_key(key, version):
-    """
-    Derive the AES key from the envdump mechanism of chutes lib.
-    """
-    parts = [int(s) for s in version.split(".")]
-    target_key = settings.envcheck_key
-    target_salt = settings.envcheck_salt
-    if parts[1] == 2 and parts[2] >= 51 or parts[1] > 2:
-        target_key = settings.envcheck_52_key
-        target_salt = settings.envcheck_52_salt
-    stored_bytes = bytes.fromhex(target_key)
-    user_bytes = key
-    combined_secret = stored_bytes + user_bytes
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=bytes.fromhex(target_salt),
-        iterations=100000,
-        backend=default_backend(),
-    )
-    key = kdf.derive(combined_secret)
-    return key
-
-
-def decrypt_envdump_cipher(encrypted_b64, key, version):
-    """
-    Decrypt data that was encrypted from the envcheck chute code.
-    """
-    actual_key = derive_envdump_key(key, version)
-    raw_data = base64.b64decode(encrypted_b64)
-    iv = raw_data[:16]
-    encrypted_data = raw_data[16:]
-    cipher = Cipher(
-        algorithms.AES(actual_key),
-        modes.CBC(iv),
-        backend=default_backend(),
-    )
-    unpadder = padding.PKCS7(128).unpadder()
-    decryptor = cipher.decryptor()
-    decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
-    unpadded_data = unpadder.update(decrypted_data) + unpadder.finalize()
-    return unpadded_data
 
 
 def generate_ip_token(origin_ip, extra_salt: str = None):

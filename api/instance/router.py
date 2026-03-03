@@ -2365,7 +2365,8 @@ async def _build_launch_config_verified_response(
             return_value["secrets"][secret.key] = value
 
     return_value["secrets"]["PYTHONDONTWRITEBYTECODE"] = "1"
-
+    return_value["secrets"]["SGLANG_DISABLE_CUDNN_CHECK"] = "1"
+    return_value["secrets"]["SGLANG_JIT_DEEPGEMM_FAST_WARMUP"] = "1"
     return_value["activation_url"] = (
         f"https://api.{settings.base_domain}/instances/launch_config/{launch_config.config_id}/activate"
     )

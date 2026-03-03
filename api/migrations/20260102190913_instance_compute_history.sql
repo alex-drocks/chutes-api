@@ -15,12 +15,12 @@ CREATE OR REPLACE FUNCTION fn_instance_compute_history_update()
 RETURNS TRIGGER AS $$
 BEGIN
     -- Case 1: Instance just activated (activated_at changed from NULL to non-NULL).
-    -- Create startup period record (0.3x rate) and active period record (full rate).
+    -- Create startup period record and active period record (full rate).
     IF NEW.activated_at IS NOT NULL AND OLD.activated_at IS NULL THEN
         IF NEW.compute_multiplier IS NOT NULL THEN
-            -- Insert startup period: created_at to activated_at at 0.3x rate
+            -- Insert startup period: created_at to activated_at
             INSERT INTO instance_compute_history (instance_id, compute_multiplier, started_at, ended_at)
-            VALUES (NEW.instance_id, NEW.compute_multiplier * 0.3, OLD.created_at, NEW.activated_at);
+            VALUES (NEW.instance_id, NEW.compute_multiplier, OLD.created_at, NEW.activated_at);
 
             -- Insert active period: activated_at onwards at full rate
             INSERT INTO instance_compute_history (instance_id, compute_multiplier, started_at)
@@ -63,11 +63,11 @@ CREATE TRIGGER tr_ich_delete
     FOR EACH ROW
     EXECUTE FUNCTION fn_instance_compute_history_delete();
 
--- Backfill existing instances: startup period (0.3x rate from created_at to activated_at).
+-- Backfill existing instances: startup period
 INSERT INTO instance_compute_history (instance_id, compute_multiplier, started_at, ended_at)
 SELECT
     ia.instance_id,
-    COALESCE(i.compute_multiplier, ia.compute_multiplier, 1.0) * 0.3,
+    COALESCE(i.compute_multiplier, ia.compute_multiplier, 1.0),
     ia.created_at,
     ia.activated_at
 FROM instance_audit ia

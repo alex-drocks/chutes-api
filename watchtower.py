@@ -21,7 +21,6 @@ from api.config import settings
 from api.util import (
     decrypt_instance_response,
     encrypt_instance_request,
-    decrypt_envdump_cipher,
     semcomp,
     notify_deleted,
     notify_job_deleted,
@@ -628,18 +627,6 @@ async def verify_expected_command(dump: dict, chute: Chute, miner_hotkey: str, s
     logger.success(f"Verified command line: {miner_hotkey=} {command_line=}")
 
 
-def uuid_dict(data, current_path=[], salt=settings.envcheck_52_salt):
-    flat_dict = {}
-    for key, value in data.items():
-        new_path = current_path + [key]
-        if isinstance(value, dict):
-            flat_dict.update(uuid_dict(value, new_path, salt=salt))
-        else:
-            uuid_key = str(uuid.uuid5(uuid.NAMESPACE_OID, json.dumps(new_path).decode() + salt))
-            flat_dict[uuid_key] = value
-    return flat_dict
-
-
 def is_kubernetes_env(
     instance: Instance, dump: dict, log_prefix: str, standard_template: str = None
 ):
@@ -1126,49 +1113,6 @@ async def procs_check():
                     )
         logger.info("Finished proc check loop...")
         await asyncio.sleep(10)
-
-
-async def get_env_dump(instance):
-    """
-    Load the environment dump from remote instance.
-    """
-    key = secrets.token_bytes(16)
-    payload = {"key": key.hex()}
-    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
-    path, _ = encrypt_instance_request("/_env_dump", instance, hex_encode=True)
-    async with miner_client.post(
-        instance.miner_hotkey,
-        f"/{path}",
-        enc_payload,
-        instance=instance,
-        timeout=30.0,
-    ) as resp:
-        if resp.status != 200:
-            raise EnvdumpMissing(
-                f"Received invalid response code on /_env_dump: {instance.instance_id=} {resp.status=} {await resp.text()}"
-            )
-        return json.loads(decrypt_envdump_cipher(await resp.text(), key, instance.chutes_version))
-
-
-async def get_env_sig(instance, salt):
-    """
-    Load the environment signature from the remote instance.
-    """
-    payload = {"salt": salt}
-    enc_payload, _ = encrypt_instance_request(json.dumps(payload), instance)
-    path, _ = encrypt_instance_request("/_env_sig", instance, hex_encode=True)
-    async with miner_client.post(
-        instance.miner_hotkey,
-        f"/{path}",
-        enc_payload,
-        instance=instance,
-        timeout=5.0,
-    ) as resp:
-        if resp.status != 200:
-            raise EnvdumpMissing(
-                f"Received invalid response code on /_env_sig: {instance.instance_id=} {resp.status=} {await resp.text()}"
-            )
-        return await resp.text()
 
 
 async def get_dump(instance, outdir: str = None):
