@@ -350,11 +350,11 @@ async def instance_cleanup():
                         or_(
                             and_(
                                 Instance.config_id.isnot(None),
-                                Instance.created_at <= func.now() - timedelta(hours=3, minutes=0),
+                                Instance.created_at <= func.now() - timedelta(hours=3, minutes=30),
                             ),
                             and_(
                                 Instance.config_id.is_(None),
-                                Instance.created_at <= func.now() - timedelta(hours=3, minutes=0),
+                                Instance.created_at <= func.now() - timedelta(hours=3, minutes=30),
                             ),
                         ),
                     ),
