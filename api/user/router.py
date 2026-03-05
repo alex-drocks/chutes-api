@@ -56,7 +56,8 @@ from api.user.templater import registration_token_form, registration_token_succe
 from api.payment.schemas import UsageData
 from bittensor_wallet.keypair import Keypair
 from scalecodec.utils.ss58 import is_valid_ss58_address
-from sqlalchemy import select, text, delete
+from sqlalchemy import bindparam, select, text, delete
+from sqlalchemy.dialects.postgresql import JSONB as SA_JSONB
 
 router = APIRouter()
 
@@ -69,6 +70,11 @@ class BalanceRequest(BaseModel):
     user_id: str
     amount: float
     reason: str
+
+
+class BalanceTransferRequest(BaseModel):
+    user_id: str  # target user_id (uuid) or username
+    amount: Optional[float] = None  # defaults to entire balance
 
 
 class SubnetRoleRequest(BaseModel):
@@ -352,6 +358,277 @@ async def admin_balance_change(
     await db.commit()
     await db.refresh(user)
     return {"new_balance": user.balance, "event_id": event_id}
+
+
+@router.post("/balance_transfer")
+async def balance_transfer(
+    transfer_req: BalanceTransferRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+    hotkey: str | None = Header(None, alias=HOTKEY_HEADER),
+    signature: str | None = Header(None, alias=SIGNATURE_HEADER),
+    nonce: str | None = Header(None, alias=NONCE_HEADER),
+    authorization: str | None = Header(None, alias=AUTHORIZATION_HEADER),
+):
+    """
+    Transfer balance from the authenticated user to a target user.
+    Supports three authentication methods:
+      1. Hotkey authentication (X-Chutes-Hotkey + X-Chutes-Signature + X-Chutes-Nonce)
+      2. Admin API key (Authorization: cpk_...)
+      3. Fingerprint (Authorization: <fingerprint>)
+    """
+    from api.api_key.util import get_and_check_api_key
+    from api.util import nonce_is_valid, get_signing_message
+
+    current_user = None
+
+    # Method 1: Hotkey authentication.
+    if hotkey and signature and nonce:
+        if not nonce_is_valid(nonce):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid nonce.",
+            )
+        body_sha256 = getattr(request.state, "body_sha256", None)
+        signing_message = get_signing_message(
+            hotkey=hotkey,
+            nonce=nonce,
+            payload_hash=body_sha256,
+            purpose=None,
+            payload_str=None,
+        )
+        if not signing_message:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Bad signing message.",
+            )
+        try:
+            signature_hex = bytes.fromhex(signature)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid signature format.",
+            )
+        try:
+            keypair = Keypair(hotkey)
+            if not keypair.verify(signing_message, signature_hex):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid request signature.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid request signature.",
+            )
+        current_user = (
+            (await db.execute(select(User).where(User.hotkey == hotkey)))
+            .unique()
+            .scalar_one_or_none()
+        )
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No user found with that hotkey.",
+            )
+
+    # Method 2 & 3: Authorization header (API key or fingerprint).
+    elif authorization:
+        token = authorization.strip().split(" ")[-1]
+
+        # Try API key (full format validation).
+        if APIKey.could_be_valid(token):
+            api_key = await get_and_check_api_key(token, request)
+            if not api_key:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key.",
+                )
+            if not api_key.admin:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Balance transfers require an admin API key.",
+                )
+            current_user = api_key.user
+
+        # Try fingerprint (raw string).
+        else:
+            fingerprint_hash = hashlib.blake2b(token.encode()).hexdigest()
+            current_user = (
+                await db.execute(select(User).where(User.fingerprint_hash == fingerprint_hash))
+            ).scalar_one_or_none()
+            if not current_user:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid fingerprint.",
+                )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Provide hotkey auth, admin API key, or fingerprint.",
+        )
+
+    # Resolve target user.
+    target_user = (
+        (
+            await db.execute(
+                select(User).where(
+                    or_(User.user_id == transfer_req.user_id, User.username == transfer_req.user_id)
+                )
+            )
+        )
+        .unique()
+        .scalar_one_or_none()
+    )
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target user not found: {transfer_req.user_id}",
+        )
+
+    # Cannot transfer to yourself.
+    if current_user.user_id == target_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot transfer balance to yourself.",
+        )
+
+    # Validate amount upfront.
+    if transfer_req.amount is not None and transfer_req.amount <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Transfer amount must be positive.",
+        )
+
+    # Atomic transfer: debit source and credit target in a single statement.
+    # The CTE locks the source row (FOR UPDATE), computes the transfer amount,
+    # and the balance check is enforced atomically — no race conditions.
+    debit_event_id = str(uuid.uuid4())
+    credit_event_id = str(uuid.uuid4())
+    origin_ip = request.headers.get("x-forwarded-for", "").split(",")[0]
+
+    debit_raw = {"source_ip": origin_ip, "type": "balance_transfer", "direction": "debit"}
+    credit_raw = {"source_ip": origin_ip, "type": "balance_transfer", "direction": "credit"}
+
+    transfer_sql = text("""
+        WITH source AS (
+            SELECT user_id, username, COALESCE(balance, 0) AS balance
+            FROM users
+            WHERE user_id = :source_user_id
+            FOR UPDATE
+        ),
+        transfer AS (
+            SELECT
+                CASE
+                    WHEN :amount IS NOT NULL THEN CAST(:amount AS double precision)
+                    ELSE source.balance
+                END AS transfer_amount,
+                source.balance AS source_balance
+            FROM source
+        ),
+        debit AS (
+            UPDATE users
+            SET balance = COALESCE(balance, 0) - transfer.transfer_amount
+            FROM transfer
+            WHERE users.user_id = :source_user_id
+              AND transfer.transfer_amount > 0
+              AND transfer.source_balance >= transfer.transfer_amount
+            RETURNING users.balance AS new_source_balance
+        ),
+        credit AS (
+            UPDATE users
+            SET balance = COALESCE(balance, 0) + transfer.transfer_amount
+            FROM transfer, debit
+            WHERE users.user_id = :target_user_id
+            RETURNING users.balance AS new_target_balance
+        ),
+        debit_log AS (
+            INSERT INTO admin_balance_changes (event_id, user_id, amount, reason, created_by, raw_request, timestamp)
+            SELECT
+                :debit_event_id,
+                :source_user_id,
+                -transfer.transfer_amount,
+                :debit_reason,
+                :source_user_id,
+                :debit_raw_request,
+                now()
+            FROM transfer, debit
+        ),
+        credit_log AS (
+            INSERT INTO admin_balance_changes (event_id, user_id, amount, reason, created_by, raw_request, timestamp)
+            SELECT
+                :credit_event_id,
+                :target_user_id,
+                transfer.transfer_amount,
+                :credit_reason,
+                :source_user_id,
+                :credit_raw_request,
+                now()
+            FROM transfer, debit
+        )
+        SELECT
+            transfer.transfer_amount,
+            transfer.source_balance,
+            debit.new_source_balance,
+            credit.new_target_balance
+        FROM transfer
+        LEFT JOIN debit ON true
+        LEFT JOIN credit ON true
+    """)
+
+    result = await db.execute(
+        transfer_sql.bindparams(
+            bindparam("source_user_id", value=current_user.user_id),
+            bindparam("target_user_id", value=target_user.user_id),
+            bindparam("amount", value=transfer_req.amount),
+            bindparam("debit_event_id", value=debit_event_id),
+            bindparam("credit_event_id", value=credit_event_id),
+            bindparam(
+                "debit_reason",
+                value=f"Balance transfer to {target_user.username} ({target_user.user_id})",
+            ),
+            bindparam(
+                "credit_reason",
+                value=f"Balance transfer from {current_user.username} ({current_user.user_id})",
+            ),
+            bindparam("debit_raw_request", value=debit_raw, type_=SA_JSONB),
+            bindparam("credit_raw_request", value=credit_raw, type_=SA_JSONB),
+        ),
+    )
+    row = result.fetchone()
+
+    if not row or row.new_source_balance is None:
+        source_balance = float(row.source_balance) if row and row.source_balance else 0.0
+        if source_balance <= 0:
+            detail = "No balance to transfer."
+        elif transfer_req.amount and transfer_req.amount > source_balance:
+            detail = f"Insufficient balance. Current balance: {source_balance:.6f}"
+        else:
+            detail = "Transfer failed."
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        )
+
+    await db.commit()
+
+    logger.warning(
+        f"balance_transfer: {current_user.user_id} ({current_user.username}) -> "
+        f"{target_user.user_id} ({target_user.username}) amount={row.transfer_amount:.6f} "
+        f"{origin_ip=} {debit_event_id=} {credit_event_id=}"
+    )
+
+    return {
+        "transferred": float(row.transfer_amount),
+        "from_user": current_user.user_id,
+        "to_user": target_user.user_id,
+        "from_balance": float(row.new_source_balance),
+        "to_balance": float(row.new_target_balance),
+        "debit_event_id": debit_event_id,
+        "credit_event_id": credit_event_id,
+    }
 
 
 @router.post("/grant_subnet_role")
