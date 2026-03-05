@@ -2097,7 +2097,7 @@ async def activate_launch_config_instance(
     if not instance.active:
         # Reject instances that took too long to activate (> 90 minutes). These should be cleaned up automatically
         # in the chute autoscaler's instance_cleanup() method, but just in case...
-        max_startup_seconds = 2 * 60 * 60
+        max_startup_seconds = 3.5 * 60 * 60
         if instance.created_at:
             startup_seconds = (
                 datetime.utcnow() - instance.created_at.replace(tzinfo=None)
@@ -2366,7 +2366,9 @@ async def _build_launch_config_verified_response(
 
     return_value["secrets"]["PYTHONDONTWRITEBYTECODE"] = "1"
     return_value["secrets"]["SGLANG_DISABLE_CUDNN_CHECK"] = "1"
-    return_value["secrets"]["SGLANG_JIT_DEEPGEMM_FAST_WARMUP"] = "1"
+    if semcomp(instance.chutes_version or "0.0.0", "0.5.11") >= 0:
+        return_value["secrets"]["HF_HUB_DISABLE_XET"] = "1"
+        return_value["secrets"]["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     return_value["activation_url"] = (
         f"https://api.{settings.base_domain}/instances/launch_config/{launch_config.config_id}/activate"
     )

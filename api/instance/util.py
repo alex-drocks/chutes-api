@@ -793,7 +793,7 @@ def create_launch_jwt_v2(
     lock_modules: bool = False,
 ) -> str:
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(hours=3)
+    expires_at = now + timedelta(hours=3, minutes=30)
     env_type = launch_config.env_type if launch_config.env_type else "graval"
     payload = {
         "exp": int(expires_at.timestamp()),
@@ -831,7 +831,7 @@ def create_launch_jwt(launch_config: LaunchConfig, disk_gb: int = None) -> str:
     Create JWT for a given launch config (updated chutes lib with new graval etc).
     """
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(hours=3)
+    expires_at = now + timedelta(hours=3, minutes=30)
     env_type = launch_config.env_type if launch_config.env_type else "graval"
     payload = {
         "exp": int(expires_at.timestamp()),

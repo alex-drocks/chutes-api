@@ -1245,7 +1245,7 @@ async def _deploy_chute(
     # Prevent deploying images with old chutes SDK versions.
     min_version = "0.3.61"
     if is_subnet_model:
-        min_version = "0.5.5"
+        min_version = "0.5.15"
     if current_user.user_id != await chutes_user_id() and (
         not image.chutes_version or semcomp(image.chutes_version, min_version) < 0
     ):
