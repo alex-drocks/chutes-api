@@ -11,7 +11,6 @@ import re
 import uuid
 import io
 import time
-from datetime import datetime
 import traceback
 import orjson as json
 import pybase64 as base64
@@ -28,7 +27,7 @@ from sqlalchemy import and_, or_, text, exists, func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from api.config import settings
+from api.config import settings, get_subscription_tier
 from api.permissions import Permissioning
 from api.constants import (
     LLM_MIN_PRICE_IN,
@@ -1103,19 +1102,19 @@ async def _invoke_one(
                         claimed_prompt_tokens = usage.get("prompt_tokens")
 
                         # Sanity check on prompt token counts.
-                        if claimed_prompt_tokens > prompt_tokens * 10:
+                        if claimed_prompt_tokens > prompt_tokens * 50:
                             logger.warning(
                                 f"Prompt tokens exceeded expectations [stream]: {claimed_prompt_tokens=} vs estimated={prompt_tokens} "
                                 f"hotkey={target.miner_hotkey} instance_id={target.instance_id} chute={chute.name}"
                             )
                         else:
-                            prompt_tokens = min(claimed_prompt_tokens, prompt_tokens)
+                            prompt_tokens = claimed_prompt_tokens
 
                         # Sanity check on completion token counts.
                         claimed_completion_tokens = usage.get("completion_tokens")
                         if claimed_completion_tokens is not None:
                             # Some chutes do multi-token prediction, but even so let's make sure people don't do shenanigans.
-                            if claimed_completion_tokens > completion_tokens * 10:
+                            if claimed_completion_tokens > completion_tokens * 50:
                                 logger.warning(
                                     f"Completion tokens exceeded expectations [stream]: {claimed_completion_tokens=} vs estimated={completion_tokens} "
                                     f"hotkey={target.miner_hotkey} instance_id={target.instance_id} chute={chute.name}"
@@ -1145,6 +1144,13 @@ async def _invoke_one(
                 metrics["tt"] = round(total_time, 3)
                 if manager and manager.mean_count is not None:
                     metrics["mc"] = manager.mean_count
+                if manager:
+                    _inst_util = getattr(manager, "_last_instance_utilization", None)
+                    if _inst_util is not None:
+                        try:
+                            metrics["ur"] = round(float(_inst_util), 4)
+                        except (ValueError, TypeError):
+                            pass
 
                 # Moving average performance tracking to keep compute units immutable.
                 ma_updates = await PERF_TRACKER.update_invocation_metrics(
@@ -1327,7 +1333,7 @@ async def _invoke_one(
                     cached_tokens = 0
                     if (usage := json_data.get("usage")) is not None:
                         if claimed_completion_tokens := usage.get("completion_tokens", 0):
-                            if claimed_completion_tokens > completion_tokens * 10:
+                            if claimed_completion_tokens > completion_tokens * 50:
                                 logger.warning(
                                     f"Completion tokens exceeded expectations [nostream]: {claimed_completion_tokens=} vs estimated={completion_tokens} "
                                     f"hotkey={target.miner_hotkey} instance_id={target.instance_id} chute={chute.name}"
@@ -1335,7 +1341,7 @@ async def _invoke_one(
                             else:
                                 completion_tokens = claimed_completion_tokens
                         if claimed_prompt_tokens := usage.get("prompt_tokens", 0):
-                            if claimed_prompt_tokens > prompt_tokens * 10:
+                            if claimed_prompt_tokens > prompt_tokens * 50:
                                 logger.warning(
                                     f"Prompt tokens exceeded expectations [nostream]: {claimed_prompt_tokens=} vs estimated={prompt_tokens} "
                                     f"hotkey={target.miner_hotkey} instance_id={target.instance_id} chute={chute.name}"
@@ -1370,6 +1376,13 @@ async def _invoke_one(
                     metrics["tt"] = round(total_time, 3)
                     if manager and manager.mean_count is not None:
                         metrics["mc"] = manager.mean_count
+                    if manager:
+                        _inst_util = getattr(manager, "_last_instance_utilization", None)
+                        if _inst_util is not None:
+                            try:
+                                metrics["ur"] = round(float(_inst_util), 4)
+                            except (ValueError, TypeError):
+                                pass
 
                     # Moving average performance tracking to keep compute units immutable.
                     ma_updates = await PERF_TRACKER.update_invocation_metrics(
@@ -1583,14 +1596,6 @@ async def invoke(
                         )
                         override_applied = True
 
-                        # Log cache hit info.
-                        if cached_tokens > 0 and prompt_tokens > 0:
-                            cache_hit_rate = round(cached_tokens / prompt_tokens * 100, 1)
-                            logger.info(
-                                f"Cache hit: model={chute.name}:{chute.chute_id} prompt_tokens={prompt_tokens} user={user.user_id} "
-                                f"cached_tokens={cached_tokens} hit_rate={cache_hit_rate}% discount={cache_discount}"
-                            )
-
                     elif (
                         price_override := await PriceOverride.get(user_id, chute.chute_id)
                     ) is not None:
@@ -1691,6 +1696,18 @@ async def invoke(
                 if balance_used and sub_paygo_discount and not override_applied:
                     balance_used -= balance_used * sub_paygo_discount
 
+                # Magic discount: configurable discount when the configured header is present.
+                magic_discount = False
+                if (
+                    settings.magic_discount_header_key
+                    and settings.magic_discount_header_val
+                    and request.headers.get(settings.magic_discount_header_key)
+                    == settings.magic_discount_header_val
+                ):
+                    magic_discount = True
+                    if balance_used:
+                        balance_used *= 1.0 - settings.magic_discount_amount
+
                 # Don't charge for private instances.
                 if (
                     not chute.public
@@ -1712,13 +1729,25 @@ async def invoke(
 
                 # Track subscription caps in Redis.
                 if request.state.free_invocation and paygo_equivalent > 0:
-                    from api.config import get_subscription_tier
+                    from api.invocation.util import (
+                        build_subscription_periods,
+                        SUBSCRIPTION_CACHE_PREFIX,
+                    )
 
-                    sub_quota = await InvocationQuota.get(user_id, chute.chute_id)
+                    (
+                        sub_quota,
+                        subscription_anchor,
+                        _,
+                        _,
+                    ) = await InvocationQuota.get_subscription_record(user_id)
                     if get_subscription_tier(sub_quota) is not None:
-                        month_key = f"sub_cap_m:{datetime.now().strftime('%Y%m')}:{user_id}"
-                        four_hour_bucket = int(time.time()) // (4 * 3600)
-                        four_hour_key = f"sub_cap_4h:{four_hour_bucket}:{user_id}"
+                        periods = build_subscription_periods(subscription_anchor)
+                        month_key = (
+                            f"{SUBSCRIPTION_CACHE_PREFIX}_{periods['monthly_period']}:{user_id}"
+                        )
+                        four_hour_key = (
+                            f"{SUBSCRIPTION_CACHE_PREFIX}_{periods['four_hour_period']}:{user_id}"
+                        )
                         asyncio.create_task(
                             settings.redis_client.incrbyfloat(month_key, paygo_equivalent)
                         )
@@ -1777,6 +1806,8 @@ async def invoke(
                     )
                 ):
                     value = 1.0 if not reroll else settings.reroll_multiplier
+                    if magic_discount:
+                        value *= 1.0 - settings.magic_discount_amount
                     key = await InvocationQuota.quota_key(user.user_id, chute.chute_id)
                     asyncio.create_task(settings.redis_client.incrbyfloat(key, value))
 
@@ -1935,7 +1966,7 @@ async def invoke(
 
                 if error_message == "BAD_REQUEST":
                     logger.warning(
-                        f"instance_id={target.instance_id} [chute_id={target.chute_id}]: bad request {error_detail}"
+                        f"instance_id={target.instance_id} [chute_id={target.chute_id}]: bad request"
                     )
                     yield sse(
                         {"error": "bad_request", "detail": f"Invalid request: {error_detail}"}

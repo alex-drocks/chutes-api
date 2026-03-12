@@ -106,7 +106,7 @@ async def main(chute_id, concurrency):
         image = (
             (
                 await session.execute(
-                    select(Image).where(Image.image_id == "28cffa80-efc6-5310-8d42-693227bb8bc1")
+                    select(Image).where(Image.image_id == "d4708900-a2b1-5f8d-bd7b-a260a72606ba")
                 )
             )
             .unique()

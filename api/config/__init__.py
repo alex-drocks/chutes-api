@@ -143,7 +143,7 @@ class Settings(BaseSettings):
 
     # Base redis settings.
     redis_host: str = Field(
-        default="172.16.0.100",
+        default_factory=lambda: os.getenv("HOST_IP", "172.16.0.100"),
         validation_alias="PRIMARY_REDIS_HOST",
     )
     redis_port: int = Field(
@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     _lite_redis_client: Optional[redis.Redis] = None
     _billing_redis_client: Optional[redis.Redis] = None
     _cm_redis_clients: Optional[list[redis.Redis]] = None
-    cm_redis_shard_count: int = int(os.getenv("CM_REDIS_SHARD_COUNT", "5"))
+    cm_redis_shard_count: int = int(os.getenv("CM_REDIS_SHARD_COUNT", "6"))
     cm_redis_start_port: int = int(os.getenv("CM_REDIS_START_PORT", "1700"))
     cm_redis_socket_timeout: float = float(os.getenv("CM_REDIS_SOCKET_TIMEOUT", "30.0"))
     cm_redis_op_timeout: float = float(os.getenv("CM_REDIS_OP_TIMEOUT", "2.5"))
@@ -317,6 +317,12 @@ class Settings(BaseSettings):
     # Reroll discount (i.e. duplicate prompts for re-roll in RP, or pass@k, etc.)
     reroll_multiplier: float = float(os.getenv("REROLL_MULTIPLIER", "0.1"))
 
+    # Magic discount header: when a request includes this header with the correct value,
+    # a discount is applied to both quota increment and paygo charges.
+    magic_discount_header_key: Optional[str] = os.getenv("MAGIC_DISCOUNT_HEADER_KEY")
+    magic_discount_header_val: Optional[str] = os.getenv("MAGIC_DISCOUNT_HEADER_VAL")
+    magic_discount_amount: float = float(os.getenv("MAGIC_DISCOUNT_AMOUNT", "0.5"))
+
     # Chutes pinned version.
     chutes_version: str = os.getenv("CHUTES_VERSION", "0.4.46")
 
@@ -442,13 +448,18 @@ FOUR_HOUR_CHUNKS_PER_MONTH = 180  # 30 days * 24 hours / 4 hours
 def get_subscription_tier(quota: int) -> float | None:
     """
     Get the monthly price for a subscription quota value.
-    Handles off-by-one quotas (e.g., 301, 2001, 5001) used for free/comped subs.
+    Handles off-by-one quotas (e.g., 301, 2001, 5001) used for custom subs.
     """
     if quota in SUBSCRIPTION_TIERS:
         return SUBSCRIPTION_TIERS[quota]
     if quota - 1 in SUBSCRIPTION_TIERS:
         return SUBSCRIPTION_TIERS[quota - 1]
     return None
+
+
+def is_custom_subscription(quota: int) -> bool:
+    """Off-by-one quotas represent custom subscriptions."""
+    return quota not in SUBSCRIPTION_TIERS and quota - 1 in SUBSCRIPTION_TIERS
 
 
 settings = Settings()

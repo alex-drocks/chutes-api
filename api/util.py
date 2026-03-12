@@ -932,6 +932,8 @@ async def recreate_vlm_payload(request_body: dict):
 
     # Perform asset downloads concurrently.
     if len(futures) > 8:
+        for coro in futures:
+            coro.close()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Exceeded maximum image URLs per request: {len(futures)}",

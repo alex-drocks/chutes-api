@@ -59,7 +59,7 @@ async def model_to_dict(obj, bounty_info: Optional[dict] = None):
             }
         )
         if semcomp(obj.chutes_version or "0.0.0", "0.3.61") >= 0:
-            data["code"] = "print('legacy placeholder')"
+            data["code"] = f"print('legacy placeholder for {obj.version=}')"
         data["preemptible"] = obj.preemptible
 
         # Add effective compute multiplier and factors.

@@ -21,7 +21,7 @@ from typing import Optional, Tuple
 from datetime import datetime, timedelta
 from fastapi.responses import PlainTextResponse
 from fastapi import APIRouter, Depends, HTTPException, Response, status, Header, Request
-from sqlalchemy import select, text, func, update, and_, desc
+from sqlalchemy import select, text, func, update, and_, desc, true
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -73,7 +73,7 @@ from api.server.service import (
     get_instance_evidence,
     verify_gpu_evidence,
 )
-from api.server.schemas import TeeInstanceEvidence, BootAttestation
+from api.server.schemas import TeeInstanceEvidence, BootAttestation, Server
 from api.rate_limit import rate_limit
 from api.server.exceptions import (
     InstanceNotFoundError,
@@ -1561,6 +1561,42 @@ async def _validate_tee_launch_config_instance(
     return launch_config, nodes, instance, validator_pubkey
 
 
+async def _verify_tee_version_support(db: AsyncSession, chute: Chute, hotkey: str | None) -> None:
+    """
+    Reject launch config for TEE chutes (>= 0.6.0) when miner has legacy TEE servers (< 0.2.1).
+    Raises HTTPException with server names if any TEE servers need upgrading.
+    """
+    if not chute.tee or not hotkey or semcomp(chute.chutes_version or "0.0.0", "0.6.0") < 0:
+        return
+
+    latest_boot = (
+        select(BootAttestation.measurement_version)
+        .where(BootAttestation.server_ip == Server.ip)
+        .order_by(desc(BootAttestation.created_at))
+        .limit(1)
+        .lateral()
+    )
+    stmt = (
+        select(Server.name, latest_boot.c.measurement_version)
+        .select_from(Server)
+        .outerjoin(latest_boot, true())
+        .where(Server.miner_hotkey == hotkey, Server.is_tee.is_(True))
+    )
+    result = await db.execute(stmt)
+    legacy_server_names = [
+        row[0] for row in result.all() if row[1] is None or semcomp(row[1], "0.2.1") < 0
+    ]
+    if legacy_server_names:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Launch config rejected: you have legacy TEE infrastructure which does not "
+                "support chutes lib version >= 0.6.0. Upgrade these servers first: "
+                f"{', '.join(legacy_server_names)}"
+            ),
+        )
+
+
 @router.get("/launch_config")
 async def get_launch_config(
     chute_id: str,
@@ -1592,6 +1628,8 @@ async def get_launch_config(
             await _check_scalable_private(db, chute, miner)
         else:
             await _check_scalable(db, chute, hotkey)
+
+    await _verify_tee_version_support(db, chute, hotkey)
 
     # Associated with a job?
     disk_gb = None
@@ -1958,39 +1996,47 @@ async def claim_graval_launch_config(
 
 async def delayed_instance_tls_check(instance_id: str):
     """Verify the chute port serves the expected TLS cert after activation."""
-    await asyncio.sleep(10)  # Wait for uvicorn to be listening.
-
-    async with get_session() as session:
-        instance = (
-            (await session.execute(select(Instance).where(Instance.instance_id == instance_id)))
-            .unique()
-            .scalar_one_or_none()
-        )
-        if not instance or not instance.active:
-            return
-        if not instance.cacert:
-            return
-        live_ok = await _verify_instance_tls_live(instance.host, instance.port, instance.cacert)
-        if not live_ok:
-            reason = (
-                f"Live TLS cert verification failed: "
-                f"{instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=}"
+    for attempt in range(4):
+        await asyncio.sleep(7)
+        async with get_session() as session:
+            instance = (
+                (await session.execute(select(Instance).where(Instance.instance_id == instance_id)))
+                .unique()
+                .scalar_one_or_none()
             )
-            logger.error(reason)
-            await session.delete(instance)
-            await session.execute(
-                text(
-                    "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
-                ),
-                {"instance_id": instance.instance_id, "reason": reason},
-            )
-            await session.commit()
-            await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
-            asyncio.create_task(notify_deleted(instance))
-        else:
-            logger.success(
-                f"Live TLS cert verification passed: {instance.instance_id=} on {instance.host}:{instance.port}"
-            )
+            if not instance or not instance.active:
+                return
+            if not instance.cacert:
+                return
+            live_ok = await _verify_instance_tls_live(instance.host, instance.port, instance.cacert)
+            if not live_ok:
+                reason = (
+                    "Live TLS cert verification failed: "
+                    f"{instance.instance_id=} {instance.miner_hotkey=} {instance.chute_id=} (attempt {attempt + 1} of 4)"
+                )
+                if attempt == 3:
+                    logger.error(reason)
+                    await session.delete(instance)
+                    await session.execute(
+                        text(
+                            "UPDATE instance_audit SET deletion_reason = :reason WHERE instance_id = :instance_id"
+                        ),
+                        {"instance_id": instance.instance_id, "reason": reason},
+                    )
+                    await session.commit()
+                    await invalidate_instance_cache(
+                        instance.chute_id, instance_id=instance.instance_id
+                    )
+                    asyncio.create_task(notify_deleted(instance))
+                else:
+                    logger.warning(reason)
+            else:
+                logger.success(
+                    f"Live TLS cert verification passed: {instance.instance_id=} on {instance.host}:{instance.port}"
+                )
+                await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
+                asyncio.create_task(notify_activated(instance))
+                return
 
 
 async def delayed_instance_fs_check(instance_id: str):
@@ -2175,11 +2221,12 @@ async def activate_launch_config_instance(
                 seconds=chute.shutdown_after_seconds or 300
             )
         await db.commit()
-        await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
         await delete_bounty(chute.chute_id)
-        asyncio.create_task(notify_activated(instance))
         if instance.cacert:
             asyncio.create_task(delayed_instance_tls_check(instance.instance_id))
+        else:
+            await invalidate_instance_cache(instance.chute_id, instance_id=instance.instance_id)
+            asyncio.create_task(notify_activated(instance))
     return {"ok": True}
 
 

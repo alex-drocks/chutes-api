@@ -5,7 +5,8 @@ Helpers for invocations.
 import os
 import asyncio
 import hashlib
-import time
+import math
+import calendar
 import aiohttp
 import orjson as json
 from datetime import date, datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from api.gpu import COMPUTE_UNIT_PRICE_BASIS
 from api.config import (
     settings,
     get_subscription_tier,
+    is_custom_subscription,
     SUBSCRIPTION_MONTHLY_CAP_MULTIPLIER,
     SUBSCRIPTION_4H_CAP_MULTIPLIER,
     SUBSCRIPTION_PAYGO_DISCOUNTS,
@@ -41,6 +43,73 @@ ORDER BY date DESC, name;
 """
 
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-server")
+FOUR_HOUR_BUCKET_SECONDS = 4 * 3600
+SUBSCRIPTION_CACHE_PREFIX = "sub_cap_v2"
+SUBSCRIPTION_USAGE_FLOOR = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+
+def _as_utc_timestamp(value: datetime | None) -> datetime:
+    """
+    Treat naive timestamps as UTC because quota anchor timestamps are stored in UTC.
+    """
+    if value is None:
+        return datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _shift_months_capped(anchor: datetime, months: int) -> datetime:
+    """
+    Shift anchor by whole months, capping the day within the target month.
+    """
+    month_index = (anchor.year * 12 + (anchor.month - 1)) + months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    day = min(anchor.day, calendar.monthrange(year, month)[1])
+    return anchor.replace(year=year, month=month, day=day)
+
+
+def get_fixed_four_hour_bucket_start(now: datetime | None = None) -> datetime:
+    current = _as_utc_timestamp(now)
+    bucket_start = math.floor(current.timestamp() / FOUR_HOUR_BUCKET_SECONDS)
+    return datetime.fromtimestamp(bucket_start * FOUR_HOUR_BUCKET_SECONDS, tz=timezone.utc)
+
+
+def get_subscription_cycle_start(
+    anchor_date: datetime | None, now: datetime | None = None
+) -> datetime:
+    current = _as_utc_timestamp(now)
+    anchor = _as_utc_timestamp(anchor_date)
+    if current >= SUBSCRIPTION_USAGE_FLOOR:
+        anchor = max(anchor, SUBSCRIPTION_USAGE_FLOOR)
+    return anchor
+
+
+def get_subscription_cycle_end(
+    anchor_date: datetime | None, now: datetime | None = None
+) -> datetime:
+    """Renewal timestamp based on the raw anchor, unaffected by the usage floor."""
+    anchor = _as_utc_timestamp(anchor_date)
+    return _shift_months_capped(anchor, 1)
+
+
+def build_subscription_periods(anchor_date: datetime | None, now: datetime | None = None) -> dict:
+    current = _as_utc_timestamp(now)
+    cycle_start = get_subscription_cycle_start(anchor_date, current)
+    cycle_end = get_subscription_cycle_end(anchor_date, current)
+    four_hour_start = get_fixed_four_hour_bucket_start(current)
+    return {
+        "anchor_date": max(_as_utc_timestamp(anchor_date), SUBSCRIPTION_USAGE_FLOOR)
+        if current >= SUBSCRIPTION_USAGE_FLOOR
+        else _as_utc_timestamp(anchor_date),
+        "cycle_start": cycle_start,
+        "cycle_end": cycle_end,
+        "monthly_period": f"m2:{int(cycle_start.timestamp())}",
+        "four_hour_start": four_hour_start,
+        "four_hour_end": four_hour_start + timedelta(seconds=FOUR_HOUR_BUCKET_SECONDS),
+        "four_hour_period": f"4h2:{int(four_hour_start.timestamp())}",
+    }
 
 
 @alru_cache(maxsize=500, ttl=1200)
@@ -324,16 +393,20 @@ def build_response_headers(request, base_headers=None):
 
 
 async def get_subscription_usage(
-    user_id: str, period: str, since_expr: str, cache_ttl: int
+    user_id: str,
+    period: str,
+    since_expr: str,
+    cache_ttl: int,
+    query_params: dict | None = None,
 ) -> float:
     """
     Get accumulated paygo-equivalent usage covered by subscription (not already paid via paygo).
     Tries Redis cache first, falls back to usage_data table query.
-    period: cache key suffix, e.g. "m:202602" or "4h:123456"
-    since_expr: SQL expression for the start bound, e.g. "date_trunc('month', now())"
+    period: cache key suffix, e.g. "m2:1709337600" or "4h2:1709337600"
+    since_expr: SQL parameter placeholder for the start bound, e.g. ":cycle_start"
     cache_ttl: TTL in seconds for the Redis cache entry
     """
-    cache_key = f"sub_cap_{period}:{user_id}"
+    cache_key = f"{SUBSCRIPTION_CACHE_PREFIX}_{period}:{user_id}"
     cached = await settings.redis_client.get(cache_key)
     if cached is not None:
         return float(cached.decode() if isinstance(cached, bytes) else cached)
@@ -350,12 +423,16 @@ async def get_subscription_usage(
                     0
                 )
                 FROM usage_data ud
-                JOIN chutes c ON c.chute_id = ud.chute_id
                 WHERE ud.user_id = :user_id
                 AND ud.bucket >= {since_expr}
-                AND c.public IS TRUE
+                AND EXISTS (
+                    SELECT 1
+                    FROM chutes c
+                    WHERE c.chute_id = ud.chute_id
+                    AND c.public IS TRUE
+                )
             """),
-            {"user_id": user_id},
+            {"user_id": user_id, **(query_params or {})},
         )
         usage = max(float(result.scalar() or 0.0), 0.0)
 
@@ -531,38 +608,58 @@ async def check_quota_and_balance(request, current_user, chute):
         else:
             # When within the quota, check subscription caps before marking as free.
             # force_paygo skips free_invocation entirely (TEE/premium restrictions).
+            (
+                subscription_quota,
+                subscription_anchor,
+                _,
+                _,
+            ) = await InvocationQuota.get_subscription_record(current_user.user_id)
             if force_paygo:
-                if (fp_monthly_price := get_subscription_tier(quota)) is not None:
+                if (fp_monthly_price := get_subscription_tier(subscription_quota)) is not None:
                     request.state.subscriber_paygo_discount = SUBSCRIPTION_PAYGO_DISCOUNTS.get(
                         fp_monthly_price, 0.0
                     )
-            elif (monthly_price := get_subscription_tier(quota)) is not None:
-                now = datetime.now()
-                monthly_usage = await get_subscription_usage(
-                    current_user.user_id,
-                    f"m:{now.strftime('%Y%m')}",
-                    "date_trunc('month', now())",
-                    35 * 86400,  # 35 days TTL
-                )
-                monthly_cap = monthly_price * SUBSCRIPTION_MONTHLY_CAP_MULTIPLIER
+            elif (monthly_price := get_subscription_tier(subscription_quota)) is not None:
+                custom_sub = is_custom_subscription(subscription_quota)
+                periods = build_subscription_periods(subscription_anchor)
 
-                four_hour_bucket = int(time.time()) // (4 * 3600)
+                # Custom subs only enforce 4h burst caps, not monthly.
+                monthly_exceeded = False
+                if not custom_sub:
+                    monthly_usage = await get_subscription_usage(
+                        current_user.user_id,
+                        periods["monthly_period"],
+                        ":cycle_start",
+                        35 * 86400,  # 35 days TTL
+                        {
+                            # usage_data.bucket is stored as a naive UTC timestamp.
+                            "cycle_start": periods["cycle_start"].replace(tzinfo=None)
+                        },
+                    )
+                    monthly_cap = monthly_price * SUBSCRIPTION_MONTHLY_CAP_MULTIPLIER
+                    monthly_exceeded = monthly_usage >= monthly_cap
+
                 four_hour_usage = await get_subscription_usage(
                     current_user.user_id,
-                    f"4h:{four_hour_bucket}",
-                    "now() - interval '4 hours'",
+                    periods["four_hour_period"],
+                    ":four_hour_start",
                     5 * 3600,  # 5 hours TTL
+                    {
+                        # usage_data.bucket is stored as a naive UTC timestamp.
+                        "four_hour_start": periods["four_hour_start"].replace(tzinfo=None)
+                    },
                 )
                 four_hour_cap = (
                     monthly_price / FOUR_HOUR_CHUNKS_PER_MONTH
                 ) * SUBSCRIPTION_4H_CAP_MULTIPLIER
+                four_hour_exceeded = four_hour_usage >= four_hour_cap
 
-                if monthly_usage >= monthly_cap or four_hour_usage >= four_hour_cap:
+                if monthly_exceeded or four_hour_exceeded:
                     # Cap exceeded — switch to paygo for remainder
                     exceeded = []
-                    if monthly_usage >= monthly_cap:
+                    if monthly_exceeded:
                         exceeded.append(f"monthly ({monthly_usage:.4f}/{monthly_cap:.4f})")
-                    if four_hour_usage >= four_hour_cap:
+                    if four_hour_exceeded:
                         exceeded.append(f"4h ({four_hour_usage:.4f}/{four_hour_cap:.4f})")
                     logger.warning(
                         f"Subscription cap exceeded for {current_user.user_id} "

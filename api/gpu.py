@@ -2,19 +2,6 @@
 GPU constants, expected values, etc.
 """
 
-ALLOW_INCLUDE = [
-    "h100",
-    "h100_sxm",
-    "h100_nvl",
-    "h200",
-    "b200",
-    "b300",
-    "mi300x",
-    "a100",
-    "a100_sxm",
-    "l40s",
-    "a6000_ada",
-]
 SUPPORTED_GPUS = {
     "3090": {
         "model_name_check": "RTX 3090",

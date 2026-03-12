@@ -11,7 +11,6 @@ import random
 import traceback
 import httpx
 import orjson as json
-from datetime import datetime
 from loguru import logger
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse, Response
@@ -40,6 +39,7 @@ from api.util import (
     encrypt_instance_request,
     decrypt_instance_response,
     has_legacy_private_billing,
+    semcomp,
 )
 from api.miner_client import sign_request
 from api.rate_limit import rate_limit
@@ -221,6 +221,21 @@ async def e2e_invoke(
             detail="This chute is currently disabled.",
         )
 
+    # Block non-streaming E2E for vLLM chutes on old library versions that
+    # can't send usage data, to prevent incorrect per-second billing.
+    if (
+        not is_stream
+        and chute.standard_template == "vllm"
+        and semcomp(instance.chutes_version or "0.0.0", "0.5.27") < 0
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Non-streaming E2E requests require chutes >= 0.5.27 for vLLM chutes. "
+                "Please use stream=True until the chute has been upgraded."
+            ),
+        )
+
     resolve_rate_limit_headers(request, current_user, chute)
     await check_quota_and_balance(request, current_user, chute)
 
@@ -345,10 +360,26 @@ async def e2e_invoke(
             )
         else:
             # Non-streaming: read full response, transport-decrypt, relay.
+            import base64 as _b64
+
             raw_body = response.content
             decrypted = await asyncio.to_thread(decrypt_instance_response, raw_body, instance)
 
-            # Time-based billing.
+            # chutes >= 0.5.27 sends a JSON envelope with E2E blob + plaintext usage
+            # so the API can bill based on token counts instead of per-second.
+            metrics = None
+            e2e_blob = decrypted
+            if semcomp(instance.chutes_version or "0.0.0", "0.5.27") >= 0:
+                envelope = json.loads(decrypted)
+                e2e_blob = _b64.b64decode(envelope["e2e"])
+                usage = envelope.get("usage")
+                if usage and isinstance(usage, dict):
+                    metrics = {
+                        "it": usage.get("prompt_tokens", 0),
+                        "ot": usage.get("completion_tokens", 0),
+                        "ct": (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+                    }
+
             duration = time.time() - started_at
             compute_units = multiplier * math.ceil(duration)
             await _do_billing(
@@ -358,7 +389,7 @@ async def e2e_invoke(
                 duration,
                 compute_units,
                 multiplier,
-                None,
+                metrics,
                 invocation_id,
                 parent_invocation_id,
                 request,
@@ -372,7 +403,7 @@ async def e2e_invoke(
             asyncio.create_task(clear_instance_disable_state(instance.instance_id))
 
             return Response(
-                content=decrypted,
+                content=e2e_blob,
                 media_type="application/octet-stream",
                 headers=build_response_headers(request),
             )
@@ -577,11 +608,15 @@ async def _do_billing(
 
     # Keep subscription cap cache warm for near-real-time gating.
     if free_invocation and paygo_equivalent > 0:
-        sub_quota = await InvocationQuota.get(user_id, chute.chute_id)
+        from api.invocation.util import build_subscription_periods, SUBSCRIPTION_CACHE_PREFIX
+
+        sub_quota, subscription_anchor, _, _ = await InvocationQuota.get_subscription_record(
+            user_id
+        )
         if get_subscription_tier(sub_quota) is not None:
-            month_key = f"sub_cap_m:{datetime.now().strftime('%Y%m')}:{user_id}"
-            four_hour_bucket = int(time.time()) // (4 * 3600)
-            four_hour_key = f"sub_cap_4h:{four_hour_bucket}:{user_id}"
+            periods = build_subscription_periods(subscription_anchor)
+            month_key = f"{SUBSCRIPTION_CACHE_PREFIX}_{periods['monthly_period']}:{user_id}"
+            four_hour_key = f"{SUBSCRIPTION_CACHE_PREFIX}_{periods['four_hour_period']}:{user_id}"
             asyncio.create_task(settings.redis_client.incrbyfloat(month_key, paygo_equivalent))
             asyncio.create_task(settings.redis_client.expire(month_key, 35 * 86400))
             asyncio.create_task(settings.redis_client.incrbyfloat(four_hour_key, paygo_equivalent))
