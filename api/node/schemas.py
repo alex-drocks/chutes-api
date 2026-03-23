@@ -214,4 +214,12 @@ class Node(Base):
                     if SUPPORTED_GPUS[gpu]["memory"] >= node_selector.min_vram_gb_per_gpu
                 ]
             )
+        if node_selector.max_hourly_price_per_gpu:
+            allowed_gpus = set(
+                [
+                    gpu
+                    for gpu in allowed_gpus
+                    if SUPPORTED_GPUS[gpu]["hourly_rate"] <= node_selector.max_hourly_price_per_gpu
+                ]
+            )
         return self.gpu_identifier in allowed_gpus

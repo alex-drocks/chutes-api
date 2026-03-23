@@ -31,7 +31,7 @@ from api.chute.util import (
 )
 from api.util import recreate_vlm_payload
 from api.user.schemas import User
-from api.user.service import get_current_user, subnet_role_accessible
+from api.user.service import chutes_user_id, get_current_user, subnet_role_accessible
 from api.report.schemas import Report, ReportArgs
 from api.database import get_db_session, get_session, get_inv_session, get_db_ro_session
 from api.instance.util import get_chute_target_manager
@@ -45,6 +45,9 @@ from api.util import validate_tool_call_arguments
 
 router = APIRouter()
 host_invocation_router = APIRouter()
+
+# Date when usage_data table started being populated.
+USAGE_DATA_CUTOFF = date(2025, 8, 26)
 
 
 class DiffusionInput(BaseModel):
@@ -139,8 +142,104 @@ async def _cached_get_metrics(table, cache_key):
 
 
 @router.get("/stats/llm")
-async def get_llm_stats():
-    return await _cached_get_metrics("vllm_metrics", b"llmstats")
+async def get_llm_stats(
+    request: Request = None,
+    start_date: date = None,
+    end_date: date = None,
+    chute_id: str = None,
+):
+    cache_key = b"llmstats"
+    if request:
+        if (cached := await settings.redis_client.get(cache_key)) is not None:
+            rv = json.loads(gzip.decompress(base64.b64decode(cached)))
+        else:
+            rv = []
+        if chute_id:
+            rv = [r for r in rv if r["chute_id"] == chute_id]
+        if start_date:
+            start_str = str(start_date)
+            rv = [r for r in rv if r["date"] >= start_str]
+        if end_date:
+            end_str = str(end_date)
+            rv = [r for r in rv if r["date"] <= end_str]
+        return rv
+    system_uid = await chutes_user_id()
+
+    # Build name map: only system-user-owned chutes get names, rest are [private].
+    name_query = text("""
+        SELECT DISTINCT ON (chute_id) chute_id, COALESCE(name, '[unknown]') AS name
+        FROM chute_history
+        WHERE user_id = :system_uid
+        ORDER BY chute_id, created_at DESC
+    """)
+    usage_query = text("""
+        WITH daily_usage AS (
+            SELECT chute_id, bucket::date AS date,
+                SUM(count) AS total_requests,
+                SUM(input_tokens) AS total_input_tokens,
+                SUM(output_tokens) AS total_output_tokens
+            FROM usage_data
+            WHERE bucket >= :cutoff
+            GROUP BY chute_id, date
+        )
+        SELECT chute_id, date, total_requests, total_input_tokens, total_output_tokens
+        FROM daily_usage
+    """)
+
+    async with get_session() as session:
+        name_result = await session.execute(name_query, {"system_uid": system_uid})
+        name_map = {row.chute_id: row.name for row in name_result}
+
+        result = await session.execute(usage_query, {"cutoff": USAGE_DATA_CUTOFF})
+        by_key = {}
+        for row in result:
+            key = (row.chute_id, str(row.date))
+            by_key[key] = {
+                "chute_id": row.chute_id,
+                "name": name_map.get(row.chute_id, "[private]"),
+                "date": row.date,
+                "total_requests": int(row.total_requests),
+                "total_input_tokens": int(row.total_input_tokens or 0),
+                "total_output_tokens": int(row.total_output_tokens or 0),
+                "average_tps": 0,
+                "average_ttft": 0,
+            }
+
+    # Merge in tps/ttft from invocations-derived metrics, and backfill
+    # token data for dates before usage_data cutoff.
+    async with get_inv_session() as session:
+        result = await session.execute(text("SELECT * FROM vllm_metrics"))
+        for row in result.mappings():
+            key = (row["chute_id"], str(row["date"]))
+            row_date = (
+                row["date"]
+                if isinstance(row["date"], date)
+                else date.fromisoformat(str(row["date"]))
+            )
+            if key in by_key:
+                by_key[key]["average_tps"] = float(row.get("average_tps") or 0)
+                by_key[key]["average_ttft"] = float(row.get("average_ttft") or 0)
+            elif row_date < USAGE_DATA_CUTOFF:
+                cid = row["chute_id"]
+                by_key[key] = {
+                    "chute_id": cid,
+                    "name": name_map.get(cid, "[private]"),
+                    "date": row_date,
+                    "total_requests": int(row.get("total_requests") or 0),
+                    "total_input_tokens": int(row.get("total_input_tokens") or 0),
+                    "total_output_tokens": int(row.get("total_output_tokens") or 0),
+                    "average_tps": float(row.get("average_tps") or 0),
+                    "average_ttft": float(row.get("average_ttft") or 0),
+                }
+
+    rv = sorted(
+        by_key.values(),
+        key=lambda r: (r["date"], r["total_input_tokens"] + r["total_output_tokens"]),
+        reverse=True,
+    )
+    cache_value = base64.b64encode(gzip.compress(json.dumps(rv)))
+    await settings.redis_client.set(cache_key, cache_value)
+    return rv
 
 
 @router.get("/stats/diffusion")
@@ -231,26 +330,26 @@ async def get_recent_export(
     Get an export for recent data, which may not yet be in S3.
     """
     query = """
-        SELECT
-            invocation_id,
-            chute_id,
-            chute_user_id,
-            function_name,
-            image_id,
-            image_user_id,
-            instance_id,
-            miner_uid,
-            miner_hotkey,
-            started_at,
-            completed_at,
-            error_message,
-            compute_multiplier,
-            metrics
-        FROM partitioned_invocations
-        WHERE started_at >= CURRENT_TIMESTAMP - INTERVAL '1 day'
-        AND completed_at IS NOT NULL
-        AND error_message IS NULL
-    """
+       SELECT
+           invocation_id,
+           chute_id,
+           chute_user_id,
+           function_name,
+           image_id,
+           image_user_id,
+           instance_id,
+           miner_uid,
+           miner_hotkey,
+           started_at,
+           completed_at,
+           error_message,
+           compute_multiplier,
+           metrics
+       FROM partitioned_invocations
+       WHERE started_at >= CURRENT_TIMESTAMP - INTERVAL '1 day'
+       AND completed_at IS NOT NULL
+       AND error_message IS NULL
+   """
     if not limit or limit <= 0:
         limit = 100
     limit = min(limit, 10000)
@@ -603,7 +702,12 @@ async def _invoke(
                 _stream_with_first_chunk(),
                 media_type="text/event-stream",
                 headers=build_response_headers(
-                    request, {"X-Chutes-InvocationID": parent_invocation_id}
+                    request,
+                    {
+                        "X-Chutes-InvocationID": parent_invocation_id,
+                        "Cache-Control": "no-cache, no-transform",
+                        "X-Accel-Buffering": "no",
+                    },
                 ),
             )
 
@@ -647,7 +751,12 @@ async def _invoke(
                     _streamfile(),
                     media_type=result["content_type"],
                     headers=build_response_headers(
-                        request, {"X-Chutes-InvocationID": parent_invocation_id}
+                        request,
+                        {
+                            "X-Chutes-InvocationID": parent_invocation_id,
+                            "Cache-Control": "no-cache, no-transform",
+                            "X-Accel-Buffering": "no",
+                        },
                     ),
                 )
             elif "text" in result:
@@ -804,6 +913,16 @@ async def hostname_invocation(
             payload["model"] = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-TEE"
         elif model == "tngtech/DeepSeek-TNG-R1T2-Chimera":
             payload["model"] = "tngtech/DeepSeek-TNG-R1T2-Chimera-TEE"
+        elif model == "chutesai/Mistral-Small-3.1-24B-Instruct-2503":
+            payload["model"] = "chutesai/Mistral-Small-3.1-24B-Instruct-2503-TEE"
+        elif model in ("Qwen/Qwen3-32B", "Qwen/Qwen3-32B:THINKING"):
+            payload["model"] = "Qwen/Qwen3-32B-TEE"
+            if model.endswith(":THINKING"):
+                payload["model"] = "Qwen/Qwen3-32B-TEE:THINKING"
+        elif model in ("openai/gpt-oss-20b", "openai/gpt-oss-20b:THINKING"):
+            payload["model"] = "openai/gpt-oss-20b:THINKING"
+            if model.endswith(":THINKING"):
+                payload["model"] = "openai/gpt-oss-20b:THINKING"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):

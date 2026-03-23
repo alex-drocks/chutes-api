@@ -36,6 +36,8 @@ ONE_TAO_RAO = 10**9  # 1 TAO = 1e9 rao
 MAX_STAKE_PER_ITERATION_TAO = 25  # Max TAO worth to stake per iteration
 MIN_STAKE_TAO = 0.1  # Minimum stake amount
 MAX_SLIPPAGE_PERCENT = 0.003  # 0.3% max slippage before chunking
+TX_FEE_BUFFER_RAO = 5_000_000  # 0.005 TAO buffer for tx fees (post 10x fee increase)
+DUST_THRESHOLD_RAO = 10_000_000  # 0.01 TAO - minimum payment worth processing
 AUTOSTAKER_CONCURRENCY = 24  # Max number of wallets processed concurrently
 STALE_BASE_MINUTES = 15  # Default stale threshold for "processing" rows
 STALE_MAX_MINUTES = 60  # Upper bound for adaptive stale threshold
@@ -188,12 +190,31 @@ async def wait_for_mev_extrinsic(
     return False, "MEV shield timeout - inner extrinsic not found"
 
 
+async def _submit_extrinsic_direct(
+    substrate: AsyncSubstrateInterface,
+    call,
+    keypair: Keypair,
+) -> tuple[bool, Optional[str]]:
+    """Submit an extrinsic directly without MEV protection."""
+    extrinsic = await substrate.create_signed_extrinsic(call=call, keypair=keypair)
+    receipt = await substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True)
+    is_success = await receipt.is_success
+    if not is_success:
+        error_msg = await receipt.error_message
+        return False, f"Extrinsic failed: {error_msg}"
+    return True, None
+
+
 async def submit_extrinsic_with_mev(
     substrate: AsyncSubstrateInterface,
     call,
     keypair: Keypair,
 ) -> tuple[bool, Optional[str]]:
-    """Submit an extrinsic with MEV protection (when available)."""
+    """Submit an extrinsic with MEV protection (when available and enabled)."""
+    if not settings.mev_protection_enabled:
+        logger.info("MEV protection disabled, submitting directly")
+        return await _submit_extrinsic_direct(substrate, call, keypair)
+
     # Get the current nonce explicitly via RPC to avoid caching issues
     result = await substrate.rpc_request("system_accountNextIndex", [keypair.ss58_address])
     current_nonce = result["result"]
@@ -595,7 +616,9 @@ async def reconcile_and_process_stake(
             constant_name="ExistentialDeposit",
             block_hash=block_hash,
         )
-        existential_deposit = int(getattr(result, "value", 0)) + 500000 if result else 500000
+        existential_deposit = (
+            (int(getattr(result, "value", 0)) + TX_FEE_BUFFER_RAO) if result else TX_FEE_BUFFER_RAO
+        )
         available_balance = max(0, chain_balance - existential_deposit)
 
         # If chain has no balance, we're done (regardless of what DB says)
@@ -646,6 +669,15 @@ async def reconcile_and_process_stake(
                 f"on {pending_stake.source_hotkey}:{pending_stake.netuid} (chain exhausted)"
             )
             return True, pending_stake.pending_balance, True, None  # Mark as complete
+
+        # Verify wallet has enough free TAO to pay tx fees for move_stake
+        free_balance = await get_free_balance(substrate, pending_stake.wallet_address, block_hash)
+        if free_balance < TX_FEE_BUFFER_RAO:
+            logger.warning(
+                f"Wallet {pending_stake.wallet_address} has insufficient free TAO "
+                f"({free_balance / ONE_TAO_RAO:.9f}) to pay move_stake tx fees, skipping"
+            )
+            return False, 0, False, "Insufficient free TAO for tx fees"
 
         # Use the actual chain stake as the source of truth
         actual_pending = chain_stake

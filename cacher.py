@@ -32,7 +32,7 @@ async def warm_up_cache():
     Keep some of the DB-heavy endpoints warm in cache so API requests are always fast.
     """
     from api.miner.router import get_scores, get_stats
-    from api.invocation.router import get_usage
+    from api.invocation.router import get_usage, get_llm_stats
 
     logger.info("Warming up miner and chute usage endpoints...")
     async with get_session() as session:
@@ -49,6 +49,8 @@ async def warm_up_cache():
     logger.success("Warmed up scores endpoint")
     await get_usage(request=None)
     logger.success("Warmed up usage metrics")
+    await get_llm_stats(request=None)
+    logger.success("Warmed up LLM stats")
     await refresh_all_llm_details()
     logger.success("Warmed up LLM details")
 

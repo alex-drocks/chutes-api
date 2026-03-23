@@ -16,6 +16,9 @@ from loguru import logger
 from datetime import timedelta, datetime, timezone
 from typing import Dict, Optional, Set, List, Tuple
 import aiohttp
+from io import StringIO
+from rich.console import Console
+from rich.table import Table
 from sqlalchemy import (
     text,
     select,
@@ -38,6 +41,7 @@ from api.bounty.util import (
 from api.user.service import chutes_user_id
 from api.util import has_legacy_private_billing, notify_deleted
 from api.chute.schemas import Chute, NodeSelector, RollingUpdate
+from api.gpu import COMPUTE_UNIT_PRICE_BASIS
 from api.instance.schemas import Instance, LaunchConfig
 from api.instance.util import invalidate_instance_cache
 from api.metrics.util import reconcile_connection_counts
@@ -219,14 +223,14 @@ STARVING_COOLDOWN_MINUTES = 90
 STARVING_HISTORY_KEY_PREFIX = "starving:"
 
 # Higher min instance counts for some chutes...
-LIMIT_OVERRIDES = {}
+LIMIT_OVERRIDES = {
+    "7858c162-4f52-5a11-868e-ddef2c04f4d8": 1,
+}
 FAILSAFE = {
-    "0d7184a2-32a3-53e0-9607-058c37edaab5": 30,
-    "2ff25e81-4586-5ec8-b892-3a6f342693d7": 15,
-    "e51e818e-fa63-570d-9f68-49d7d1b4d12f": 10,
-    "08a7a60f-6956-5a9e-9983-5603c3ac5a38": 10,
-    "8f3bb827-b9e6-5487-88bc-ee8f0c6f5810": 10,
-    "6320ab82-9e94-5d63-8e38-d136f61dc157": 3,
+    "ce6a92e4-5c2f-5681-9742-c80a4447bbdf": 15,
+    "08a7a60f-6956-5a9e-9983-5603c3ac5a38": 7,
+    "2ff25e81-4586-5ec8-b892-3a6f342693d7": 7,
+    "ac059e33-eb27-541c-b9a9-24b214036475": 6,
 }
 
 
@@ -240,6 +244,7 @@ class AutoScaleContext:
         instances: List[Instance],
         db_now: datetime,
         gpu_count=None,
+        avg_instance_counts: Dict[str, float] = None,
     ):
         self.chute_id = chute_id
         self.metrics = metrics
@@ -275,6 +280,7 @@ class AutoScaleContext:
         self.utilization_basis = max(
             metrics["utilization"].get("5m", 0), metrics["utilization"].get("15m", 0)
         )
+        self.utilization_2h = metrics["utilization"].get("2h", 0.0)
         # Track all rate limit windows
         self.rate_limit_5m = metrics["rate_limit_ratio"].get("5m", 0)
         self.rate_limit_15m = metrics["rate_limit_ratio"].get("15m", 0)
@@ -330,6 +336,31 @@ class AutoScaleContext:
         self.effective_multiplier = 0.0  # Total effective compute multiplier for miners
         self.cm_delta_ratio = 0.0  # Ratio of effective/base (how much boost overall)
         self.has_bounty = False
+        self.standard_template = info.standard_template if info else None
+
+        # Revenue-weighted urgency fields
+        # Total revenue from Prometheus, divided by time-weighted avg instance count from DB
+        rev_total = metrics.get("revenue_total", {})
+        avg_inst = avg_instance_counts or {}
+        self.avg_instances_2h = avg_inst.get("2h", 0.0)
+        rev_30m = rev_total.get("30m", 0.0) / max(avg_inst.get("30m", 0.0), 1.0)
+        rev_1h = rev_total.get("1h", 0.0) / max(avg_inst.get("1h", 0.0), 1.0)
+        rev_2h = rev_total.get("2h", 0.0) / max(avg_inst.get("2h", 0.0), 1.0)
+        # Recency-weighted per-instance revenue signal
+        self.revenue_per_instance = rev_30m * 1.0 + rev_1h * 0.3 + rev_2h * 0.1
+        self.revenue_factor = 1.0
+
+        # Hourly cost per instance for profitability calculation
+        try:
+            ns = NodeSelector(**info.node_selector) if info else None
+            self.hourly_cost = COMPUTE_UNIT_PRICE_BASIS * ns.compute_multiplier if ns else 0.0
+        except Exception:
+            self.hourly_cost = 0.0
+        # Hourly revenue per instance (2h total revenue / avg instances, scaled to hourly)
+        self.hourly_revenue_per_instance = rev_2h / 2.0  # 2h window / 2 = hourly rate
+        # Total hourly revenue (raw from Prometheus, not multiplied back up)
+        self.hourly_revenue_total = rev_total.get("2h", 0.0) / 2.0
+        self.profitable = True  # default, computed in second pass
 
 
 async def instance_cleanup():
@@ -384,6 +415,7 @@ async def instance_cleanup():
 # EMA smoothing for stability
 EMA_ALPHA_URGENCY = 0.3  # For urgency/boost calculations
 EMA_ALPHA_UTIL = 0.4  # For utilization (slightly more reactive)
+EMA_ALPHA_TARGET = 0.4  # For target_count smoothing (prevents thrashing on scale-ups)
 EMA_REDIS_TTL = 7200  # 2 hours - survive missed runs but not stale forever
 
 
@@ -406,6 +438,7 @@ async def get_smoothed_metrics(chute_ids: List[str]) -> Dict[str, Dict[str, floa
             smoothed[chute_id] = {
                 "urgency": float(data.get(b"urgency", 0)),
                 "util": float(data.get(b"util", 0)),
+                "target": float(data.get(b"target", 0)),
             }
     return smoothed
 
@@ -420,13 +453,13 @@ async def save_smoothed_metrics(metrics: Dict[str, Dict[str, float]]):
 
     pipe = settings.redis_client.pipeline()
     for chute_id, values in metrics.items():
-        pipe.hset(
-            f"smooth:{chute_id}",
-            mapping={
-                "urgency": str(values["urgency"]),
-                "util": str(values["util"]),
-            },
-        )
+        mapping = {
+            "urgency": str(values["urgency"]),
+            "util": str(values["util"]),
+        }
+        if "target" in values:
+            mapping["target"] = str(values["target"])
+        pipe.hset(f"smooth:{chute_id}", mapping=mapping)
         pipe.expire(f"smooth:{chute_id}", EMA_REDIS_TTL)
     await pipe.execute()
 
@@ -1212,6 +1245,40 @@ async def get_all_chutes_from_db() -> Set[str]:
         return {row.chute_id for row in result}
 
 
+async def get_avg_instance_counts() -> Dict[str, Dict[str, float]]:
+    """
+    Get time-weighted average instance count per chute over rolling windows (30m, 1h, 2h)
+    using the instance_audit table. An instance counts proportionally to how long it was
+    active during each window (activated_at to deleted_at/now).
+    """
+    windows = {"30m": "30 minutes", "1h": "1 hour", "2h": "2 hours"}
+    result = {}
+    async with get_session() as session:
+        await session.execute(text("SET LOCAL statement_timeout = '5s'"))
+        for key, interval in windows.items():
+            rows = await session.execute(
+                text(f"""
+                    SELECT chute_id,
+                           SUM(
+                             EXTRACT(EPOCH FROM (
+                               LEAST(COALESCE(deleted_at, NOW()), NOW())
+                               - GREATEST(activated_at, NOW() - INTERVAL '{interval}')
+                             ))
+                           ) / EXTRACT(EPOCH FROM INTERVAL '{interval}') AS avg_instances
+                    FROM instance_audit
+                    WHERE activated_at IS NOT NULL
+                      AND activated_at < NOW()
+                      AND COALESCE(deleted_at, NOW()) > NOW() - INTERVAL '{interval}'
+                    GROUP BY chute_id
+                """)
+            )
+            for row in rows:
+                if row.chute_id not in result:
+                    result[row.chute_id] = {"30m": 0.0, "1h": 0.0, "2h": 0.0}
+                result[row.chute_id][key] = float(max(row.avg_instances, 0.0))
+    return result
+
+
 async def get_all_chute_metrics() -> Dict[str, Dict]:
     """
     Get metrics for all chutes from Prometheus, including zero defaults for chutes without metrics.
@@ -1227,6 +1294,7 @@ async def get_all_chute_metrics() -> Dict[str, Dict]:
         "utilization_5m": "avg by (chute_id) (avg_over_time(utilization[5m]))",
         "utilization_15m": "avg by (chute_id) (avg_over_time(utilization[15m]))",
         "utilization_1h": "avg by (chute_id) (avg_over_time(utilization[1h]))",
+        "utilization_2h": "avg by (chute_id) (avg_over_time(utilization[2h]))",
         # Completed requests
         "completed_5m": "sum by (chute_id) (increase(requests_completed_total[5m]))",
         "completed_15m": "sum by (chute_id) (increase(requests_completed_total[15m]))",
@@ -1235,6 +1303,10 @@ async def get_all_chute_metrics() -> Dict[str, Dict]:
         "rate_limited_5m": "sum by (chute_id) (increase(requests_rate_limited_total[5m]))",
         "rate_limited_15m": "sum by (chute_id) (increase(requests_rate_limited_total[15m]))",
         "rate_limited_1h": "sum by (chute_id) (increase(requests_rate_limited_total[1h]))",
+        # Total revenue per chute over rolling windows (divided by avg instance count from DB)
+        "revenue_total_30m": "sum by (chute_id) (increase(usage_usd_total[30m]))",
+        "revenue_total_1h": "sum by (chute_id) (increase(usage_usd_total[1h]))",
+        "revenue_total_2h": "sum by (chute_id) (increase(usage_usd_total[2h]))",
     }
 
     try:
@@ -1247,11 +1319,12 @@ async def get_all_chute_metrics() -> Dict[str, Dict]:
     chute_metrics = {}
     for chute_id in all_db_chute_ids:
         chute_metrics[chute_id] = {
-            "utilization": {"current": 0.0, "5m": 0.0, "15m": 0.0, "1h": 0.0},
+            "utilization": {"current": 0.0, "5m": 0.0, "15m": 0.0, "1h": 0.0, "2h": 0.0},
             "completed_requests": {"5m": 0.0, "15m": 0.0, "1h": 0.0},
             "rate_limited_requests": {"5m": 0.0, "15m": 0.0, "1h": 0.0},
             "total_requests": {"5m": 0.0, "15m": 0.0, "1h": 0.0},
             "rate_limit_ratio": {"5m": 0.0, "15m": 0.0, "1h": 0.0},
+            "revenue_total": {"30m": 0.0, "1h": 0.0, "2h": 0.0},
         }
 
     # Process Prometheus results and update metrics where data exists
@@ -1269,6 +1342,9 @@ async def get_all_chute_metrics() -> Dict[str, Dict]:
                 elif metric_name.startswith("rate_limited_"):
                     window = metric_name.replace("rate_limited_", "")
                     chute_metrics[chute_id]["rate_limited_requests"][window] = value
+                elif metric_name.startswith("revenue_total_"):
+                    window = metric_name.replace("revenue_total_", "")
+                    chute_metrics[chute_id]["revenue_total"][window] = value
 
     # Calculate derived metrics
     for chute_id in chute_metrics:
@@ -1444,7 +1520,10 @@ async def _perform_autoscale_impl(
         logger.warning(f"Connection count reconciliation failed: {exc}")
 
     logger.info("Fetching metrics from Prometheus and database...")
-    chute_metrics = await get_all_chute_metrics()
+    chute_metrics, avg_instance_counts = await asyncio.gather(
+        get_all_chute_metrics(),
+        get_avg_instance_counts(),
+    )
 
     # Safety check - ensure we have enough data
     if len(chute_metrics) < MIN_CHUTES_FOR_SCALING:
@@ -1480,6 +1559,7 @@ async def _perform_autoscale_impl(
                             MAX(COALESCE(ucb.effective_balance, 0)) AS user_balance,
                             c.max_instances,
                             c.scaling_threshold,
+                            c.standard_template,
                             COALESCE(MAX(cmb.boost), 1.0) AS manual_boost,
                             NOW() - c.created_at <= INTERVAL '3 hours' AS new_chute,
                             COUNT(DISTINCT CASE WHEN i.active = true AND i.verified = true THEN i.instance_id END) AS instance_count,
@@ -1570,6 +1650,7 @@ async def _perform_autoscale_impl(
             instances_by_chute[chute_id],
             db_now,
             gpu_count,
+            avg_instance_counts.get(chute_id),
         )
         contexts[chute_id] = ctx
 
@@ -1729,6 +1810,117 @@ async def _perform_autoscale_impl(
             # These won't scale down voluntarily but can be forced to donate when others are starving
             elif ctx.smoothed_util < ctx.threshold:
                 ctx.is_donor = True
+
+    # Revenue-weighted urgency and profitability for vLLM public chutes.
+    # Two effects:
+    # 1. Urgency score weighted by revenue relative to peers (higher revenue = higher priority)
+    # 2. Unprofitable chutes (revenue < estimated GPU cost) become donor-eligible regardless of
+    #    utilization and won't scale up when profitable chutes are starving.
+    # Estimated GPU cost = listed hourly price * 0.5 (our price is ~2x actual rental cost).
+    # Only apply when we have meaningful revenue data (skip during initial rollout).
+    ESTIMATED_COST_RATIO = 0.5  # Actual GPU cost is roughly half our listed price
+    vllm_public_with_pressure = [
+        ctx
+        for ctx in contexts.values()
+        if ctx.standard_template == "vllm"
+        and ctx.public
+        and (ctx.urgency_score > 0 or ctx.is_starving)
+    ]
+    nonzero_revs = sorted(
+        [
+            ctx.revenue_per_instance
+            for ctx in vllm_public_with_pressure
+            if ctx.revenue_per_instance > 0
+        ]
+    )
+    has_revenue_data = len(nonzero_revs) >= 3
+    median_rev_per_inst = 0.0
+
+    if has_revenue_data:
+        mid = len(nonzero_revs) // 2
+        if len(nonzero_revs) % 2 == 0:
+            median_rev_per_inst = (nonzero_revs[mid - 1] + nonzero_revs[mid]) / 2
+        else:
+            median_rev_per_inst = nonzero_revs[mid]
+
+    any_profitable_starving = False
+    for ctx in contexts.values():
+        if ctx.standard_template != "vllm" or not ctx.public:
+            continue
+
+        # Determine profitability: is revenue covering estimated GPU cost?
+        estimated_gpu_cost = ctx.hourly_cost * ESTIMATED_COST_RATIO
+        if ctx.hourly_revenue_per_instance > 0 and estimated_gpu_cost > 0:
+            ctx.profitable = ctx.hourly_revenue_per_instance >= estimated_gpu_cost
+        elif ctx.hourly_revenue_per_instance <= 0 and estimated_gpu_cost > 0:
+            if ctx.current_count > 0:
+                # Instances running but earning nothing — unprofitable
+                ctx.profitable = False
+            else:
+                # No instances yet — can't judge, assume profitable (new/cold chute)
+                ctx.profitable = True
+
+        # Revenue factor: weight urgency by revenue relative to peers
+        # Applied to both raw and smoothed urgency so it flows through boost and ranking paths
+        if has_revenue_data and ctx.revenue_per_instance > 0:
+            ratio = ctx.revenue_per_instance / median_rev_per_inst
+            ctx.revenue_factor = max(0.5, min(1.5, ratio))
+            ctx.urgency_score *= ctx.revenue_factor
+            ctx.smoothed_urgency *= ctx.revenue_factor
+            # Update persisted smoothed value so next run's EMA incorporates revenue weighting
+            if ctx.chute_id in new_smoothed_metrics:
+                new_smoothed_metrics[ctx.chute_id]["urgency"] = ctx.smoothed_urgency
+
+        if ctx.is_starving and ctx.profitable:
+            any_profitable_starving = True
+
+    # Unprofitable chutes become donor-eligible when profitable chutes are starving.
+    # This lets the system reclaim capacity from money-losing chutes for money-making ones.
+    # However, high total revenue chutes are protected even if unprofitable per-instance —
+    # they may be loss leaders driving significant platform value.
+    if any_profitable_starving and has_revenue_data:
+        # Compute median total hourly revenue across all vLLM public chutes with instances
+        total_revs = sorted(
+            [
+                ctx.hourly_revenue_per_instance * ctx.current_count
+                for ctx in contexts.values()
+                if ctx.standard_template == "vllm"
+                and ctx.public
+                and ctx.current_count > 0
+                and ctx.hourly_revenue_per_instance > 0
+            ]
+        )
+        median_total_rev = 0.0
+        if total_revs:
+            mid_t = len(total_revs) // 2
+            median_total_rev = (
+                (total_revs[mid_t - 1] + total_revs[mid_t]) / 2
+                if len(total_revs) % 2 == 0
+                else total_revs[mid_t]
+            )
+
+        for ctx in contexts.values():
+            if (
+                ctx.standard_template == "vllm"
+                and ctx.public
+                and not ctx.profitable
+                and not ctx.is_starving
+                and ctx.current_count > 0
+                and ctx.chute_id not in LIMIT_OVERRIDES
+            ):
+                total_rev = ctx.hourly_revenue_per_instance * ctx.current_count
+                # High total revenue chutes are loss leaders — protect them from donation.
+                # "High" = above median total revenue across all vLLM public chutes.
+                if median_total_rev > 0 and total_rev >= median_total_rev:
+                    continue
+                if not ctx.is_donor:
+                    ctx.is_donor = True
+                    logger.info(
+                        f"Unprofitable chute {ctx.chute_id} marked as donor "
+                        f"(rev/hr=${ctx.hourly_revenue_per_instance:.4f} vs "
+                        f"est_cost/hr=${ctx.hourly_cost * ESTIMATED_COST_RATIO:.4f}, "
+                        f"total_rev/hr=${total_rev:.4f})"
+                    )
 
     # If any starving chutes exist, block non-starving scale-ups that are GPU-compatible.
     if starving_chutes:
@@ -1933,6 +2125,14 @@ async def _perform_autoscale_impl(
     URGENCY_BOOST_MAX = 1.5
     RELATIVE_ADJUSTMENT_MAX = 0.2  # ±20% adjustment based on relative urgency
 
+    # Revenue boost: additive bonus based on per-instance revenue vs median
+    # Active demand tier: applied when upscale_amount > 0
+    REVENUE_BOOST_SCALE = 0.15  # Per 1x median: 1x median = +0.15, 2x = +0.30
+    REVENUE_BOOST_MAX = 0.5  # Cap the active revenue bonus
+    # Retention tier: small bonus to keep miners on revenue-generating chutes even without demand pressure
+    REVENUE_RETAIN_SCALE = 0.05  # Per 1x median: 1x = +0.05, 2x = +0.10
+    REVENUE_RETAIN_MAX = 0.15  # Cap the retention bonus
+
     # Collect SMOOTHED urgency scores for chutes wanting to scale up
     # Using smoothed values prevents boost from oscillating between runs
     scaling_chutes = [ctx for ctx in contexts.values() if ctx.upscale_amount > 0]
@@ -1988,8 +2188,32 @@ async def _perform_autoscale_impl(
             adjusted_boost = base_boost * relative_factor
             # Scale the boost bonus (amount above 1.0) by sustainability
             ctx.boost = max(1.0, 1.0 + (adjusted_boost - 1.0) * sustainability)
+
+            # Revenue bonus: reward chutes generating more revenue per instance
+            # Only for public vLLM chutes with revenue data
+            if (
+                has_revenue_data
+                and median_rev_per_inst > 0
+                and ctx.hourly_revenue_per_instance > 0
+                and ctx.public
+                and ctx.standard_template == "vllm"
+            ):
+                revenue_ratio = ctx.hourly_revenue_per_instance / median_rev_per_inst
+                revenue_bonus = min(revenue_ratio * REVENUE_BOOST_SCALE, REVENUE_BOOST_MAX)
+                ctx.boost += revenue_bonus
         else:
-            ctx.boost = 1.0
+            # No scaling needed — small revenue retention signal to keep miners on profitable chutes
+            if (
+                has_revenue_data
+                and median_rev_per_inst > 0
+                and ctx.hourly_revenue_per_instance > 0
+                and ctx.public
+                and ctx.standard_template == "vllm"
+            ):
+                revenue_ratio = ctx.hourly_revenue_per_instance / median_rev_per_inst
+                ctx.boost = 1.0 + min(revenue_ratio * REVENUE_RETAIN_SCALE, REVENUE_RETAIN_MAX)
+            else:
+                ctx.boost = 1.0
 
     # Calculate effective compute multiplier for each chute (for CSV export and logging)
     # This mirrors the logic in api/chute/util.py:calculate_effective_compute_multiplier
@@ -2037,6 +2261,80 @@ async def _perform_autoscale_impl(
 
         ctx.effective_multiplier = total
         ctx.cm_delta_ratio = total / base_mult if base_mult > 0 else 1.0
+
+    # Log revenue table for public TEE vLLM chutes, sorted by total revenue.
+    tee_rev_chutes = sorted(
+        [
+            ctx
+            for ctx in contexts.values()
+            if ctx.standard_template == "vllm" and ctx.tee and ctx.public and ctx.current_count > 0
+        ],
+        key=lambda c: c.hourly_revenue_total,
+        reverse=True,
+    )
+    if tee_rev_chutes:
+        table = Table(title="TEE Revenue Report", show_lines=False)
+        table.add_column("Chute", style="cyan", no_wrap=True)
+        table.add_column("Total/Hr", justify="right")
+        table.add_column("Rev/Inst", justify="right")
+        table.add_column("Rev/GPU", justify="right")
+        table.add_column("Util", justify="right")
+        table.add_column("@100% Inst", justify="right")
+        table.add_column("@100% GPU", justify="right")
+        table.add_column("GPUs", justify="right")
+        table.add_column("Inst", justify="right")
+        table.add_column("Avg Inst", justify="right")
+        table.add_column("Boost", justify="right")
+        table.add_column("Eff Mult", justify="right")
+        table.add_column("Prof", justify="center")
+        for ctx in tee_rev_chutes:
+            gpus = ctx.gpu_count or 1
+            rev_per_gpu = ctx.hourly_revenue_per_instance / max(gpus, 1)
+            util = ctx.utilization_2h
+            theoretical_rev = ctx.hourly_revenue_per_instance / max(util, 0.01) if util > 0 else 0.0
+            theoretical_per_gpu = theoretical_rev / max(gpus, 1)
+            name = ctx.info.name if ctx.info else ctx.chute_id
+            est_cost = ctx.hourly_cost * ESTIMATED_COST_RATIO
+            # Color revenue: green if profitable, yellow if @100% would be profitable, red otherwise
+            if ctx.hourly_revenue_per_instance >= est_cost:
+                rev_style = "bold green"
+            elif theoretical_rev >= est_cost:
+                rev_style = "yellow"
+            else:
+                rev_style = "bold red"
+            # Color util: green <50%, yellow 50-85%, red >85%
+            if util < 0.5:
+                util_style = "green"
+            elif util < 0.85:
+                util_style = "yellow"
+            else:
+                util_style = "red"
+            # Color boost: green if high, yellow if moderate, dim if 1.0
+            if ctx.boost >= 1.5:
+                boost_style = "bold green"
+            elif ctx.boost >= 1.1:
+                boost_style = "yellow"
+            else:
+                boost_style = "dim"
+            prof_str = "[bold green]Y[/]" if ctx.profitable else "[bold red]N[/]"
+            table.add_row(
+                name,
+                f"[{rev_style}]{ctx.hourly_revenue_total:.2f}[/]",
+                f"[{rev_style}]{ctx.hourly_revenue_per_instance:.2f}[/]",
+                f"[{rev_style}]{rev_per_gpu:.2f}[/]",
+                f"[{util_style}]{util:.1%}[/]",
+                f"[{rev_style}]{theoretical_rev:.2f}[/]",
+                f"[{rev_style}]{theoretical_per_gpu:.2f}[/]",
+                str(gpus),
+                str(ctx.current_count),
+                f"{ctx.avg_instances_2h:.1f}",
+                f"[{boost_style}]{ctx.boost:.2f}[/]",
+                f"[{boost_style}]{ctx.effective_multiplier:.1f}[/]",
+                prof_str,
+            )
+        console = Console(file=StringIO(), force_terminal=True, width=200)
+        console.print(table)
+        logger.info("\n" + console.file.getvalue())
 
     # Kinda hacky, because it's not actually creating bounties, but we'll
     # send bounty notifications for miners to have instant feedback when
@@ -2118,6 +2416,32 @@ async def _perform_autoscale_impl(
             # Keep target_count at current to avoid Redis showing lower targets
             ctx.target_count = ctx.current_count
 
+        # Smooth target_count for scale-ups to prevent thrashing.
+        # Scale-downs and no_action use the raw target (scale-downs are already conservative).
+        raw_target = ctx.target_count
+        if "scale_up" in ctx.action and ctx.target_count > ctx.current_count:
+            prev = previous_smoothed.get(ctx.chute_id)
+            prev_target = prev["target"] if prev and prev.get("target") else None
+            if prev_target is not None and prev_target > 0:
+                smoothed_target = calculate_ema(
+                    float(ctx.target_count), prev_target, EMA_ALPHA_TARGET
+                )
+                # Round up so we don't stall scaling, but cap at the raw target
+                ctx.target_count = min(ctx.target_count, math.ceil(smoothed_target))
+                # Ensure we still scale up at least 1 above current
+                ctx.target_count = max(ctx.current_count + 1, ctx.target_count)
+                ctx.upscale_amount = ctx.target_count - ctx.current_count
+                if ctx.target_count != raw_target:
+                    logger.info(
+                        f"Target smoothed: {ctx.chute_id} raw={raw_target} -> smoothed={ctx.target_count} "
+                        f"(prev_smooth={prev_target:.1f}, alpha={EMA_ALPHA_TARGET})"
+                    )
+            # Update smoothed target for next run
+            new_smoothed_metrics.setdefault(ctx.chute_id, {})["target"] = float(ctx.target_count)
+        else:
+            # For non-scale-up actions, still track the target for EMA continuity
+            new_smoothed_metrics.setdefault(ctx.chute_id, {})["target"] = float(ctx.target_count)
+
         chute_actions[ctx.chute_id] = ctx.action
         chute_target_counts[ctx.chute_id] = ctx.target_count
         chute_rate_limiting[ctx.chute_id] = ctx.any_rate_limiting
@@ -2157,7 +2481,8 @@ async def _perform_autoscale_impl(
                 logger.info(
                     f"  {ctx.chute_id} | {ctx.current_count} -> {ctx.target_count} (+{actual_delta}) | "
                     f"util={ctx.utilization_basis:.2f} rl={ctx.rate_limit_basis:.3f} | "
-                    f"urgency={ctx.urgency_score:.0f} smoothed={ctx.smoothed_urgency:.0f} boost={ctx.boost:.2f}"
+                    f"urgency={ctx.urgency_score:.0f} smoothed={ctx.smoothed_urgency:.0f} boost={ctx.boost:.2f} "
+                    f"rev/inst={ctx.revenue_per_instance:.4f} rev_factor={ctx.revenue_factor:.2f}"
                 )
 
         # Log scale-down details (only full mode would execute)
@@ -2263,6 +2588,11 @@ async def _perform_autoscale_impl(
                         "threshold",
                         "scale_down_threshold",
                         "is_starving",
+                        "revenue_per_instance",
+                        "revenue_factor",
+                        "hourly_revenue_per_instance",
+                        "hourly_cost",
+                        "profitable",
                     ]
                 )
                 for ctx in contexts.values():
@@ -2287,6 +2617,11 @@ async def _perform_autoscale_impl(
                             ctx.threshold,
                             ctx.scale_down_threshold,
                             ctx.is_starving,
+                            ctx.revenue_per_instance,
+                            ctx.revenue_factor,
+                            ctx.hourly_revenue_per_instance,
+                            ctx.hourly_cost,
+                            ctx.profitable,
                         ]
                     )
             logger.info(f"Exported dry run data to {dry_run_csv}")

@@ -51,7 +51,7 @@ from api.invocation.util import (
     build_response_headers,
     check_quota_and_balance,
 )
-from api.metrics.capacity import track_request_completed, track_capacity
+from api.metrics.capacity import track_request_completed, track_request_rate_limited, track_capacity
 
 router = APIRouter()
 
@@ -261,10 +261,19 @@ async def e2e_invoke(
     if manager:
         try:
             key = f"cc:{chute_id}:{instance_id}"
+            current = await manager.redis_client.client.get(key)
+            if current is not None and int(current) >= manager.concurrency:
+                track_request_rate_limited(chute_id)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Instance is at maximum capacity, try again later",
+                )
             pipe = manager.redis_client.client.pipeline()
             pipe.incr(key)
             pipe.expire(key, manager.connection_expiry)
             await asyncio.wait_for(pipe.execute(), timeout=3.0)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.warning(f"E2E: Error tracking connection: {e}")
 

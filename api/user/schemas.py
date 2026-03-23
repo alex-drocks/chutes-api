@@ -173,7 +173,7 @@ class InvocationQuota(Base):
     payment_refresh_date = Column(DateTime, nullable=True)
     effective_date = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.now())
-    quota = Column(BigInteger, nullable=False, default=settings.default_quotas.get("*", 200))
+    quota = Column(BigInteger, nullable=False, default=settings.default_quotas.get("*", 0))
 
     @staticmethod
     async def get(user_id: str, chute_id: str):

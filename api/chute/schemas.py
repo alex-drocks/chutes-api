@@ -78,6 +78,7 @@ class Job(BaseModel):
 class NodeSelector(BaseModel):
     gpu_count: Optional[int] = Field(1, ge=1, le=8)
     min_vram_gb_per_gpu: Optional[int] = Field(16, ge=16, le=140)
+    max_hourly_price_per_gpu: Optional[float] = Field(None, gt=0, lt=10)
     exclude: Optional[List[str]] = None
     include: Optional[List[str]] = None
     dynamic: Optional[bool] = False
@@ -165,6 +166,12 @@ class NodeSelector(BaseModel):
                 gpu
                 for gpu in allowed_gpus
                 if SUPPORTED_GPUS[gpu]["memory"] >= self.min_vram_gb_per_gpu
+            )
+        if self.max_hourly_price_per_gpu:
+            allowed_gpus = set(
+                gpu
+                for gpu in allowed_gpus
+                if SUPPORTED_GPUS[gpu]["hourly_rate"] <= self.max_hourly_price_per_gpu
             )
 
         # Cap price spread to avoid mixing wildly different GPU classes

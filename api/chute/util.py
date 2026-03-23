@@ -243,7 +243,7 @@ async def update_usage_data(
     from api.metrics.invocation import track_invocation_usage
 
     # Track in Prometheus for miner metrics endpoint
-    track_invocation_usage(chute_id, balance_used, compute_time)
+    track_invocation_usage(chute_id, balance_used, compute_time, paygo_amount)
 
     record = json.dumps(
         {
@@ -1487,6 +1487,8 @@ async def invoke(
 
             if not target:
                 if infra_overload or error_message == "infra_overload":
+                    if not infra_overload:
+                        track_request_rate_limited(chute.chute_id)
                     logger.warning(f"All miners are at max capacity: {chute.name=}")
                     yield sse(
                         {
@@ -2160,6 +2162,7 @@ async def get_and_store_llm_details(chute_id: str):
                 model_info["chute_id"] = chute.chute_id
                 model_info["price"] = price
                 model_info["confidential_compute"] = chute.tee
+                model_info["premium"] = chute.chute_id in settings.premium_chute_ids
 
                 # OpenRouter format.
                 model_info["pricing"] = {

@@ -343,6 +343,21 @@ async def host_router_middleware(request: Request, call_next):
                 request.state.auth_object_id = chute_id
                 request.state.auth_object_type = "chutes"
 
+        # E2E endpoints are chute invocations for OAuth scope purposes.
+        if request.state.auth_method != "invoke":
+            if request.url.path.startswith("/e2e/instances/"):
+                chute_id = request.url.path.split("/")[3]
+                request.state.auth_method = "invoke"
+                request.state.chute_id = chute_id
+                request.state.auth_object_id = chute_id
+                request.state.auth_object_type = "chutes"
+            elif request.method.lower() == "post" and request.url.path == "/e2e/invoke":
+                chute_id = request.headers.get("x-chute-id") or "__list_or_invalid__"
+                request.state.auth_method = "invoke"
+                request.state.chute_id = chute_id
+                request.state.auth_object_id = chute_id
+                request.state.auth_object_type = "chutes"
+
         if request.state.auth_method != "invoke":
             # Handle /users/me/* paths specially for OAuth scope checking
             if request.url.path.startswith("/users/me"):

@@ -165,6 +165,24 @@ async def _inject_current_estimated_price(chute: Chute, response: ChuteResponse)
                 for unit in values:
                     values[unit] -= values[unit] * chute.discount
 
+    # For private chutes, add a price range since billing is based on the actual GPU.
+    if not chute.public:
+        supported = node_selector.supported_gpus
+        if supported:
+            gpu_count = chute.node_selector.get("gpu_count", 1)
+            gpu_prices = [SUPPORTED_GPUS[gpu]["hourly_rate"] for gpu in supported]
+            min_hourly = min(gpu_prices) * gpu_count
+            max_hourly = max(gpu_prices) * gpu_count
+            response.current_estimated_price["hourly_price_range"] = {
+                "usd": {"min": min_hourly, "max": max_hourly},
+            }
+            tao_usd = await get_fetcher().get_price("tao")
+            if tao_usd:
+                response.current_estimated_price["hourly_price_range"]["tao"] = {
+                    "min": min_hourly / tao_usd,
+                    "max": max_hourly / tao_usd,
+                }
+
     # Fix node selector return value.
     response.node_selector.update(
         {
@@ -1585,13 +1603,26 @@ async def _deploy_chute(
         else 0
     )
     if deployment_fee and not accept_fee:
-        estimate = chute_args.node_selector.current_estimated_price
+        gpu_count = chute_args.node_selector.gpu_count or 1
+        if len(allowed_gpus) > 1:
+            hourly_range_msg = (
+                f"Your hourly rate per instance will range from ~${round(min_price * gpu_count, 2)}/hr "
+                f"to ~${round(max_price * gpu_count, 2)}/hr ({gpu_count} GPU(s)), subject to change with pricing/market rate adjustments, "
+                "based on the *actual* GPU assigned when an instance is created.\n"
+                "You can control max prices in the node selector by specifying either explicit include=[..] lists, or setting max_hourly_price_per_gpu=\n"
+            )
+        else:
+            hourly_range_msg = (
+                f"Your hourly rate per instance will be ~${round(min_price * gpu_count, 2)}/hr "
+                f"({gpu_count} GPU(s)), subject to change with pricing/market rate adjustments.\n"
+            )
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=(
                 "DEPLOYMENT FEE NOTICE:\n===\nThere is a deployment fee of (hourly price per GPU * number of GPUs * 3), "
-                f"which for this configuration is: ${round(deployment_fee, 2)}\n "
-                "To acknowledge this fee, ensure you have chutes>=0.3.23 and re-run the deployment command with `--accept-fee`"
+                f"which for this configuration is: ${round(deployment_fee, 2)}\n"
+                f"{hourly_range_msg}"
+                "To acknowledge this fee and hourly rate, ensure you have chutes>=0.3.23 and re-run the deployment command with `--accept-fee`"
             ),
         )
     if current_user.balance <= deployment_fee and not current_user.has_role(

@@ -36,6 +36,7 @@ from api.user.service import chutes_user_id
 from api.bounty.util import create_bounty_if_not_exists, get_bounty_amount, send_bounty_notification
 from sqlalchemy.future import select
 from sqlalchemy import text, func
+from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.orm import aliased, joinedload
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -461,6 +462,14 @@ class LeastConnManager:
             return []
         min_count = min(counts.values())
 
+        # If every instance is already at or above concurrency, short-circuit.
+        if min_count >= self.concurrency:
+            logger.warning(
+                f"All instances at capacity for {self.chute_id}: "
+                f"min_count={min_count} >= concurrency={self.concurrency}"
+            )
+            return None
+
         # Update mean count for monitoring
         if not avoid:
             self.mean_count = int(sum(counts.values()) / (len(counts) or 1))
@@ -574,6 +583,16 @@ class LeastConnManager:
                 return
 
             key = f"cc:{self.chute_id}:{instance.instance_id}"
+
+            # Check if already at capacity before routing.
+            try:
+                current = await self.redis_client.client.get(key)
+                if current is not None and int(current) >= self.concurrency:
+                    yield None, "infra_overload"
+                    return
+            except Exception as e:
+                logger.error(f"Error checking connection count: {e}")
+
             try:
                 pipe = self.redis_client.client.pipeline()
                 pipe.incr(key)
@@ -609,6 +628,10 @@ class LeastConnManager:
             targets = await asyncio.wait_for(
                 self.get_targets(avoid=avoid, prefixes=prefixes), timeout=7.0
             )
+            if targets is None:
+                # All instances at capacity (min connections >= concurrency).
+                yield None, "infra_overload"
+                return
             if not targets:
                 yield None, "No infrastructure available to serve request"
                 return
@@ -1005,11 +1028,23 @@ async def verify_tee_chute(
         server_query = select(Server).where(
             Server.ip == instance.host, Server.miner_hotkey == launch_config.miner_hotkey
         )
-        server = (await db.execute(server_query)).scalar_one_or_none()
+        try:
+            server = (await db.execute(server_query)).scalar_one_or_none()
+        except MultipleResultsFound:
+            logger.error(
+                f"Multiple TEE servers share IP {instance.host} for miner {launch_config.miner_hotkey}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Multiple TEE servers share the same IP. Each TEE server must have a unique IP. Use GET /miner/servers to review your inventory and remove duplicate servers.",
+            )
         if not server:
+            logger.error(
+                f"Server not found for IP {instance.host} and miner {launch_config.miner_hotkey}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Server not found for IP {instance.host} and miner {launch_config.miner_hotkey}",
+                detail="Server not found for this instance.",
             )
 
         # Use the TeeServerClient to get evidence from the chute proxy

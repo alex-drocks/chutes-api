@@ -260,6 +260,7 @@ class Settings(BaseSettings):
     scan_timeout: int = int(os.getenv("SCAN_TIMEOUT", "7200"))
     netuid: int = int(os.getenv("NETUID", "64"))
     subtensor: str = os.getenv("SUBTENSOR_ADDRESS", "wss://entrypoint-finney.opentensor.ai:443")
+    mev_protection_enabled: bool = os.getenv("MEV_PROTECTION_ENABLED", "false").lower() == "true"
     payment_recovery_blocks: int = int(os.getenv("PAYMENT_RECOVERY_BLOCKS", "256"))
     device_info_challenge_count: int = int(os.getenv("DEVICE_INFO_CHALLENGE_COUNT", "20"))
     skip_gpu_verification: bool = os.getenv("SKIP_GPU_VERIFICATION", "false").lower() == "true"
@@ -310,7 +311,7 @@ class Settings(BaseSettings):
         return self._launch_config_private_key
 
     # Default quotas/discounts.
-    default_quotas: dict = json.loads(os.getenv("DEFAULT_QUOTAS", '{"*": 200}'))
+    default_quotas: dict = json.loads(os.getenv("DEFAULT_QUOTAS", '{"*": 0}'))
     default_discounts: dict = json.loads(os.getenv("DEFAULT_DISCOUNTS", '{"*": 0.0}'))
     default_job_quotas: dict = json.loads(os.getenv("DEFAULT_JOB_QUOTAS", '{"*": 0}'))
 
@@ -427,6 +428,11 @@ class Settings(BaseSettings):
 
     # Premium chute IDs (restricted from $3/mo sub users without balance).
     premium_chute_ids: list = json.loads(os.getenv("PREMIUM_CHUTE_IDS", "[]"))
+
+    # Agent registration settings.
+    agent_registration_threshold: float = float(os.getenv("AGENT_REGISTRATION_THRESHOLD", "50.0"))
+    agent_registration_tolerance: float = float(os.getenv("AGENT_REGISTRATION_TOLERANCE", "0.10"))
+    agent_registration_ttl_hours: int = int(os.getenv("AGENT_REGISTRATION_TTL_HOURS", "24"))
 
 
 # Subscription tier: quota -> monthly price in USD (canonical values only).

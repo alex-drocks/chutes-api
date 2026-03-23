@@ -26,7 +26,7 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
-from api.gpu import SUPPORTED_GPUS
+from api.gpu import SUPPORTED_GPUS, COMPUTE_MULTIPLIER
 from api.database import get_db_session, generate_uuid, get_session
 from api.config import settings
 from api.constants import (
@@ -386,12 +386,13 @@ async def _check_blacklisted(db, hotkey):
     return mgnode
 
 
-async def _check_scalable(db, chute, hotkey, created_at=None):
-    chute_id = chute.chute_id
+async def _get_instance_counts_and_target(db, chute_id, hotkey):
+    """Shared helper to get instance counts and target for a chute."""
     query = text("""
         SELECT
             COUNT(*) AS total_count,
             COUNT(CASE WHEN active IS true AND verified IS true THEN 1 ELSE NULL END) AS active_count,
+            COUNT(CASE WHEN NOT (active IS false AND activated_at IS NOT NULL) THEN 1 ELSE NULL END) AS live_count,
             COUNT(CASE WHEN miner_hotkey = :hotkey THEN 1 ELSE NULL END) AS hotkey_count
         FROM instances
         WHERE chute_id = :chute_id
@@ -401,6 +402,7 @@ async def _check_scalable(db, chute, hotkey, created_at=None):
     )
     current_count = count_result["total_count"]
     active_count = count_result["active_count"]
+    live_count = count_result["live_count"]
     hotkey_count = count_result["hotkey_count"]
 
     # Get target count from Redis
@@ -428,40 +430,71 @@ async def _check_scalable(db, chute, hotkey, created_at=None):
                 f"using conservative current count as default: {target_count}"
             )
 
-    # Check if scaling is allowed based on target count.
+    return current_count, active_count, live_count, hotkey_count, target_count
+
+
+async def _check_scalable(db, chute, hotkey):
+    """Creation path: gate on live_count to prevent over-launching."""
+    chute_id = chute.chute_id
+    (
+        current_count,
+        active_count,
+        live_count,
+        hotkey_count,
+        target_count,
+    ) = await _get_instance_counts_and_target(db, chute_id, hotkey)
+
+    # For TEE chutes, gate on live instance count (active + pending, excludes disabled).
+    # TEE instances take a long time to spin up, so allowing many more live instances
+    # than the target wastes miner time. Allow target + 1 to permit one racer.
+    if chute.tee and live_count >= target_count + 1:
+        logger.warning(
+            f"SCALELOCK (TEE live): chute {chute_id=} {chute.name} has too many live instances: "
+            f"{live_count=}, {active_count=}, {target_count=}, {hotkey_count=}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"TEE chute {chute_id} already has {live_count} live instances (target: {target_count}).",
+        )
+
+    # Non-TEE: gate on active_count only, allowing miners to race with pending instances.
+    # TEE creation is already gated above on live_count, so active_count here is a fallback
+    # that only matters for non-TEE chutes.
     if active_count >= target_count:
-        if created_at:
-            capacity_query = text("""
-                SELECT target_count, instance_count
-                FROM capacity_log
-                WHERE chute_id = :chute_id
-                  AND timestamp <= :created_at
-                ORDER BY timestamp DESC
-                LIMIT 1
-            """)
-            capacity_result = await db.execute(
-                capacity_query,
-                {"chute_id": chute_id, "created_at": created_at.replace(tzinfo=None)},
-            )
-            capacity_row = capacity_result.mappings().first()
-            if (
-                capacity_row
-                and capacity_row.get("target_count") is not None
-                and capacity_row.get("instance_count") is not None
-                and active_count < capacity_row["target_count"]
-            ):
-                logger.info(
-                    f"SCALELOCK bypass: {chute_id=} instance created at {created_at} when "
-                    f"target_count={capacity_row['target_count']}"
-                )
-                return
         logger.warning(
             f"SCALELOCK: chute {chute_id=} {chute.name} has reached target capacity: "
-            f"{current_count=}, {active_count=}, {target_count=}, {hotkey_count=}"
+            f"{current_count=}, {active_count=}, {live_count=}, {target_count=}, {hotkey_count=}"
         )
         raise HTTPException(
             status_code=status.HTTP_423_LOCKED,
             detail=f"Chute {chute_id} has reached its target capacity of {target_count} instances.",
+        )
+
+
+async def _check_scalable_activation(db, chute, hotkey):
+    """Activation path: gate on active_count only, since the instance already exists."""
+    # Public TEE instances always pass activation — they were scalable when created,
+    # and the autoscaler TEE limit may have changed since then.
+    if chute.tee and chute.public:
+        return
+
+    chute_id = chute.chute_id
+    (
+        current_count,
+        active_count,
+        live_count,
+        hotkey_count,
+        target_count,
+    ) = await _get_instance_counts_and_target(db, chute_id, hotkey)
+
+    if active_count >= target_count:
+        logger.warning(
+            f"SCALELOCK (activation): chute {chute_id=} {chute.name} active instances at target: "
+            f"{active_count=}, {target_count=}, {live_count=}, {hotkey_count=}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"Chute {chute_id} already has {active_count} active instances (target: {target_count}).",
         )
 
 
@@ -527,63 +560,63 @@ async def _check_scalable_private(db, chute, miner):
             detail=message,
         )
 
-    ## Require the miner to have at least one activated public chute instance
-    ## from one week ago or older before allowing private chute instances.
-    # public_history_query = text("""
-    #    SELECT COUNT(*) AS public_count
-    #    FROM instance_audit ia
-    #    JOIN chutes c ON c.chute_id = ia.chute_id
-    #    WHERE ia.miner_hotkey = :hotkey
-    #      AND c.public IS TRUE
-    #      AND ia.activated_at IS NOT NULL
-    #      AND ia.activated_at <= NOW() - INTERVAL '7 days'
-    # """)
-    # public_result = (
-    #    (await db.execute(public_history_query, {"hotkey": miner.hotkey})).mappings().first()
-    # )
-    # if not public_result or public_result["public_count"] == 0:
-    #    logger.warning(
-    #        f"PRIVATE_GATE: miner {miner.hotkey} denied private chute {chute_id}: "
-    #        f"no public chute instance activated >= 7 days ago"
-    #    )
-    #    raise HTTPException(
-    #        status_code=status.HTTP_403_FORBIDDEN,
-    #        detail=(
-    #            "You must have at least one public chute instance >= one week old creation timestamp to deploy private chutes"
-    #        ),
-    #    )
+    # Require the miner to have at least one activated public chute instance
+    # from one week ago or older before allowing private chute instances.
+    public_history_query = text("""
+        SELECT COUNT(*) AS public_count
+        FROM instance_audit ia
+        JOIN chutes c ON c.chute_id = ia.chute_id
+        WHERE ia.miner_hotkey = :hotkey
+          AND c.public IS TRUE
+          AND ia.activated_at IS NOT NULL
+          AND ia.activated_at <= NOW() - INTERVAL '7 days'
+     """)
+    public_result = (
+        (await db.execute(public_history_query, {"hotkey": miner.hotkey})).mappings().first()
+    )
+    if not public_result or public_result["public_count"] == 0:
+        logger.warning(
+            f"PRIVATE_GATE: miner {miner.hotkey} denied private chute {chute_id}: "
+            f"no public chute instance activated >= 7 days ago"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "You must have at least one public chute instance >= one week old creation timestamp to deploy private chutes"
+            ),
+        )
 
-    ## Require at least 3 active public instances with >= 8 total GPUs.
-    # active_public_query = text("""
-    #    SELECT
-    #        COUNT(DISTINCT i.instance_id) AS active_instance_count,
-    #        COUNT(inodes.node_id) AS total_gpus
-    #    FROM instances i
-    #    JOIN chutes c ON c.chute_id = i.chute_id
-    #    JOIN instance_nodes inodes ON inodes.instance_id = i.instance_id
-    #    WHERE i.miner_hotkey = :hotkey
-    #      AND i.active = TRUE
-    #      AND i.billed_to IS NULL
-    # """)
-    # active_public_result = (
-    #    (await db.execute(active_public_query, {"hotkey": miner.hotkey})).mappings().first()
-    # )
-    # instance_count = active_public_result["active_instance_count"] if active_public_result else 0
-    # total_gpus = active_public_result["total_gpus"] if active_public_result else 0
-    # if instance_count < 3 or total_gpus < 8:
-    #    logger.warning(
-    #        f"PRIVATE_GATE: miner {miner.hotkey} denied private chute {chute_id}: "
-    #        f"{instance_count} active public instances with {total_gpus} GPUs "
-    #        f"(minimum 3 instances and 8 GPUs required)"
-    #    )
-    #    raise HTTPException(
-    #        status_code=status.HTTP_403_FORBIDDEN,
-    #        detail=(
-    #            f"You must have at least 3 active public (non-private) chute instances "
-    #            f"with a total of at least 8 GPUs to deploy private chutes "
-    #            f"(currently have {instance_count} instances with {total_gpus} GPUs)"
-    #        ),
-    #    )
+    # Require at least 3 active public instances with >= 8 total GPUs.
+    active_public_query = text("""
+        SELECT
+            COUNT(DISTINCT i.instance_id) AS active_instance_count,
+            COUNT(inodes.node_id) AS total_gpus
+        FROM instances i
+        JOIN chutes c ON c.chute_id = i.chute_id
+        JOIN instance_nodes inodes ON inodes.instance_id = i.instance_id
+        WHERE i.miner_hotkey = :hotkey
+          AND i.active = TRUE
+          AND i.billed_to IS NULL
+    """)
+    active_public_result = (
+        (await db.execute(active_public_query, {"hotkey": miner.hotkey})).mappings().first()
+    )
+    instance_count = active_public_result["active_instance_count"] if active_public_result else 0
+    total_gpus = active_public_result["total_gpus"] if active_public_result else 0
+    if instance_count < 3 or total_gpus < 8:
+        logger.warning(
+            f"PRIVATE_GATE: miner {miner.hotkey} denied private chute {chute_id}: "
+            f"{instance_count} active public instances with {total_gpus} GPUs "
+            f"(minimum 3 instances and 8 GPUs required)"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"You must have at least 3 active public (non-private) chute instances "
+                f"with a total of at least 8 GPUs to deploy private chutes "
+                f"(currently have {instance_count} instances with {total_gpus} GPUs)"
+            ),
+        )
 
     query = text("""
         SELECT
@@ -1009,9 +1042,7 @@ async def _validate_launch_config_instance(
         ):
             await _check_scalable_private(db, chute, miner)
         else:
-            await _check_scalable(
-                db, chute, launch_config.miner_hotkey, created_at=launch_config.created_at
-            )
+            await _check_scalable(db, chute, launch_config.miner_hotkey)
 
     # IP matches?
     x_forwarded_for = request.headers.get("X-Forwarded-For")
@@ -1387,6 +1418,27 @@ async def _validate_launch_config_instance(
             )
             await error_session.commit()
         raise
+
+    # For private instances, use the actual GPU's rate/multiplier instead of the
+    # minimum across all supported GPUs in the node selector.
+    if instance.billed_to is not None:
+        actual_gpu = nodes[0].gpu_identifier
+        gpu_count = chute.node_selector.get("gpu_count", 1)
+        actual_base = gpu_count * COMPUTE_MULTIPLIER[actual_gpu]
+        ns_min_compute = node_selector.compute_multiplier
+        ns_min_hourly = instance.hourly_rate
+        if ns_min_compute > 0 and actual_base != ns_min_compute:
+            ratio = actual_base / ns_min_compute
+            instance.compute_multiplier *= ratio
+        instance.hourly_rate = SUPPORTED_GPUS[actual_gpu]["hourly_rate"] * gpu_count
+        logger.info(
+            f"Adjusted private instance {instance.instance_id} for "
+            f"chute_id={chute.chute_id} name={chute.name!r} to actual GPU {actual_gpu}: "
+            f"hourly_rate={ns_min_hourly:.4f}->{instance.hourly_rate:.4f} "
+            f"(delta={instance.hourly_rate - ns_min_hourly:+.4f}, ratio={instance.hourly_rate / ns_min_hourly if ns_min_hourly else 0:.2f}x), "
+            f"compute_multiplier={ns_min_compute:.4f}->{actual_base:.4f} "
+            f"(delta={actual_base - ns_min_compute:+.4f}, ratio={actual_base / ns_min_compute if ns_min_compute else 0:.2f}x)"
+        )
 
     # Enforce rint_pubkey for chutes >= 0.5.1
     if semcomp(instance.chutes_version or "0.0.0", "0.5.1") >= 0:
@@ -2135,9 +2187,7 @@ async def activate_launch_config_instance(
                 detail=reason,
             )
     elif chute.public:
-        await _check_scalable(
-            db, chute, launch_config.miner_hotkey, created_at=launch_config.created_at
-        )
+        await _check_scalable_activation(db, chute, launch_config.miner_hotkey)
 
     # Activate the instance (and trigger tentative billing stop time).
     if not instance.active:
