@@ -500,6 +500,8 @@ async def make_public(
     def normalize_public_copy_value(field, value):
         if field == "cords" and value:
             return [Cord(**cord) if isinstance(cord, dict) else cord for cord in value]
+        if field == "node_selector" and isinstance(value, dict):
+            return NodeSelector(**value)
         if hasattr(value, "model_dump"):
             return value.model_dump()
         return value
