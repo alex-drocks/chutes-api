@@ -65,7 +65,7 @@ from api.agent_registration.schemas import (
 from api.payment.schemas import UsageData
 from bittensor_wallet.keypair import Keypair
 from scalecodec.utils.ss58 import is_valid_ss58_address
-from sqlalchemy import bindparam, select, text, delete
+from sqlalchemy import Float, bindparam, select, text, delete
 from sqlalchemy.dialects.postgresql import JSONB as SA_JSONB
 
 router = APIRouter()
@@ -563,7 +563,7 @@ async def balance_transfer(
         transfer AS (
             SELECT
                 CASE
-                    WHEN :amount IS NOT NULL THEN CAST(:amount AS double precision)
+                    WHEN CAST(:amount AS double precision) IS NOT NULL THEN CAST(:amount AS double precision)
                     ELSE source.balance
                 END AS transfer_amount,
                 source.balance AS source_balance
@@ -623,7 +623,7 @@ async def balance_transfer(
         transfer_sql.bindparams(
             bindparam("source_user_id", value=current_user.user_id),
             bindparam("target_user_id", value=target_user.user_id),
-            bindparam("amount", value=transfer_req.amount),
+            bindparam("amount", value=transfer_req.amount, type_=Float),
             bindparam("debit_event_id", value=debit_event_id),
             bindparam("credit_event_id", value=credit_event_id),
             bindparam(
