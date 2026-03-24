@@ -546,9 +546,15 @@ async def _do_billing(
 
     if compute_units:
         hourly_price = await selector_hourly_price(chute.node_selector)
+        missing_vllm_usage = chute.standard_template == "vllm" and not metrics
 
         # Per megatoken pricing for vLLM chutes.
-        if chute.standard_template == "vllm" and metrics and metrics.get("it"):
+        if missing_vllm_usage:
+            logger.error(
+                "E2E LLM response missing usage data, suppressing compute-time fallback "
+                f"for {chute.chute_id=} {chute.name=} {instance.instance_id=} {invocation_id=}"
+            )
+        elif chute.standard_template == "vllm" and metrics:
             per_million_in, per_million_out, cache_discount = await get_mtoken_price(
                 user_id, chute.chute_id
             )
@@ -571,7 +577,7 @@ async def _do_billing(
                 override_applied = True
 
         # If no override was applied, use standard pricing.
-        if not override_applied:
+        if not override_applied and not missing_vllm_usage:
             discount = 0.0
             if chute.discount and -3 < chute.discount <= 1:
                 discount = chute.discount
