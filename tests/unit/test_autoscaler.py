@@ -482,147 +482,283 @@ class TestBlendedMultiplierCalculation:
         assert result < 2.5  # Close to target
 
 
-class TestRelativeBoostAdjustment:
-    def test_one_starving_one_comfortable(self):
-        # Chute A: urgency 400, Chute B: urgency 50
-        # avg = 225, max = 400, spread = 400
-        URGENCY_MAX_FOR_BOOST = 500
-        URGENCY_BOOST_MIN = 1.0
-        URGENCY_BOOST_MAX = 2.5
-        RELATIVE_ADJUSTMENT_MAX = 0.2
+class TestRevenueWeightedBoost:
+    """
+    Tests for the revenue-weighted boost formula used by the autoscaler.
 
-        def calculate_boost(urgency, avg_urgency, max_urgency):
-            normalized = min(urgency / URGENCY_MAX_FOR_BOOST, 1.0)
-            base_boost = URGENCY_BOOST_MIN + (normalized * (URGENCY_BOOST_MAX - URGENCY_BOOST_MIN))
+    Final boost = 1.0 + (urgency_bonus * revenue_weight) + revenue_bonus
 
-            if max_urgency > 0:
-                spread = max(max_urgency, 1)
-                relative_position = (urgency - avg_urgency) / spread
-                relative_position = max(-1.0, min(1.0, relative_position))
-                relative_factor = 1.0 + (relative_position * RELATIVE_ADJUSTMENT_MAX)
-            else:
-                relative_factor = 1.0
+    Where:
+    - urgency_bonus = normalized_urgency * URGENCY_BOOST_MAX * relative_factor * sustainability
+    - revenue_weight = clamp(rev_per_inst / median, 0.1, 3.0)
+    - revenue_bonus = min(revenue_ratio * REVENUE_BOOST_SCALE, REVENUE_BOOST_MAX)
+    - Retention (no demand): 1.0 + min(revenue_ratio * REVENUE_RETAIN_SCALE, REVENUE_RETAIN_MAX)
+    """
 
-            return max(1.0, base_boost * relative_factor)
+    # Constants matching chute_autoscaler.py
+    URGENCY_MAX_FOR_BOOST = 300
+    URGENCY_BOOST_MAX = 0.2
+    RELATIVE_ADJUSTMENT_MAX = 0.1
+    REVENUE_BOOST_SCALE = 0.25
+    REVENUE_BOOST_MAX = 1.0
+    REVENUE_RETAIN_SCALE = 0.25
+    REVENUE_RETAIN_MAX = 0.75
 
-        avg = 225
-        max_urg = 400
+    def _calculate_boost(
+        self,
+        urgency,
+        avg_urgency,
+        max_urgency,
+        rev_per_inst,
+        median_rev,
+        sustainability=1.0,
+        has_demand=True,
+    ):
+        """Mirror the boost calculation from chute_autoscaler.py."""
+        if not has_demand:
+            # Retention tier
+            if median_rev > 0 and rev_per_inst > 0:
+                ratio = rev_per_inst / median_rev
+                return 1.0 + min(ratio * self.REVENUE_RETAIN_SCALE, self.REVENUE_RETAIN_MAX)
+            return 1.0
 
-        boost_a = calculate_boost(400, avg, max_urg)
-        boost_b = calculate_boost(50, avg, max_urg)
+        # Urgency component
+        normalized = min(urgency / self.URGENCY_MAX_FOR_BOOST, 1.0)
+        urgency_bonus = normalized * self.URGENCY_BOOST_MAX
 
-        assert boost_a > boost_b
-        assert boost_a > 2.0  # High urgency gets high boost
-        assert boost_b >= 1.0  # Never below 1.0
+        # Relative adjustment
+        if max_urgency > 0:
+            spread = max(max_urgency, 1)
+            relative_position = (urgency - avg_urgency) / spread
+            relative_position = max(-1.0, min(1.0, relative_position))
+            urgency_bonus *= 1.0 + (relative_position * self.RELATIVE_ADJUSTMENT_MAX)
 
-    def test_all_equal_urgency(self):
-        URGENCY_MAX_FOR_BOOST = 500
-        URGENCY_BOOST_MIN = 1.0
-        URGENCY_BOOST_MAX = 2.5
-        RELATIVE_ADJUSTMENT_MAX = 0.2
+        urgency_bonus *= sustainability
 
-        def calculate_boost(urgency, avg_urgency, max_urgency):
-            normalized = min(urgency / URGENCY_MAX_FOR_BOOST, 1.0)
-            base_boost = URGENCY_BOOST_MIN + (normalized * (URGENCY_BOOST_MAX - URGENCY_BOOST_MIN))
+        # Revenue weighting
+        revenue_bonus = 0.0
+        if median_rev > 0 and rev_per_inst > 0:
+            revenue_ratio = rev_per_inst / median_rev
+            revenue_weight = max(0.1, min(revenue_ratio, 3.0))
+            urgency_bonus *= revenue_weight
+            revenue_bonus = min(revenue_ratio * self.REVENUE_BOOST_SCALE, self.REVENUE_BOOST_MAX)
+        else:
+            # Zero/unknown revenue — dampen urgency heavily
+            urgency_bonus *= 0.1
 
-            if max_urgency > 0:
-                spread = max(max_urgency, 1)
-                relative_position = (urgency - avg_urgency) / spread
-                relative_position = max(-1.0, min(1.0, relative_position))
-                relative_factor = 1.0 + (relative_position * RELATIVE_ADJUSTMENT_MAX)
-            else:
-                relative_factor = 1.0
+        return 1.0 + urgency_bonus + revenue_bonus
 
-            return max(1.0, base_boost * relative_factor)
+    def test_high_revenue_retention_beats_low_revenue_active(self):
+        """MiniMax scenario: high rev, no demand should beat low rev with urgency."""
+        median = 5.0
 
-        # All chutes have same urgency
-        boost_a = calculate_boost(400, 400, 400)
-        boost_b = calculate_boost(400, 400, 400)
-        boost_c = calculate_boost(400, 400, 400)
+        # MiniMax: $11.36/inst, retention (no demand pressure)
+        minimax = self._calculate_boost(
+            urgency=0,
+            avg_urgency=0,
+            max_urgency=0,
+            rev_per_inst=11.36,
+            median_rev=median,
+            has_demand=False,
+        )
 
-        assert boost_a == boost_b == boost_c
-        # relative_position = 0, so factor = 1.0, just base boost
-        expected = 1.0 + (400 / 500) * 1.5
-        assert boost_a == pytest.approx(expected, rel=0.01)
+        # Mistral-Small: $0.55/inst, high urgency
+        mistral = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=0.55,
+            median_rev=median,
+        )
+
+        assert minimax > mistral
+        assert minimax > 1.3  # Meaningful retention signal
+
+    def test_high_revenue_retention_beats_moderate_revenue_active(self):
+        """High-revenue retention should beat moderate-revenue chute with urgency."""
+        median = 5.0
+
+        # MiniMax: $11.36/inst, retention
+        minimax = self._calculate_boost(
+            urgency=0,
+            avg_urgency=0,
+            max_urgency=0,
+            rev_per_inst=11.36,
+            median_rev=median,
+            has_demand=False,
+        )
+
+        # V3-0324: $3.65/inst, high urgency
+        v3_0324 = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=3.65,
+            median_rev=median,
+        )
+
+        assert minimax > v3_0324
+
+    def test_high_revenue_active_dominates(self):
+        """GLM-5 scenario: high rev + high urgency should get highest boost."""
+        median = 5.0
+
+        # GLM-5: $13.24/inst, high urgency
+        glm5 = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=13.24,
+            median_rev=median,
+        )
+
+        # MiniMax: $11.36/inst, retention
+        minimax = self._calculate_boost(
+            urgency=0,
+            avg_urgency=0,
+            max_urgency=0,
+            rev_per_inst=11.36,
+            median_rev=median,
+            has_demand=False,
+        )
+
+        # V3-0324: $3.65/inst, high urgency
+        v3_0324 = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=3.65,
+            median_rev=median,
+        )
+
+        assert glm5 > minimax > v3_0324
+        assert glm5 > 1.8  # Should be a strong signal
+
+    def test_zero_revenue_heavily_dampened(self):
+        """Zero-revenue chutes should get minimal boost even with high urgency."""
+        median = 5.0
+
+        zero_rev = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=0.0,
+            median_rev=median,
+        )
+
+        low_rev = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=1.0,
+            median_rev=median,
+        )
+
+        # Zero revenue should be heavily dampened
+        assert zero_rev < 1.05
+        # Any revenue should beat zero revenue
+        assert low_rev > zero_rev
 
     def test_boost_never_below_one(self):
-        URGENCY_MAX_FOR_BOOST = 500
-        URGENCY_BOOST_MIN = 1.0
-        URGENCY_BOOST_MAX = 2.5
-        RELATIVE_ADJUSTMENT_MAX = 0.2
+        """Boost should never go below 1.0 regardless of inputs."""
+        median = 5.0
 
-        def calculate_boost(urgency, avg_urgency, max_urgency):
-            normalized = min(urgency / URGENCY_MAX_FOR_BOOST, 1.0)
-            base_boost = URGENCY_BOOST_MIN + (normalized * (URGENCY_BOOST_MAX - URGENCY_BOOST_MIN))
+        for rev in [0.0, 0.1, 1.0, 10.0]:
+            for urgency in [0, 10, 100, 300]:
+                boost = self._calculate_boost(
+                    urgency=urgency,
+                    avg_urgency=300,
+                    max_urgency=500,
+                    rev_per_inst=rev,
+                    median_rev=median,
+                )
+                assert boost >= 1.0
 
-            if max_urgency > 0:
-                spread = max(max_urgency, 1)
-                relative_position = (urgency - avg_urgency) / spread
-                relative_position = max(-1.0, min(1.0, relative_position))
-                relative_factor = 1.0 + (relative_position * RELATIVE_ADJUSTMENT_MAX)
-            else:
-                relative_factor = 1.0
+                retention = self._calculate_boost(
+                    urgency=0,
+                    avg_urgency=0,
+                    max_urgency=0,
+                    rev_per_inst=rev,
+                    median_rev=median,
+                    has_demand=False,
+                )
+                assert retention >= 1.0
 
-            return max(1.0, base_boost * relative_factor)
+    def test_revenue_scales_urgency_proportionally(self):
+        """Same urgency, different revenue — boost should scale with revenue."""
+        median = 5.0
 
-        # Very low urgency chute when others are high
-        boost = calculate_boost(10, 300, 500)
-        assert boost >= 1.0
+        low = self._calculate_boost(
+            urgency=200,
+            avg_urgency=200,
+            max_urgency=200,
+            rev_per_inst=2.0,
+            median_rev=median,
+        )
+        mid = self._calculate_boost(
+            urgency=200,
+            avg_urgency=200,
+            max_urgency=200,
+            rev_per_inst=5.0,
+            median_rev=median,
+        )
+        high = self._calculate_boost(
+            urgency=200,
+            avg_urgency=200,
+            max_urgency=200,
+            rev_per_inst=12.0,
+            median_rev=median,
+        )
 
-    def test_above_average_gets_bump(self):
-        URGENCY_MAX_FOR_BOOST = 500
-        URGENCY_BOOST_MIN = 1.0
-        URGENCY_BOOST_MAX = 2.5
-        RELATIVE_ADJUSTMENT_MAX = 0.2
+        assert high > mid > low
 
-        def calculate_boost(urgency, avg_urgency, max_urgency):
-            normalized = min(urgency / URGENCY_MAX_FOR_BOOST, 1.0)
-            base_boost = URGENCY_BOOST_MIN + (normalized * (URGENCY_BOOST_MAX - URGENCY_BOOST_MIN))
+    def test_retention_scales_with_revenue(self):
+        """Retention boost should increase with revenue."""
+        median = 5.0
 
-            if max_urgency > 0:
-                spread = max(max_urgency, 1)
-                relative_position = (urgency - avg_urgency) / spread
-                relative_position = max(-1.0, min(1.0, relative_position))
-                relative_factor = 1.0 + (relative_position * RELATIVE_ADJUSTMENT_MAX)
-            else:
-                relative_factor = 1.0
+        low = self._calculate_boost(
+            urgency=0,
+            avg_urgency=0,
+            max_urgency=0,
+            rev_per_inst=1.0,
+            median_rev=median,
+            has_demand=False,
+        )
+        high = self._calculate_boost(
+            urgency=0,
+            avg_urgency=0,
+            max_urgency=0,
+            rev_per_inst=15.0,
+            median_rev=median,
+            has_demand=False,
+        )
 
-            return max(1.0, base_boost * relative_factor)
+        assert high > low
+        assert low > 1.0  # Even low revenue gets some retention
+        assert high <= 1.0 + self.REVENUE_RETAIN_MAX  # Capped
 
-        # Chute above average
-        base = 1.0 + (300 / 500) * 1.5  # 1.9
-        boost_with_adjustment = calculate_boost(300, 200, 400)
+    def test_sustainability_dampens_spikes(self):
+        """New urgency spikes should be dampened vs sustained urgency."""
+        median = 5.0
 
-        # Should be higher than base due to positive relative adjustment
-        assert boost_with_adjustment > base
+        sustained = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=5.0,
+            median_rev=median,
+            sustainability=1.0,
+        )
+        spike = self._calculate_boost(
+            urgency=300,
+            avg_urgency=200,
+            max_urgency=300,
+            rev_per_inst=5.0,
+            median_rev=median,
+            sustainability=0.3,
+        )
 
-    def test_below_average_gets_reduction(self):
-        URGENCY_MAX_FOR_BOOST = 500
-        URGENCY_BOOST_MIN = 1.0
-        URGENCY_BOOST_MAX = 2.5
-        RELATIVE_ADJUSTMENT_MAX = 0.2
-
-        def calculate_boost(urgency, avg_urgency, max_urgency):
-            normalized = min(urgency / URGENCY_MAX_FOR_BOOST, 1.0)
-            base_boost = URGENCY_BOOST_MIN + (normalized * (URGENCY_BOOST_MAX - URGENCY_BOOST_MIN))
-
-            if max_urgency > 0:
-                spread = max(max_urgency, 1)
-                relative_position = (urgency - avg_urgency) / spread
-                relative_position = max(-1.0, min(1.0, relative_position))
-                relative_factor = 1.0 + (relative_position * RELATIVE_ADJUSTMENT_MAX)
-            else:
-                relative_factor = 1.0
-
-            return max(1.0, base_boost * relative_factor)
-
-        # Chute below average
-        base = 1.0 + (100 / 500) * 1.5  # 1.3
-        boost_with_adjustment = calculate_boost(100, 300, 400)
-
-        # Should be lower than base due to negative relative adjustment (but >= 1.0)
-        assert boost_with_adjustment < base
-        assert boost_with_adjustment >= 1.0
+        assert sustained > spike
 
 
 class TestDonorIdentification:

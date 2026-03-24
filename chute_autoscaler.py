@@ -1860,16 +1860,11 @@ async def _perform_autoscale_impl(
                 # No instances yet — can't judge, assume profitable (new/cold chute)
                 ctx.profitable = True
 
-        # Revenue factor: weight urgency by revenue relative to peers
-        # Applied to both raw and smoothed urgency so it flows through boost and ranking paths
+        # Revenue factor: stored for logging/CSV but no longer mutates urgency scores.
+        # Revenue weighting is applied only in the boost calculation to avoid double-counting.
         if has_revenue_data and ctx.revenue_per_instance > 0:
             ratio = ctx.revenue_per_instance / median_rev_per_inst
             ctx.revenue_factor = max(0.5, min(1.5, ratio))
-            ctx.urgency_score *= ctx.revenue_factor
-            ctx.smoothed_urgency *= ctx.revenue_factor
-            # Update persisted smoothed value so next run's EMA incorporates revenue weighting
-            if ctx.chute_id in new_smoothed_metrics:
-                new_smoothed_metrics[ctx.chute_id]["urgency"] = ctx.smoothed_urgency
 
         if ctx.is_starving and ctx.profitable:
             any_profitable_starving = True
@@ -2121,17 +2116,22 @@ async def _perform_autoscale_impl(
     # We set URGENCY_MAX_FOR_BOOST at 300 so that genuinely urgent chutes
     # hit max boost, while chutes with only historical issues get modest boost.
     URGENCY_MAX_FOR_BOOST = 300
-    URGENCY_BOOST_MIN = 1.0
-    URGENCY_BOOST_MAX = 1.5
-    RELATIVE_ADJUSTMENT_MAX = 0.2  # ±20% adjustment based on relative urgency
+    URGENCY_BOOST_MAX = 0.2  # Max urgency component (before revenue scaling)
+    RELATIVE_ADJUSTMENT_MAX = 0.1  # ±10% adjustment based on relative urgency
 
-    # Revenue boost: additive bonus based on per-instance revenue vs median
+    # Revenue is the primary driver of boost. Both the urgency component and an
+    # additive revenue bonus are scaled by revenue, so high-revenue chutes always
+    # dominate low-revenue ones regardless of demand pressure.
+    #
+    # Final boost = 1.0 + (urgency_bonus * revenue_weight) + revenue_bonus
+    #   where revenue_weight = clamp(rev_per_inst / median, 0.1, 3.0)
+    #
     # Active demand tier: applied when upscale_amount > 0
-    REVENUE_BOOST_SCALE = 0.15  # Per 1x median: 1x median = +0.15, 2x = +0.30
-    REVENUE_BOOST_MAX = 0.5  # Cap the active revenue bonus
-    # Retention tier: small bonus to keep miners on revenue-generating chutes even without demand pressure
-    REVENUE_RETAIN_SCALE = 0.05  # Per 1x median: 1x = +0.05, 2x = +0.10
-    REVENUE_RETAIN_MAX = 0.15  # Cap the retention bonus
+    REVENUE_BOOST_SCALE = 0.25  # Per 1x median: 1x median = +0.25, 2x = +0.50
+    REVENUE_BOOST_MAX = 1.0  # Cap the active revenue bonus
+    # Retention tier: keep miners on high-revenue chutes even without demand pressure
+    REVENUE_RETAIN_SCALE = 0.25  # Per 1x median: 1x = +0.25, 2x = +0.50
+    REVENUE_RETAIN_MAX = 0.75  # Cap the retention bonus
 
     # Collect SMOOTHED urgency scores for chutes wanting to scale up
     # Using smoothed values prevents boost from oscillating between runs
@@ -2150,57 +2150,42 @@ async def _perform_autoscale_impl(
         elif not ctx.public and ctx.current_count >= ctx.max_instances:
             ctx.boost = 1.0
         elif ctx.upscale_amount > 0:
-            # Base boost from SMOOTHED individual urgency (stable across runs)
+            # Urgency component: 0 to URGENCY_BOOST_MAX based on smoothed urgency
             normalized_urgency = min(ctx.smoothed_urgency / URGENCY_MAX_FOR_BOOST, 1.0)
-            base_boost = URGENCY_BOOST_MIN + (
-                normalized_urgency * (URGENCY_BOOST_MAX - URGENCY_BOOST_MIN)
-            )
+            urgency_bonus = normalized_urgency * URGENCY_BOOST_MAX
 
-            # Relative adjustment based on position vs other scaling chutes.
-            # Above average: bonus up to +20%
-            # Below average: reduction up to -20%, but final boost never below 1.0
+            # Relative adjustment based on position vs other scaling chutes (±10%)
             if max_urgency > 0:
-                # Normalize to [-1, 1] range
                 spread = max(max_urgency, 1)
                 relative_position = (ctx.smoothed_urgency - avg_urgency) / spread
                 relative_position = max(-1.0, min(1.0, relative_position))
-                relative_factor = 1.0 + (relative_position * RELATIVE_ADJUSTMENT_MAX)
-            else:
-                relative_factor = 1.0
+                urgency_bonus *= 1.0 + (relative_position * RELATIVE_ADJUSTMENT_MAX)
 
             # Sustained urgency factor: dampen boost for sudden spikes
-            # If raw urgency is much higher than smoothed, this is a new spike - be conservative.
-            # If raw ≈ smoothed, urgency has been sustained - reward more.
-            # This prevents gaming by burst-spam → deploy → collect boost → repeat.
-            #
-            # Formula: sustainability = smoothed / max(raw, smoothed)
-            # - If smoothed == raw: sustainability = 1.0 (fully sustained)
-            # - If smoothed << raw: sustainability approaches 0 (sudden spike)
-            # We then blend: effective_boost = 1.0 + (base_boost - 1.0) * sustainability
-            # This keeps minimum boost at 1.0 but scales the bonus by sustainability.
             if ctx.urgency_score > 0:
                 sustainability = ctx.smoothed_urgency / max(ctx.urgency_score, ctx.smoothed_urgency)
-                # Apply a floor so sustained urgency still gets decent boost even if slightly declining
                 sustainability = max(0.3, sustainability)
             else:
                 sustainability = 1.0 if ctx.smoothed_urgency == 0 else 0.3
+            urgency_bonus *= sustainability
 
-            adjusted_boost = base_boost * relative_factor
-            # Scale the boost bonus (amount above 1.0) by sustainability
-            ctx.boost = max(1.0, 1.0 + (adjusted_boost - 1.0) * sustainability)
+            # Revenue weight: scales the urgency component by revenue.
+            # High-revenue chutes get full urgency bonus amplified.
+            # Low-revenue chutes get urgency bonus dampened.
+            # Zero/unknown revenue chutes get a minimal weight so they can't
+            # outrank known-revenue chutes on urgency alone.
+            revenue_bonus = 0.0
+            if has_revenue_data and ctx.public and ctx.standard_template == "vllm":
+                if median_rev_per_inst > 0 and ctx.hourly_revenue_per_instance > 0:
+                    revenue_ratio = ctx.hourly_revenue_per_instance / median_rev_per_inst
+                    revenue_weight = max(0.1, min(revenue_ratio, 3.0))
+                    revenue_bonus = min(revenue_ratio * REVENUE_BOOST_SCALE, REVENUE_BOOST_MAX)
+                else:
+                    # Zero or unknown revenue — dampen urgency heavily
+                    revenue_weight = 0.1
+                urgency_bonus *= revenue_weight
 
-            # Revenue bonus: reward chutes generating more revenue per instance
-            # Only for public vLLM chutes with revenue data
-            if (
-                has_revenue_data
-                and median_rev_per_inst > 0
-                and ctx.hourly_revenue_per_instance > 0
-                and ctx.public
-                and ctx.standard_template == "vllm"
-            ):
-                revenue_ratio = ctx.hourly_revenue_per_instance / median_rev_per_inst
-                revenue_bonus = min(revenue_ratio * REVENUE_BOOST_SCALE, REVENUE_BOOST_MAX)
-                ctx.boost += revenue_bonus
+            ctx.boost = 1.0 + urgency_bonus + revenue_bonus
         else:
             # No scaling needed — small revenue retention signal to keep miners on profitable chutes
             if (
