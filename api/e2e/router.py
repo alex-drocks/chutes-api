@@ -464,17 +464,22 @@ async def _stream_e2e_response(
                 else raw_chunk
             )
 
-            # Parse non-empty SSE data lines to extract usage for billing.
+            # Extract usage from plaintext usage-only events for billing,
+            # then drop them — the client only needs the e2e-encrypted chunks.
             if chunk_str.startswith("data: "):
                 try:
                     obj = json.loads(chunk_str[6:].encode())
                     if isinstance(obj, dict) and "usage" in obj:
                         usage = obj["usage"]
-                        metrics["it"] = usage.get("prompt_tokens", 0)
-                        metrics["ot"] = usage.get("completion_tokens", 0)
-                        metrics["ct"] = (usage.get("prompt_tokens_details") or {}).get(
-                            "cached_tokens", 0
-                        )
+                        if usage:
+                            metrics["it"] = usage.get("prompt_tokens", 0)
+                            metrics["ot"] = usage.get("completion_tokens", 0)
+                            metrics["ct"] = (usage.get("prompt_tokens_details") or {}).get(
+                                "cached_tokens", 0
+                            )
+                        # Usage-only events are for billing only; never relay to client.
+                        if set(obj.keys()) == {"usage"}:
+                            continue
                 except Exception:
                     pass
 

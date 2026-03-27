@@ -1049,6 +1049,13 @@ async def _invoke_one(
                     if isinstance(data, dict) and "usage" in data and data["usage"]:
                         last_usage = data["usage"]
 
+                    # Strip null usage from intermediate chunks to avoid client
+                    # validation errors (we inject continuous_usage_stats for
+                    # billing, but clients don't expect "usage": null).
+                    if isinstance(data, dict) and "usage" in data and data["usage"] is None:
+                        del data["usage"]
+                        chunk = b"data: " + json.dumps(data).encode()
+
                     last_chunk = chunk
                 if b"data:" in chunk:
                     any_chunks = True
