@@ -27,6 +27,7 @@ from api.chute.schemas import (
     ChuteArgs,
     ChuteShare,
     ChuteShareArgs,
+    Cord,
     NodeSelector,
     ChuteUpdateArgs,
     RollingUpdate,
@@ -496,6 +497,15 @@ async def make_public(
         "chutes_version",
     ]
 
+    def normalize_public_copy_value(field, value):
+        if field == "cords" and value:
+            return [Cord(**cord) if isinstance(cord, dict) else cord for cord in value]
+        if field == "node_selector" and isinstance(value, dict):
+            return NodeSelector(**value)
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+        return value
+
     # The tagline format used to mark make_public chutes and link back to their source.
     PUBLIC_COPY_PREFIX = "PUBLIC_COPY:"
     target_subnet_info = user_subnets[next(iter(chutes_by_subnet))]
@@ -569,10 +579,11 @@ async def make_public(
             for field in COPY_FIELDS:
                 if field == "tagline":
                     continue
-                val = getattr(source, field)
-                if hasattr(val, "model_dump"):
-                    val = val.model_dump()
-                setattr(existing_public, field, val)
+                setattr(
+                    existing_public,
+                    field,
+                    normalize_public_copy_value(field, getattr(source, field)),
+                )
             existing_public.tagline = public_tagline
             existing_public.version = new_version
             existing_public.user_id = current_user.user_id
@@ -609,11 +620,7 @@ async def make_public(
                     version=new_version,
                     tagline=public_tagline,
                     **{
-                        field: (
-                            getattr(source, field).model_dump()
-                            if hasattr(getattr(source, field), "model_dump")
-                            else getattr(source, field)
-                        )
+                        field: normalize_public_copy_value(field, getattr(source, field))
                         for field in COPY_FIELDS
                         if field != "tagline"
                     },

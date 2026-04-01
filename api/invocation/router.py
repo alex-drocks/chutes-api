@@ -995,6 +995,15 @@ async def hostname_invocation(
             ):
                 payload["chat_template_kwargs"]["thinking"] = True
                 payload["chat_template_kwargs"]["enable_thinking"] = True
+
+            # Fix default MiMo-V2-Flash thinking.
+            if "thinking" not in payload["chat_template_kwargs"] and model.startswith(
+                "XiaomiMiMo/MiMo-V2-Flash"
+            ):
+                payload["chat_template_kwargs"].update(
+                    {"thinking": False, "enable_thinking": False}
+                )
+
         elif model in (
             "deepseek-ai/DeepSeek-V3.2-Speciale",
             "deepseek-ai/DeepSeek-V3.2-Speciale-TEE",
@@ -1004,6 +1013,8 @@ async def hostname_invocation(
             "moonshotai/Kimi-K2.5-TEE",
         ):
             payload["chat_template_kwargs"] = {"thinking": True, "enable_thinking": True}
+        elif model == "XiaomiMiMo/MiMo-V2-Flash-TEE":
+            payload["chat_template_kwargs"] = {"thinking": False, "enable_thinking": False}
 
         # Auto tool choice default.
         if payload.get("tools") and "tool_choice" not in payload:

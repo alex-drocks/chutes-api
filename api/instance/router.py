@@ -2916,7 +2916,8 @@ async def delete_instance(
         )
     ).scalar_one()
 
-    if active_count == 0:
+    # XXX d899b064-d9ae-5612-99e6-413e9136671b (glm5turbo) keeps crashing, and only one b200, so skip penalty.
+    if active_count == 0 and instance.chute_id != "d899b064-d9ae-5612-99e6-413e9136671b":
         # This is the last instance - apply penalties
         if not instance.billed_to:
             # Public chute: negate bounty and apply 10x penalty

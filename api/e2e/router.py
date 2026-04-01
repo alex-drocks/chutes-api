@@ -464,17 +464,22 @@ async def _stream_e2e_response(
                 else raw_chunk
             )
 
-            # Parse non-empty SSE data lines to extract usage for billing.
+            # Extract usage from plaintext usage-only events for billing,
+            # then drop them — the client only needs the e2e-encrypted chunks.
             if chunk_str.startswith("data: "):
                 try:
                     obj = json.loads(chunk_str[6:].encode())
                     if isinstance(obj, dict) and "usage" in obj:
                         usage = obj["usage"]
-                        metrics["it"] = usage.get("prompt_tokens", 0)
-                        metrics["ot"] = usage.get("completion_tokens", 0)
-                        metrics["ct"] = (usage.get("prompt_tokens_details") or {}).get(
-                            "cached_tokens", 0
-                        )
+                        if usage:
+                            metrics["it"] = usage.get("prompt_tokens", 0)
+                            metrics["ot"] = usage.get("completion_tokens", 0)
+                            metrics["ct"] = (usage.get("prompt_tokens_details") or {}).get(
+                                "cached_tokens", 0
+                            )
+                        # Usage-only events are for billing only; never relay to client.
+                        if set(obj.keys()) == {"usage"}:
+                            continue
                 except Exception:
                     pass
 
@@ -546,9 +551,15 @@ async def _do_billing(
 
     if compute_units:
         hourly_price = await selector_hourly_price(chute.node_selector)
+        missing_vllm_usage = chute.standard_template == "vllm" and not metrics
 
         # Per megatoken pricing for vLLM chutes.
-        if chute.standard_template == "vllm" and metrics and metrics.get("it"):
+        if missing_vllm_usage:
+            logger.error(
+                "E2E LLM response missing usage data, suppressing compute-time fallback "
+                f"for {chute.chute_id=} {chute.name=} {instance.instance_id=} {invocation_id=}"
+            )
+        elif chute.standard_template == "vllm" and metrics:
             per_million_in, per_million_out, cache_discount = await get_mtoken_price(
                 user_id, chute.chute_id
             )
@@ -571,7 +582,7 @@ async def _do_billing(
                 override_applied = True
 
         # If no override was applied, use standard pricing.
-        if not override_applied:
+        if not override_applied and not missing_vllm_usage:
             discount = 0.0
             if chute.discount and -3 < chute.discount <= 1:
                 discount = chute.discount
@@ -665,6 +676,7 @@ async def _do_billing(
             metrics if chute.standard_template == "vllm" else None,
             compute_time=duration,
             paygo_amount=paygo_equivalent,
+            app_id=getattr(request.state, "oauth_app_id", None),
         )
     )
 

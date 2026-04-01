@@ -2,7 +2,10 @@
 Endpoints specific to miners.
 """
 
+import asyncio
+import time
 import re
+import httpx as _httpx
 import orjson as json
 from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +23,7 @@ from api.chute.util import calculate_effective_compute_multiplier
 from api.bounty.util import get_bounty_infos
 from api.node.schemas import Node
 from api.image.schemas import Image
-from api.instance.schemas import Instance
+from api.instance.schemas import Instance, LaunchConfig
 from api.server.schemas import Server
 from api.miner.schemas import MinerServersResponse
 from api.job.schemas import Job
@@ -28,7 +31,9 @@ from api.invocation.util import gather_metrics
 from api.user.service import get_current_user
 from api.database import get_session, get_db_session
 from api.config import settings
-from api.constants import HOTKEY_HEADER, THRASH_WINDOW_HOURS
+from api.constants import HOTKEY_HEADER, AUTHORIZATION_HEADER, THRASH_WINDOW_HOURS
+from api.instance.util import _decode_chutes_jwt
+import api.miner_client as miner_client
 from api.metasync import get_miner_by_hotkey, MetagraphNode
 from api.util import semcomp
 from metasync.shared import get_scoring_data
@@ -665,3 +670,208 @@ async def get_metagraph():
             .scalars()
             .all()
         )
+
+
+ACTIVATION_SENTINEL = "Instance activated:"
+MAX_STREAM_SECONDS = 300
+_CURSOR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+
+@router.get("/instance_logs")
+async def stream_miner_logs(
+    request: Request,
+    cursor: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+    authorization: str = Header(..., alias=AUTHORIZATION_HEADER),
+):
+    """
+    Stream startup logs for an instance identified by a launch config JWT.
+
+    Only available for public chutes, and only before the instance is activated.
+    Connections are capped at 5 minutes. To resume, pass the ``cursor`` query
+    parameter (an ISO timestamp included as ``cursor`` in each JSON payload).
+    """
+    if cursor is not None and not _CURSOR_RE.match(cursor):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="cursor must be an ISO timestamp like 2026-04-01T17:53:05",
+        )
+
+    token = authorization.strip().split(" ")[-1]
+    try:
+        payload = _decode_chutes_jwt(token, require_exp=True)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired launch token.",
+        )
+    config_id = payload.get("sub")
+    if not config_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid launch token: missing sub.",
+        )
+
+    # Load the launch config and associated instance/chute.
+    launch_config = (
+        (await db.execute(select(LaunchConfig).where(LaunchConfig.config_id == config_id)))
+        .unique()
+        .scalar_one_or_none()
+    )
+    if not launch_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Launch config not found.",
+        )
+
+    # Load the chute to check public status.
+    chute = (
+        (await db.execute(select(Chute).where(Chute.chute_id == launch_config.chute_id)))
+        .unique()
+        .scalar_one_or_none()
+    )
+    if not chute or not chute.public:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Logs are only available for public chutes.",
+        )
+
+    # Check if there's already an instance for this config.
+    instance = (
+        (await db.execute(select(Instance).where(Instance.config_id == config_id)))
+        .unique()
+        .scalar_one_or_none()
+    )
+
+    if instance and instance.activated_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Instance has already been activated; logs are no longer available.",
+        )
+
+    async def _stream():
+        deadline = time.monotonic() + MAX_STREAM_SECONDS
+        found_cursor = cursor is None  # If no cursor, emit everything immediately.
+
+        # If no instance exists yet, poll until one appears.
+        current_instance = instance
+        while current_instance is None:
+            if await request.is_disconnected() or time.monotonic() >= deadline:
+                return
+            yield "data: Waiting for instance to be created...\n\n"
+            await asyncio.sleep(2)
+            async with get_session(readonly=True) as poll_session:
+                current_instance = (
+                    (
+                        await poll_session.execute(
+                            select(Instance).where(Instance.config_id == config_id)
+                        )
+                    )
+                    .unique()
+                    .scalar_one_or_none()
+                )
+
+        # Re-check activation status in case it changed while polling.
+        if current_instance.activated_at is not None:
+            yield "data: Instance has already been activated; logs are no longer available.\n\n"
+            return
+
+        # Find the log port and start streaming.
+        try:
+            log_port = next(
+                p for p in current_instance.port_mappings if p["internal_port"] == 8001
+            )["external_port"]
+        except (StopIteration, TypeError, KeyError):
+            yield "data: Log port not available yet, waiting...\n\n"
+            while True:
+                if await request.is_disconnected() or time.monotonic() >= deadline:
+                    return
+                await asyncio.sleep(2)
+                async with get_session(readonly=True) as poll_session:
+                    current_instance = (
+                        (
+                            await poll_session.execute(
+                                select(Instance).where(Instance.config_id == config_id)
+                            )
+                        )
+                        .unique()
+                        .scalar_one_or_none()
+                    )
+                if not current_instance:
+                    yield "data: Instance disappeared.\n\n"
+                    return
+                if current_instance.activated_at is not None:
+                    yield "data: Instance has already been activated; logs are no longer available.\n\n"
+                    return
+                try:
+                    log_port = next(
+                        p for p in current_instance.port_mappings if p["internal_port"] == 8001
+                    )["external_port"]
+                    break
+                except (StopIteration, TypeError, KeyError):
+                    continue
+
+        headers, _ = miner_client.sign_request(current_instance.miner_hotkey, purpose="chutes")
+        client = _httpx.AsyncClient(
+            base_url=f"http://{current_instance.host}:{log_port}",
+            timeout=_httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0),
+        )
+        try:
+            line_buf = ""
+            async with client.stream(
+                "GET",
+                "/logs/stream",
+                headers=headers,
+                params={"backfill": "10000"},
+            ) as resp:
+                async for chunk in resp.aiter_bytes():
+                    if await request.is_disconnected() or time.monotonic() >= deadline:
+                        return
+                    line_buf += chunk.decode("utf-8", errors="replace")
+                    while "\n" in line_buf:
+                        line, line_buf = line_buf.split("\n", 1)
+                        line = line.strip()
+                        if not line or line == ".":
+                            continue
+
+                        # Extract timestamp from log JSON for cursor tracking.
+                        ts = None
+                        if line.startswith("data: "):
+                            try:
+                                log_val = json.loads(line[6:]).get("log", "")
+                                if len(log_val) >= 19:
+                                    ts = log_val[:19]
+                            except Exception:
+                                pass
+
+                        # When resuming, skip lines at or before the cursor.
+                        if not found_cursor:
+                            if ts and ts >= cursor:
+                                found_cursor = True
+                            else:
+                                continue
+
+                        # Inject cursor into the JSON so clients can resume.
+                        if ts and line.startswith("data: "):
+                            try:
+                                obj = json.loads(line[6:])
+                                obj["cursor"] = ts
+                                line = "data: " + json.dumps(obj).decode()
+                            except Exception:
+                                pass
+
+                        yield line + "\n\n"
+
+                        if ACTIVATION_SENTINEL in line:
+                            return
+        finally:
+            await client.aclose()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
