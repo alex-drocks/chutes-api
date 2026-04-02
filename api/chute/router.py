@@ -1259,11 +1259,31 @@ async def warm_up_chute(
         is_hot = tm is not None
         instance_count = len(tm.instances) if tm else 0
         bounty = await get_bounty_info(chute.chute_id)
+
+        # Load instances with GPU info for the dashboard.
+        instances_with_nodes = (
+            await db.execute(
+                select(Instance)
+                .where(Instance.chute_id == chute.chute_id)
+                .options(selectinload(Instance.nodes))
+            )
+        ).scalars().all()
+        instances_info = []
+        for inst in instances_with_nodes:
+            gpu_type = inst.nodes[0].gpu_identifier if inst.nodes else None
+            instances_info.append({
+                "instance_id": inst.instance_id,
+                "active": inst.active,
+                "gpu_count": len(inst.nodes) if inst.nodes else 0,
+                "gpu_model_name": gpu_type,
+            })
+
         return {
             "chute_id": chute.chute_id,
             "status": "hot" if is_hot else "cold",
             "instance_count": instance_count,
             "bounty": bounty,
+            "instances": instances_info,
         }
 
     started_at = time.time()
