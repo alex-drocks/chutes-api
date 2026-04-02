@@ -2110,8 +2110,8 @@ async def get_mtoken_price(user_id: str, chute_id: str) -> tuple[float, float, f
             if user_discount:
                 per_million_out -= per_million_out * user_discount
 
-    per_million_in = round(per_million_in, 2)
-    per_million_out = round(per_million_out, 2)
+    per_million_in = round(per_million_in, 4)
+    per_million_out = round(per_million_out, 4)
     await settings.redis_client.set(
         cache_key, f"{per_million_in}:{per_million_out}:{cache_discount}", ex=300
     )
