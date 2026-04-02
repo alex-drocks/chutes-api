@@ -1935,7 +1935,7 @@ async def claim_tee_launch_config(
     gpu_count = len(nodes)
     gpu_type = nodes[0].gpu_identifier
     asyncio.create_task(notify_created(instance, gpu_count=gpu_count, gpu_type=gpu_type))
-    await _maybe_start_log_capture(instance, config_id)
+    asyncio.create_task(_maybe_start_log_capture(instance, config_id))
 
     # Verify TEE attestation evidence
     await verify_tee_chute(db, instance, launch_config, args.deployment_id, expected_nonce)
@@ -1992,7 +1992,7 @@ async def validate_tee_launch_config_instance(
     gpu_count = len(nodes)
     gpu_type = nodes[0].gpu_identifier
     asyncio.create_task(notify_created(instance, gpu_count=gpu_count, gpu_type=gpu_type))
-    await _maybe_start_log_capture(instance, config_id)
+    asyncio.create_task(_maybe_start_log_capture(instance, config_id))
 
     await verify_gpu_evidence(args.gpu_evidence, expected_nonce)
 
@@ -2096,7 +2096,7 @@ async def claim_graval_launch_config(
     gpu_count = len(nodes)
     gpu_type = nodes[0].gpu_identifier
     asyncio.create_task(notify_created(instance, gpu_count=gpu_count, gpu_type=gpu_type))
-    await _maybe_start_log_capture(instance, config_id)
+    asyncio.create_task(_maybe_start_log_capture(instance, config_id))
 
     # The miner must decrypt the proposed symmetric key from this response payload,
     # then encrypt something using this symmetric key within the expected graval timeout.
@@ -2594,6 +2594,10 @@ async def verify_graval_launch_config_instance(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Instance disappeared (did you update gepetto reconcile?)",
         )
+    # Cache GPU info while nodes are eagerly loaded (before any commit/refresh expires them).
+    _gpu_count = len(instance.nodes) if instance.nodes else None
+    _gpu_type = instance.nodes[0].gpu_identifier if instance.nodes else None
+
     estimate = SUPPORTED_GPUS[instance.nodes[0].gpu_identifier]["graval"]["estimate"]
     max_duration = estimate * 2.15
     if (delta := (now - start).total_seconds()) >= max_duration:
@@ -2612,8 +2616,6 @@ async def verify_graval_launch_config_instance(
             {"instance_id": instance.instance_id, "reason": reason},
         )
         await db.commit()
-        _gpu_count = len(instance.nodes) if instance.nodes else None
-        _gpu_type = instance.nodes[0].gpu_identifier if instance.nodes else None
         asyncio.create_task(notify_deleted(instance, gpu_count=_gpu_count, gpu_type=_gpu_type))
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -2646,8 +2648,6 @@ async def verify_graval_launch_config_instance(
             {"instance_id": instance.instance_id, "reason": reason},
         )
         await db.commit()
-        _gpu_count = len(instance.nodes) if instance.nodes else None
-        _gpu_type = instance.nodes[0].gpu_identifier if instance.nodes else None
         asyncio.create_task(notify_deleted(instance, gpu_count=_gpu_count, gpu_type=_gpu_type))
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -2675,8 +2675,6 @@ async def verify_graval_launch_config_instance(
             {"instance_id": instance.instance_id, "reason": reason},
         )
         await db.commit()
-        _gpu_count = len(instance.nodes) if instance.nodes else None
-        _gpu_type = instance.nodes[0].gpu_identifier if instance.nodes else None
         asyncio.create_task(notify_deleted(instance, gpu_count=_gpu_count, gpu_type=_gpu_type))
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -2692,8 +2690,6 @@ async def verify_graval_launch_config_instance(
     return_value = await _build_launch_config_verified_response(db, instance, launch_config)
 
     await db.refresh(instance)
-    _gpu_count = len(instance.nodes) if instance.nodes else None
-    _gpu_type = instance.nodes[0].gpu_identifier if instance.nodes else None
     asyncio.create_task(notify_verified(instance, gpu_count=_gpu_count, gpu_type=_gpu_type))
     return return_value
 
@@ -2734,6 +2730,10 @@ async def verify_tee_launch_config_instance(
             detail="Instance disappeared (did you update gepetto reconcile?)",
         )
 
+    # Cache GPU info while nodes are eagerly loaded (before any commit/refresh expires them).
+    _gpu_count = len(instance.nodes) if instance.nodes else None
+    _gpu_type = instance.nodes[0].gpu_identifier if instance.nodes else None
+
     # TEE instances skip PoVW checks - they were verified during claim via attestation
     # Just verify the symmetric key via port checks
     launch_config.verified_at = func.now()
@@ -2742,8 +2742,6 @@ async def verify_tee_launch_config_instance(
     return_value = await _build_launch_config_verified_response(db, instance, launch_config)
 
     await db.refresh(instance)
-    _gpu_count = len(instance.nodes) if instance.nodes else None
-    _gpu_type = instance.nodes[0].gpu_identifier if instance.nodes else None
     asyncio.create_task(notify_verified(instance, gpu_count=_gpu_count, gpu_type=_gpu_type))
     return return_value
 
