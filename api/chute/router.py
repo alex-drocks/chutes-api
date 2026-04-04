@@ -40,7 +40,7 @@ from api.chute.templates import (
     build_vllm_code,
     build_diffusion_code,
 )
-from api.gpu import SUPPORTED_GPUS, MAX_GPU_PRICE_DELTA
+from api.gpu import SUPPORTED_GPUS
 from api.chute.response import ChuteResponse
 from api.chute.util import (
     selector_hourly_price,
@@ -1197,11 +1197,15 @@ async def get_chute_hf_info(
 @router.get("/warmup/{chute_id_or_name:path}")
 async def warm_up_chute(
     chute_id_or_name: str,
+    quick: bool = False,
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user(purpose="chutes")),
 ):
     """
     Warm up a chute.
+
+    With ?quick=true, performs a single status check, creates a bounty if needed,
+    and returns JSON immediately instead of holding an SSE connection open.
     """
     chute = (
         (
@@ -1248,6 +1252,45 @@ async def warm_up_chute(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=f"Account balance is ${balance}, please top-up with fiat or send tao to {current_user.payment_address}",
         )
+
+    if quick:
+        # Single status check + bounty creation, return immediately.
+        tm = await get_chute_target_manager(chute=chute, max_wait=0, dynonce=True)
+        is_hot = tm is not None
+        instance_count = len(tm.instances) if tm else 0
+        bounty = await get_bounty_info(chute.chute_id)
+
+        # Load instances with GPU info for the dashboard.
+        instances_with_nodes = (
+            (
+                await db.execute(
+                    select(Instance)
+                    .where(Instance.chute_id == chute.chute_id)
+                    .options(selectinload(Instance.nodes))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        instances_info = []
+        for inst in instances_with_nodes:
+            gpu_type = inst.nodes[0].gpu_identifier if inst.nodes else None
+            instances_info.append(
+                {
+                    "instance_id": inst.instance_id,
+                    "active": inst.active,
+                    "gpu_count": len(inst.nodes) if inst.nodes else 0,
+                    "gpu_model_name": gpu_type,
+                }
+            )
+
+        return {
+            "chute_id": chute.chute_id,
+            "status": "hot" if is_hot else "cold",
+            "instance_count": instance_count,
+            "bounty": bounty,
+            "instances": instances_info,
+        }
 
     started_at = time.time()
 
@@ -1579,28 +1622,6 @@ async def _deploy_chute(
         )
 
     allowed_gpus = set(chute_args.node_selector.supported_gpus)
-    if not allowed_gpus - set(["5090", "3090", "4090"]):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not allowed to require consumer GPUs exclusively.",
-        )
-
-    # Prevent people from paying for a 3090 when they actually want (hope for?) a b200.
-    prices = {gpu: SUPPORTED_GPUS[gpu]["hourly_rate"] for gpu in allowed_gpus}
-    min_price = min(prices.values())
-    max_price = max(prices.values())
-    if chute_args.node_selector.include and max_price > min_price * MAX_GPU_PRICE_DELTA:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Your node selector's supported GPU price range is too large, currently "
-                f"ranging from ${min_price} to ${max_price} based on supported GPUs. The maximum "
-                f"allowed spread is {MAX_GPU_PRICE_DELTA} times min supported GPU price, i.e. "
-                f"{round(min_price * MAX_GPU_PRICE_DELTA, 2)}. "
-                "Please update your node selector to either only use count and VRAM, or "
-                "update your include directive to be more specific. See https://api.chutes.ai/pricing"
-            ),
-        )
 
     # Fee estimate, as an error, if the user hasn't used the confirmed param.
     estimate = await chute_args.node_selector.current_estimated_price()
@@ -1611,6 +1632,9 @@ async def _deploy_chute(
     )
     if deployment_fee and not accept_fee:
         gpu_count = chute_args.node_selector.gpu_count or 1
+        prices = {gpu: SUPPORTED_GPUS[gpu]["hourly_rate"] for gpu in allowed_gpus}
+        min_price = min(prices.values())
+        max_price = max(prices.values())
         if len(allowed_gpus) > 1:
             hourly_range_msg = (
                 f"Your hourly rate per instance will range from ~${round(min_price * gpu_count, 2)}/hr "

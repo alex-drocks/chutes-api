@@ -1049,13 +1049,6 @@ async def _invoke_one(
                     if isinstance(data, dict) and "usage" in data and data["usage"]:
                         last_usage = data["usage"]
 
-                    # Strip null usage from intermediate chunks to avoid client
-                    # validation errors (we inject continuous_usage_stats for
-                    # billing, but clients don't expect "usage": null).
-                    if isinstance(data, dict) and "usage" in data and data["usage"] is None:
-                        del data["usage"]
-                        chunk = b"data: " + json.dumps(data).encode()
-
                     last_chunk = chunk
                 if b"data:" in chunk:
                     any_chunks = True
@@ -2117,8 +2110,8 @@ async def get_mtoken_price(user_id: str, chute_id: str) -> tuple[float, float, f
             if user_discount:
                 per_million_out -= per_million_out * user_discount
 
-    per_million_in = round(per_million_in, 2)
-    per_million_out = round(per_million_out, 2)
+    per_million_in = round(per_million_in, 4)
+    per_million_out = round(per_million_out, 4)
     await settings.redis_client.set(
         cache_key, f"{per_million_in}:{per_million_out}:{cache_discount}", ex=300
     )
