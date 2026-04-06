@@ -11,10 +11,12 @@ from sqlalchemy import (
     String,
     DateTime,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Text,
     Index,
     ForeignKeyConstraint,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from typing import Dict, Any, List, Optional
@@ -117,6 +119,70 @@ class TeeChuteEvidence(BaseModel):
     )
 
 
+class MaintenanceReason(BaseModel):
+    """A single reason why maintenance eligibility was denied."""
+
+    reason: str
+    current_version: Optional[str] = None
+    target_version: Optional[str] = None
+    window_id: Optional[str] = None
+    current_slots: Optional[int] = None
+    limit: Optional[int] = None
+    blocking: Optional[List[dict]] = None
+
+
+class SoleSurvivorBlock(BaseModel):
+    """An instance that is the sole active instance for its chute."""
+
+    chute_id: str
+    instance_id: str
+
+
+class PreflightResult(BaseModel):
+    """Result of a maintenance preflight eligibility check."""
+
+    eligible: bool
+    denial_reasons: List[MaintenanceReason] = Field(default_factory=list)
+    blocking_chute_ids: List[SoleSurvivorBlock] = Field(default_factory=list)
+    current_slots: int = 0
+    limit: int = 1
+
+
+class UpgradeWindowInfo(BaseModel):
+    """Summary of an upgrade window for API responses."""
+
+    id: str
+    target_measurement_version: str
+    upgrade_window_start: str
+    upgrade_window_end: str
+    max_concurrent_per_miner: int = 1
+
+
+class ConfirmMaintenanceResult(BaseModel):
+    """Result of confirming maintenance on a server."""
+
+    server_id: str
+    purged_instance_ids: List[str] = Field(default_factory=list)
+    window: UpgradeWindowInfo
+
+
+class PendingServerInfo(BaseModel):
+    """A server with pending maintenance, shown in the policy response."""
+
+    server_id: str
+    name: Optional[str] = None
+    version: Optional[str] = None
+    target_version: str
+
+
+class MaintenancePolicyResponse(BaseModel):
+    """Response for GET /servers/maintenance/policy."""
+
+    active_window: Optional[UpgradeWindowInfo] = None
+    current_slots: int = 0
+    pending_servers: List[PendingServerInfo] = Field(default_factory=list)
+
+
 class BootAttestation(Base):
     """Track anonymous boot attestations (pre-registration)."""
 
@@ -125,6 +191,8 @@ class BootAttestation(Base):
     attestation_id = Column(String, primary_key=True, default=generate_uuid)
     quote_data = Column(Text, nullable=False)  # Base64 encoded quote
     server_ip = Column(String, nullable=True)  # For later linking to server
+    miner_hotkey = Column(String, nullable=True)
+    vm_name = Column(String, nullable=True)
     verification_error = Column(String, nullable=True)
     measurement_version = Column(
         String, nullable=True
@@ -136,6 +204,32 @@ class BootAttestation(Base):
         Index("idx_boot_server_id", "server_ip"),
         Index("idx_boot_created", "created_at"),
         Index("idx_boot_verified", "verified_at"),
+        Index("idx_boot_miner_vm", "miner_hotkey", "vm_name"),
+    )
+
+
+class TeeUpgradeWindow(Base):
+    """Validator-managed maintenance window: one row per coordinated TEE image cutover."""
+
+    __tablename__ = "tee_upgrade_windows"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    upgrade_window_start = Column(DateTime(timezone=True), nullable=False)
+    upgrade_window_end = Column(DateTime(timezone=True), nullable=False)
+    target_measurement_version = Column(Text, nullable=False)
+    max_concurrent_per_miner = Column(Integer, nullable=False, default=1, server_default="1")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    pending_servers = relationship(
+        "Server",
+        back_populates="pending_upgrade_window",
+        foreign_keys="Server.maintenance_pending_window_id",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("target_measurement_version", name="uq_tee_upgrade_target"),
+        CheckConstraint("upgrade_window_end > upgrade_window_start", name="chk_window_bounds"),
+        Index("idx_tee_upgrade_window_bounds", "upgrade_window_start", "upgrade_window_end"),
     )
 
 
@@ -156,16 +250,35 @@ class Server(Base):
 
     is_tee = Column(Boolean, default=False, server_default="false")
 
+    # Maintenance: set at confirm, cleared on successful boot completion or lazily when window closes.
+    maintenance_pending_window_id = Column(
+        String,
+        ForeignKey("tee_upgrade_windows.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Current attested measurement version, updated on every successful boot attestation.
+    version = Column(Text, nullable=True)
+
     # Relationships
     nodes = relationship("Node", back_populates="server", cascade="all, delete-orphan")
     runtime_attestations = relationship(
         "ServerAttestation", back_populates="server", cascade="all, delete-orphan"
     )
     miner = relationship("MetagraphNode", back_populates="servers")
+    pending_upgrade_window = relationship(
+        "TeeUpgradeWindow",
+        back_populates="pending_servers",
+        foreign_keys=[maintenance_pending_window_id],
+    )
 
     __table_args__ = (
         Index("idx_server_miner", "miner_hotkey"),
         Index("idx_servers_miner_name", "miner_hotkey", "name", unique=True),
+        Index(
+            "idx_servers_maintenance_pending",
+            "miner_hotkey",
+            postgresql_where=maintenance_pending_window_id.isnot(None),
+        ),
         ForeignKeyConstraint(
             ["netuid", "miner_hotkey"], ["metagraph_nodes.netuid", "metagraph_nodes.hotkey"]
         ),

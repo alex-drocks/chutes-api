@@ -22,20 +22,17 @@ from api.util import (
     decrypt_instance_response,
     encrypt_instance_request,
     semcomp,
-    notify_deleted,
-    notify_job_deleted,
 )
 from api.database import get_session
 from api.chute.schemas import Chute
 from api.image.schemas import Image
-from api.job.schemas import Job
 from api.exceptions import EnvdumpMissing
 from sqlalchemy import text, update, func, select
 from sqlalchemy.orm import joinedload, selectinload
 import api.database.orms  # noqa
 import api.miner_client as miner_client
 from api.instance.schemas import Instance, LaunchConfig
-from api.instance.util import invalidate_instance_cache, cleanup_instance_conn_tracking
+from api.instance.util import purge, purge_and_notify  # noqa: F401
 from api.chute.codecheck import is_bad_code
 
 
@@ -97,58 +94,6 @@ async def load_chute_instances(chute_id):
         )
         instances = (await session.execute(query)).unique().scalars().all()
         return instances
-
-
-async def purge(target, reason="miner failed watchtower probes", valid_termination=False):
-    """
-    Purge an instance.
-    """
-    async with get_session() as session:
-        await session.execute(
-            text("DELETE FROM instances WHERE instance_id = :instance_id"),
-            {"instance_id": target.instance_id},
-        )
-        await session.execute(
-            text(
-                "UPDATE instance_audit SET deletion_reason = :reason, valid_termination = :valid_termination WHERE instance_id = :instance_id"
-            ),
-            {
-                "instance_id": target.instance_id,
-                "reason": reason,
-                "valid_termination": valid_termination,
-            },
-        )
-
-        # Fail associated jobs.
-        job = (
-            (await session.execute(select(Job).where(Job.instance_id == target.instance_id)))
-            .unique()
-            .scalar_one_or_none()
-        )
-        if job and not job.finished_at:
-            job.status = "error"
-            job.error_detail = f"Instance failed monitoring probes: {reason=}"
-            job.miner_terminated = True
-            job.finished_at = func.now()
-            await notify_job_deleted(job)
-
-        await session.commit()
-
-    await cleanup_instance_conn_tracking(target.chute_id, target.instance_id)
-
-
-async def purge_and_notify(
-    target, reason="miner failed watchtower probes", valid_termination=False
-):
-    """
-    Purge an instance and send a notification with the reason.
-    """
-    await purge(target, reason=reason, valid_termination=valid_termination)
-    await notify_deleted(
-        target,
-        message=f"Instance {target.instance_id} of miner {target.miner_hotkey} deleted by watchtower {reason=}",
-    )
-    await invalidate_instance_cache(target.chute_id, instance_id=target.instance_id)
 
 
 async def do_slurp(instance, payload, encrypted_slurp):
@@ -574,7 +519,9 @@ async def increment_soft_fail(instance, chute):
             f"miner {instance.miner_hotkey} "
             f"chute {chute.name} reached max soft fails: {fail_count}"
         )
-        await purge_and_notify(instance)
+        await purge_and_notify(
+            instance, reason=f"watchtower - max consecutive soft fails ({fail_count})"
+        )
 
 
 def get_expected_command(chute, miner_hotkey: str, seed: int = None):
@@ -835,7 +782,8 @@ async def check_chute(chute_id):
                 # Delete failed checks.
                 if failed_envdump:
                     await purge_and_notify(
-                        instance, reason="Instance failed env dump signature or process checks."
+                        instance,
+                        reason="watchtower - failed env dump signature or process checks",
                     )
                     bad_env.add(instance.instance_id)
                     failed_count = await settings.redis_client.incr(
@@ -886,7 +834,7 @@ async def check_chute(chute_id):
             f"miner {instance.miner_hotkey} "
             f"chute {chute.name} due to hard fail"
         )
-        await purge_and_notify(instance)
+        await purge_and_notify(instance, reason="watchtower - hard probe failure")
 
     # Limit "soft" fails to max consecutive failures, allowing some downtime but not much.
     for instance in soft_failed:
@@ -1100,7 +1048,7 @@ async def procs_check():
                         if reason:
                             logger.warning(reason)
                             await purge_and_notify(
-                                instance, reason="miner failed watchtower probes"
+                                instance, reason="watchtower - miner failed probes"
                             )
                         else:
                             logger.success(
