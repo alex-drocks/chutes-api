@@ -224,11 +224,6 @@ STARVING_HISTORY_KEY_PREFIX = "starving:"
 
 # Higher min instance counts for some chutes...
 LIMIT_OVERRIDES = {
-    "7858c162-4f52-5a11-868e-ddef2c04f4d8": 1,
-    "8f3bb827-b9e6-5487-88bc-ee8f0c6f5810": 1,
-    "6320ab82-9e94-5d63-8e38-d136f61dc157": 1,
-    "18aab253-1f97-5279-bef7-499f1f837653": 1,
-    "c8fd098a-6d29-5a9c-b25a-ea5764b89441": 1,
     "ac059e33-eb27-541c-b9a9-24b214036475": 7,
 }
 FAILSAFE = {
