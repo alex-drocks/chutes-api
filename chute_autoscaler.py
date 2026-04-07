@@ -946,6 +946,97 @@ async def refresh_instance_compute_multipliers(chute_ids: List[str] = None):
             logger.info("No compute_multiplier updates needed")
 
 
+async def rotate_private_instance_compute_history():
+    """
+    For long-running private instances, periodically close the current open
+    compute history record and create a new one with the same multiplier.
+
+    This caps the penalty for improper deletion to ~6 hours of lost incentives
+    instead of the entire instance lifetime.
+    """
+    async with get_session() as session:
+        await session.execute(text("SET LOCAL statement_timeout = '10s'"))
+        result = await session.execute(
+            text("""
+                SELECT ich.instance_id
+                FROM instance_compute_history ich
+                JOIN instances i ON i.instance_id = ich.instance_id
+                WHERE ich.ended_at IS NULL
+                  AND i.billed_to IS NOT NULL
+                  AND i.active = true
+                  AND ich.started_at <= NOW() - INTERVAL '6 hours'
+            """)
+        )
+        candidate_instance_ids = [row.instance_id for row in result.fetchall()]
+
+    if not candidate_instance_ids:
+        logger.info("No private instance compute history records to rotate")
+        return
+
+    rotated = 0
+    for instance_id in candidate_instance_ids:
+        try:
+            async with get_session() as session:
+                await session.execute(text("SET LOCAL statement_timeout = '10s'"))
+                row = await session.execute(
+                    text("""
+                        SELECT id, compute_multiplier
+                        FROM instance_compute_history
+                        WHERE instance_id = :instance_id
+                          AND ended_at IS NULL
+                          AND started_at <= NOW() - INTERVAL '6 hours'
+                        FOR UPDATE
+                    """),
+                    {"instance_id": instance_id},
+                )
+                record = row.fetchone()
+                if not record:
+                    continue
+
+                inst = await session.execute(
+                    text("""
+                        SELECT 1 FROM instances
+                        WHERE instance_id = :instance_id
+                          AND active = true
+                    """),
+                    {"instance_id": instance_id},
+                )
+                if not inst.fetchone():
+                    continue
+
+                await session.execute(
+                    text("""
+                        UPDATE instance_compute_history
+                        SET ended_at = NOW()
+                        WHERE id = :record_id
+                    """),
+                    {"record_id": record.id},
+                )
+                await session.execute(
+                    text("""
+                        INSERT INTO instance_compute_history
+                            (instance_id, compute_multiplier, started_at)
+                        VALUES (:instance_id, :compute_multiplier, NOW())
+                    """),
+                    {
+                        "instance_id": instance_id,
+                        "compute_multiplier": record.compute_multiplier,
+                    },
+                )
+
+                await session.commit()
+                rotated += 1
+        except Exception:
+            logger.warning(
+                f"Failed to rotate compute history for instance {instance_id}", exc_info=True
+            )
+
+    if rotated:
+        logger.success(f"Rotated compute history for {rotated} private instances")
+    else:
+        logger.info("No private instance compute history records to rotate")
+
+
 async def _log_thrashing_instances():
     """
     Log all instances currently in thrash penalty period for debugging/monitoring.
@@ -2688,6 +2779,8 @@ async def _perform_autoscale_impl(
         # Refresh instance compute_multipliers (only if requested - should run hourly, not every run)
         if refresh_multipliers:
             await refresh_instance_compute_multipliers()
+            # XXX disabled for the time-being.
+            # await rotate_private_instance_compute_history()
 
         # Manage rolling updates (replacement + hard cap enforcement)
         # In soft_mode, still manage rolling updates (they're not scale-downs, they're version transitions)
