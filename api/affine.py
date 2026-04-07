@@ -537,6 +537,23 @@ def check_affine_code(code: str) -> tuple[bool, str]:
                                                 False,
                                                 "engine_args cannot contain '--config'",
                                             )
+                                        # Reject --mem-fraction-static / --gpu-memory-utilization values >= 0.85
+                                        # to leave room for buffers and such.
+                                        for mem_flag in (
+                                            "--mem-fraction-static",
+                                            "--gpu-memory-utilization",
+                                        ):
+                                            mem_frac_match = re.search(
+                                                re.escape(mem_flag) + r"\s+=?\s*([0-9]*\.?[0-9]+)",
+                                                keyword.value.value,
+                                            )
+                                            if mem_frac_match:
+                                                mem_frac_val = float(mem_frac_match.group(1))
+                                                if mem_frac_val >= 0.85:
+                                                    return (
+                                                        False,
+                                                        f"{mem_flag} value {mem_frac_val} is too high (must be < 0.85 to leave room for buffers/etc.)",
+                                                    )
                                         space_re = re.search(r"(?<=\S)--", keyword.value.value)
                                         if space_re:
                                             return (
