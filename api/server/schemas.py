@@ -166,13 +166,14 @@ class ConfirmMaintenanceResult(BaseModel):
     window: UpgradeWindowInfo
 
 
-class PendingServerInfo(BaseModel):
-    """A server with pending maintenance, shown in the policy response."""
+class ServerUpgradeStatus(BaseModel):
+    """A TEE server and its version relative to the upgrade target."""
 
     server_id: str
     name: Optional[str] = None
     version: Optional[str] = None
-    target_version: str
+    needs_upgrade: bool
+    in_maintenance: bool
 
 
 class MaintenancePolicyResponse(BaseModel):
@@ -180,7 +181,7 @@ class MaintenancePolicyResponse(BaseModel):
 
     active_window: Optional[UpgradeWindowInfo] = None
     current_slots: int = 0
-    pending_servers: List[PendingServerInfo] = Field(default_factory=list)
+    servers: List[ServerUpgradeStatus] = Field(default_factory=list)
 
 
 class BootAttestation(Base):
@@ -258,6 +259,10 @@ class Server(Base):
     )
     # Current attested measurement version, updated on every successful boot attestation.
     version = Column(Text, nullable=True)
+
+    @property
+    def in_maintenance(self) -> bool:
+        return self.maintenance_pending_window_id is not None
 
     # Relationships
     nodes = relationship("Node", back_populates="server", cascade="all, delete-orphan")

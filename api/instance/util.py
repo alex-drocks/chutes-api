@@ -42,6 +42,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from api.server.client import TeeServerClient
 from api.server.schemas import Server
+from api.node.schemas import Node
 from api.server.exceptions import GetEvidenceError
 from api.server.util import verify_quote, verify_gpu_evidence
 from api.server.util import get_public_key_hash
@@ -1191,6 +1192,33 @@ async def is_instance_in_thrash_penalty(
         instance_created_at = instance_created_at.replace(tzinfo=None)
 
     return await is_thrashing_miner(db, miner_hotkey, chute_id, instance_created_at)
+
+
+async def get_server_for_gpus(db, gpu_uuids: list[str]) -> Server | None:
+    """Resolve the single server that owns the given GPU node UUIDs.
+
+    Returns None if no server is found. Raises HTTPException if GPUs span
+    multiple servers (unsupported topology).
+    """
+    server_id_subq = (
+        select(Node.server_id)
+        .where(Node.uuid.in_(gpu_uuids), Node.server_id.isnot(None))
+        .distinct()
+        .subquery()
+    )
+    servers = (
+        (await db.execute(select(Server).where(Server.server_id.in_(select(server_id_subq)))))
+        .scalars()
+        .all()
+    )
+    if len(servers) > 1:
+        names = [s.name for s in servers]
+        logger.warning(f"GPUs span multiple servers: {names}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GPUs must belong to a single server.",
+        )
+    return servers[0] if servers else None
 
 
 async def purge(target, reason, valid_termination=False):
