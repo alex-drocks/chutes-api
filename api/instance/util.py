@@ -31,7 +31,7 @@ from api.instance.schemas import Instance, LaunchConfig
 from api.config import settings
 from api.job.schemas import Job
 from api.database import get_session
-from api.util import has_legacy_private_billing, notify_deleted, semcomp
+from api.util import has_legacy_private_billing, notify_deleted, notify_job_deleted, semcomp
 from api.user.service import chutes_user_id
 from api.bounty.util import create_bounty_if_not_exists, get_bounty_amount, send_bounty_notification
 from sqlalchemy.future import select
@@ -42,8 +42,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from api.server.client import TeeServerClient
 from api.server.schemas import Server
+from api.node.schemas import Node
 from api.server.exceptions import GetEvidenceError
-from api.server.service import verify_quote, verify_gpu_evidence
+from api.server.util import verify_quote, verify_gpu_evidence
 from api.server.util import get_public_key_hash
 
 # Define an alias for the Instance model to use in a subquery
@@ -1191,3 +1192,75 @@ async def is_instance_in_thrash_penalty(
         instance_created_at = instance_created_at.replace(tzinfo=None)
 
     return await is_thrashing_miner(db, miner_hotkey, chute_id, instance_created_at)
+
+
+async def get_server_for_gpus(db, gpu_uuids: list[str]) -> Server | None:
+    """Resolve the single server that owns the given GPU node UUIDs.
+
+    Returns None if no server is found. Raises HTTPException if GPUs span
+    multiple servers (unsupported topology).
+    """
+    server_id_subq = (
+        select(Node.server_id)
+        .where(Node.uuid.in_(gpu_uuids), Node.server_id.isnot(None))
+        .distinct()
+        .subquery()
+    )
+    servers = (
+        (await db.execute(select(Server).where(Server.server_id.in_(select(server_id_subq)))))
+        .scalars()
+        .all()
+    )
+    if len(servers) > 1:
+        names = [s.name for s in servers]
+        logger.warning(f"GPUs span multiple servers: {names}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GPUs must belong to a single server.",
+        )
+    return servers[0] if servers else None
+
+
+async def purge(target, reason, valid_termination=False):
+    """Delete an instance from the database and clean up associated state."""
+    async with get_session() as session:
+        await session.execute(
+            text("DELETE FROM instances WHERE instance_id = :instance_id"),
+            {"instance_id": target.instance_id},
+        )
+        await session.execute(
+            text(
+                "UPDATE instance_audit SET deletion_reason = :reason, valid_termination = :valid_termination WHERE instance_id = :instance_id"
+            ),
+            {
+                "instance_id": target.instance_id,
+                "reason": reason,
+                "valid_termination": valid_termination,
+            },
+        )
+
+        job = (
+            (await session.execute(select(Job).where(Job.instance_id == target.instance_id)))
+            .unique()
+            .scalar_one_or_none()
+        )
+        if job and not job.finished_at:
+            job.status = "error"
+            job.error_detail = f"Instance failed monitoring probes: {reason=}"
+            job.miner_terminated = True
+            job.finished_at = func.now()
+            await notify_job_deleted(job)
+
+        await session.commit()
+
+    await cleanup_instance_conn_tracking(target.chute_id, target.instance_id)
+
+
+async def purge_and_notify(target, reason, valid_termination=False):
+    """Purge an instance and broadcast a deletion notification."""
+    await purge(target, reason=reason, valid_termination=valid_termination)
+    await notify_deleted(
+        target,
+        message=f"Instance {target.instance_id} of miner {target.miner_hotkey} deleted: {reason}",
+    )
+    await invalidate_instance_cache(target.chute_id, instance_id=target.instance_id)

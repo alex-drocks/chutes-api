@@ -60,6 +60,7 @@ from api.instance.util import (
     create_launch_jwt_v2,
     generate_fs_key,
     get_instance_by_chute_and_id,
+    get_server_for_gpus,
     create_launch_jwt,
     create_job_jwt,
     load_launch_config_from_jwt,
@@ -595,7 +596,7 @@ async def _check_scalable_private(db, chute, miner):
     row = result.mappings().one()
     if (
         row["valid_terminations"] + row["invalid_terminations"] >= 10
-        and row["invalid_ratio"] >= 0.3
+        and row["invalid_ratio"] >= 0.5
     ):
         message = f"UNSTABLE MINER: miner {miner.hotkey} denied private chute {chute_id} due to instability: {row}"
         logger.warning(message)
@@ -604,8 +605,7 @@ async def _check_scalable_private(db, chute, miner):
             detail=message,
         )
 
-    # Require the miner to have at least one activated public chute instance
-    # from one week ago or older before allowing private chute instances.
+    # Require some public chute history.
     public_history_query = text("""
         SELECT COUNT(*) AS public_count
         FROM instance_audit ia
@@ -613,7 +613,7 @@ async def _check_scalable_private(db, chute, miner):
         WHERE ia.miner_hotkey = :hotkey
           AND c.public IS TRUE
           AND ia.activated_at IS NOT NULL
-          AND ia.activated_at <= NOW() - INTERVAL '7 days'
+          AND ia.activated_at <= NOW() - INTERVAL '3 days'
      """)
     public_result = (
         (await db.execute(public_history_query, {"hotkey": miner.hotkey})).mappings().first()
@@ -630,7 +630,7 @@ async def _check_scalable_private(db, chute, miner):
             ),
         )
 
-    # Require at least 3 active public instances with >= 8 total GPUs.
+    # Require some minimal public chute participation.
     active_public_query = text("""
         SELECT
             COUNT(DISTINCT i.instance_id) AS active_instance_count,
@@ -647,17 +647,17 @@ async def _check_scalable_private(db, chute, miner):
     )
     instance_count = active_public_result["active_instance_count"] if active_public_result else 0
     total_gpus = active_public_result["total_gpus"] if active_public_result else 0
-    if instance_count < 3 or total_gpus < 8:
+    if instance_count < 2 or total_gpus < 4:
         logger.warning(
             f"PRIVATE_GATE: miner {miner.hotkey} denied private chute {chute_id}: "
             f"{instance_count} active public instances with {total_gpus} GPUs "
-            f"(minimum 3 instances and 8 GPUs required)"
+            f"(minimum 2 instances and 4 GPUs required)"
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                f"You must have at least 3 active public (non-private) chute instances "
-                f"with a total of at least 8 GPUs to deploy private chutes "
+                f"You must have at least 2 active public (non-private) chute instances "
+                f"with a total of at least 4 GPUs to deploy private chutes "
                 f"(currently have {instance_count} instances with {total_gpus} GPUs)"
             ),
         )
@@ -1623,6 +1623,14 @@ async def _validate_tee_launch_config_instance(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Can not claim a TEE launch config for a non-TEE chute.",
+        )
+
+    # Deny launches on servers in TEE maintenance mode before creating any instance/node records.
+    server = await get_server_for_gpus(db, [g["uuid"] for g in args.gpus])
+    if server and server.in_maintenance:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Server {server.name} is in TEE maintenance mode and cannot accept new instances.",
         )
 
     launch_config, nodes, instance, validator_pubkey = await _validate_launch_config_instance(

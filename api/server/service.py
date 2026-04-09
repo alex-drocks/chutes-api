@@ -2,11 +2,9 @@
 Core server management and TDX attestation logic.
 """
 
-import asyncio
 import pybase64 as base64
 from datetime import datetime, timezone, timedelta
 import json
-import tempfile
 from typing import Dict, Any, Optional
 from fastapi import HTTPException, Header, Request, status
 from loguru import logger
@@ -19,7 +17,7 @@ from api.constants import NONCE_HEADER, NoncePurpose
 from api.gpu import SUPPORTED_GPUS
 from api.node.util import _track_nodes
 from api.server.client import TeeServerClient
-from api.server.quote import BootTdxQuote, RuntimeTdxQuote, TdxQuote, TdxVerificationResult
+from api.server.quote import BootTdxQuote, RuntimeTdxQuote, TdxQuote
 from api.server.schemas import (
     Server,
     ServerAttestation,
@@ -27,12 +25,17 @@ from api.server.schemas import (
     BootAttestationArgs,
     RuntimeAttestationArgs,
     ServerArgs,
+    TeeUpgradeWindow,
+    MaintenanceReason,
+    SoleSurvivorBlock,
+    PreflightResult,
+    UpgradeWindowInfo,
+    ConfirmMaintenanceResult,
 )
 from api.server.exceptions import (
     AttestationError,
     GetEvidenceError,
     GpuEvidenceError,
-    InvalidClientCertError,
     InvalidGpuEvidenceError,
     InvalidQuoteError,
     MeasurementMismatchError,
@@ -44,19 +47,18 @@ from api.server.exceptions import (
 )
 from api.server.util import (
     _track_server,
-    extract_report_data,
-    verify_measurements,
     get_matching_measurement_config,
     generate_nonce,
     get_nonce_expiry_seconds,
-    verify_quote_signature,
-    verify_result,
+    verify_quote,
+    verify_gpu_evidence,
     sync_server_luks_passphrases,
     get_public_key_hash,
     cert_to_base64_der,
     validate_user_nonce,
 )
-from api.instance.schemas import Instance
+from api.instance.schemas import Instance, instance_nodes
+from api.instance.util import purge_and_notify
 from api.chute.schemas import Chute
 from api.node.schemas import Node
 from sqlalchemy.orm import joinedload
@@ -179,29 +181,6 @@ def validate_request_nonce(purpose: NoncePurpose):
     return _validate_request_nonce
 
 
-async def verify_quote(
-    quote: TdxQuote, expected_nonce: str, expected_cert_hash: str
-) -> TdxVerificationResult:
-    # Validate nonce
-    nonce, cert_hash = extract_report_data(quote)
-
-    if nonce != expected_nonce:
-        logger.info(f"Nonce error:  {nonce} =/= {expected_nonce}")
-        raise NonceError("Quote nonce does not match expected nonce.")
-
-    if cert_hash != expected_cert_hash:
-        raise InvalidClientCertError()
-
-    # Verify the quote using DCAP
-    result = await verify_quote_signature(quote)
-    # Verify the quote against the result to ensure it was parsed properly
-    verify_result(quote, result)
-    # Verify the quote against configured MRTD/RMTRs
-    verify_measurements(quote)
-
-    return result
-
-
 def validate_gpus_for_measurements(quote: TdxQuote, gpus: list[NodeArgs]) -> None:
     """
     Validate that the provided GPUs match the expected GPUs for this measurement configuration.
@@ -241,31 +220,6 @@ def validate_gpus_for_measurements(quote: TdxQuote, gpus: list[NodeArgs]) -> Non
         f"GPU validation passed for measurement config '{measurement_config.name}': "
         f"{len(gpus)} GPUs of types {provided_gpu_ids}"
     )
-
-
-async def verify_gpu_evidence(evidence: list[Dict[str, str]], expected_nonce: str) -> None:
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as fp:
-            json.dump(evidence, fp)
-            fp.flush()
-
-            verify_gpus_cmd = ["chutes-nvattest", "--nonce", expected_nonce, "--evidence", fp.name]
-
-            process = await asyncio.create_subprocess_exec(*verify_gpus_cmd)
-
-            await asyncio.gather(process.wait())
-
-            if process.returncode != 0:
-                raise InvalidGpuEvidenceError()
-
-            logger.info("GPU evidence verified successfully.")
-
-    except FileNotFoundError as e:
-        logger.error(f"Failed to verify GPU evidence.  chutes-nvattest command not found?:\n{e}")
-        raise GpuEvidenceError("Failed to verify GPU evidence.")
-    except Exception as e:
-        logger.error(f"Unexepected exception encoutnered verifying GPU evidence:\n{e}")
-        raise GpuEvidenceError("Encountered an unexpected exception verifying GPU evidence.")
 
 
 async def generate_and_store_boot_token(miner_hotkey: str, vm_name: str) -> str:
@@ -328,6 +282,8 @@ async def process_boot_attestation(
         boot_attestation = BootAttestation(
             quote_data=args.quote,
             server_ip=server_ip,
+            miner_hotkey=args.miner_hotkey,
+            vm_name=args.vm_name,
             measurement_version=measurement_config.version,
             created_at=func.now(),
             verified_at=func.now(),
@@ -338,6 +294,10 @@ async def process_boot_attestation(
         await db.refresh(boot_attestation)
 
         logger.success(f"Boot attestation successful: {boot_attestation.attestation_id}")
+
+        await _handle_boot_version_update(
+            db, args.miner_hotkey, args.vm_name, measurement_config.version
+        )
 
         # Generate boot token for this verified VM
         boot_token = await generate_and_store_boot_token(args.miner_hotkey, args.vm_name)
@@ -360,6 +320,8 @@ async def process_boot_attestation(
         boot_attestation = BootAttestation(
             quote_data=args.quote,
             server_ip=server_ip,
+            miner_hotkey=args.miner_hotkey,
+            vm_name=args.vm_name,
             verification_error=str(e.detail),
             measurement_version=measurement_version,
             created_at=func.now(),
@@ -370,6 +332,43 @@ async def process_boot_attestation(
 
         logger.error(f"Boot attestation failed: {str(e)}")
         raise
+
+
+async def _handle_boot_version_update(
+    db: AsyncSession, miner_hotkey: str, vm_name: str, measurement_version: str
+) -> None:
+    """Update server.version on every successful boot; clear maintenance slot if target met."""
+    try:
+        server = await get_server_by_name(db, miner_hotkey, vm_name)
+    except ServerNotFoundError:
+        return
+
+    server.version = measurement_version
+
+    if server.in_maintenance:
+        window = await db.get(TeeUpgradeWindow, server.maintenance_pending_window_id)
+        if (
+            window is not None
+            and semcomp(measurement_version, window.target_measurement_version) >= 0
+        ):
+            logger.info(
+                f"Maintenance complete for server {server.server_id}: "
+                f"version {measurement_version} meets target {window.target_measurement_version}"
+            )
+            server.maintenance_pending_window_id = None
+        elif window is not None:
+            logger.warning(
+                f"Boot attestation for server {server.server_id} has version {measurement_version} "
+                f"but target is {window.target_measurement_version}; maintenance not complete"
+            )
+        else:
+            logger.warning(
+                f"Server {server.server_id} has stale maintenance_pending_window_id "
+                f"pointing to missing window; clearing"
+            )
+            server.maintenance_pending_window_id = None
+
+    await db.commit()
 
 
 async def register_server(db: AsyncSession, args: ServerArgs, miner_hotkey: str):
@@ -390,7 +389,11 @@ async def register_server(db: AsyncSession, args: ServerArgs, miner_hotkey: str)
                 setattr(gpu, key, gpu_info.get(key))
 
         # Start verification process (pass GPUs for validation)
-        await verify_server(db, server, miner_hotkey, gpus=args.gpus)
+        measurement_version = await verify_server(db, server, miner_hotkey, gpus=args.gpus)
+
+        if measurement_version is not None:
+            server.version = measurement_version
+            await db.commit()
 
         # Track nodes once verified
         await _track_nodes(db, miner_hotkey, server.server_id, args.gpus, "0", func.now())
@@ -433,15 +436,11 @@ async def register_server(db: AsyncSession, args: ServerArgs, miner_hotkey: str)
 
 async def verify_server(
     db: AsyncSession, server: Server, miner_hotkey: str, gpus: list[NodeArgs]
-) -> None:
+) -> Optional[str]:
     """
     Verify server attestation and validate GPUs match measurement configuration.
 
-    Args:
-        db: Database session
-        server: Server to verify
-        miner_hotkey: Miner hotkey
-        gpus: List of GPUs to validate against measurement configuration
+    Returns the measurement_version string on success, None on failure.
     """
     failure_reason = ""
     quote = None
@@ -483,6 +482,8 @@ async def verify_server(
         db.add(server_attestation)
         await db.commit()
         await db.refresh(server_attestation)
+
+        return measurement_config.version
 
     except GetEvidenceError as e:
         failure_reason = "Failed to get attestation evidence."
@@ -1028,3 +1029,216 @@ async def get_chute_instances_evidence(
             failed_instance_ids.append(instance.instance_id)
 
     return (evidence_list, failed_instance_ids)
+
+
+# ---------------------------------------------------------------------------
+# TEE Maintenance Window
+# ---------------------------------------------------------------------------
+
+
+async def get_active_upgrade_window(
+    db: AsyncSession,
+) -> Optional[TeeUpgradeWindow]:
+    """Return the active tee_upgrade_windows row (start <= now <= end), or None."""
+    now = func.now()
+    query = (
+        select(TeeUpgradeWindow)
+        .where(
+            TeeUpgradeWindow.upgrade_window_start <= now,
+            TeeUpgradeWindow.upgrade_window_end >= now,
+        )
+        .order_by(TeeUpgradeWindow.created_at.desc())
+    )
+    result = await db.execute(query)
+    rows = result.scalars().all()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        logger.warning(
+            f"Multiple overlapping tee_upgrade_windows rows active ({len(rows)}); "
+            f"using most recently created: {rows[0].id}"
+        )
+    return rows[0]
+
+
+async def _get_instances_on_server(db: AsyncSession, server_id: str) -> list[Instance]:
+    """Return all instances hosted on a server via Instance → instance_nodes → Node → Server."""
+    query = (
+        select(Instance)
+        .join(instance_nodes, Instance.instance_id == instance_nodes.c.instance_id)
+        .join(Node, instance_nodes.c.node_id == Node.uuid)
+        .where(Node.server_id == server_id)
+        .distinct()
+    )
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def _find_sole_survivor_chutes(
+    db: AsyncSession, instances: list[Instance]
+) -> list[SoleSurvivorBlock]:
+    """For each instance, check if it is the only active instance globally for its chute.
+
+    Returns a list of SoleSurvivorBlock for blocking sole survivors.
+    """
+    blocking: list[SoleSurvivorBlock] = []
+    seen_chutes: set[str] = set()
+    for inst in instances:
+        if inst.chute_id in seen_chutes:
+            continue
+        seen_chutes.add(inst.chute_id)
+        count_query = (
+            select(func.count())
+            .select_from(Instance)
+            .where(
+                Instance.chute_id == inst.chute_id,
+                Instance.active.is_(True),
+                Instance.instance_id != inst.instance_id,
+            )
+        )
+        result = await db.execute(count_query)
+        other_active = result.scalar() or 0
+        if other_active == 0:
+            blocking.append(SoleSurvivorBlock(chute_id=inst.chute_id, instance_id=inst.instance_id))
+    return blocking
+
+
+async def _count_active_maintenance_slots(
+    db: AsyncSession, miner_hotkey: str, active_window: TeeUpgradeWindow
+) -> int:
+    """Count servers for this miner that are in maintenance for the given active window."""
+    query = (
+        select(func.count())
+        .select_from(Server)
+        .where(
+            Server.miner_hotkey == miner_hotkey,
+            Server.maintenance_pending_window_id == active_window.id,
+        )
+    )
+    result = await db.execute(query)
+    return result.scalar() or 0
+
+
+async def preflight_maintenance(
+    db: AsyncSession, server: Server, miner_hotkey: str
+) -> PreflightResult:
+    """Read-only eligibility check for entering maintenance on a server."""
+    denial_reasons: list[MaintenanceReason] = []
+    blocking: list[SoleSurvivorBlock] = []
+    limit = 1
+    current_slots = 0
+    active_window: Optional[TeeUpgradeWindow] = None
+
+    if not server.is_tee:
+        denial_reasons.append(MaintenanceReason(reason="not_tee"))
+
+    if not denial_reasons:
+        active_window = await get_active_upgrade_window(db)
+        if active_window is None:
+            denial_reasons.append(MaintenanceReason(reason="no_active_window"))
+
+    if active_window is not None:
+        limit = active_window.max_concurrent_per_miner
+
+        if (
+            server.version is not None
+            and semcomp(server.version, active_window.target_measurement_version) >= 0
+        ):
+            denial_reasons.append(
+                MaintenanceReason(
+                    reason="already_at_target",
+                    current_version=server.version,
+                    target_version=active_window.target_measurement_version,
+                )
+            )
+
+        if server.in_maintenance:
+            if server.maintenance_pending_window_id == active_window.id:
+                denial_reasons.append(
+                    MaintenanceReason(
+                        reason="maintenance_pending",
+                        current_version=server.version,
+                        target_version=active_window.target_measurement_version,
+                        window_id=active_window.id,
+                    )
+                )
+            else:
+                server.maintenance_pending_window_id = None
+
+        current_slots = await _count_active_maintenance_slots(db, miner_hotkey, active_window)
+        if current_slots >= limit:
+            denial_reasons.append(
+                MaintenanceReason(
+                    reason="concurrency_cap",
+                    current_slots=current_slots,
+                    limit=limit,
+                )
+            )
+
+        instances = await _get_instances_on_server(db, server.server_id)
+        blocking = await _find_sole_survivor_chutes(db, instances)
+        if blocking:
+            denial_reasons.append(
+                MaintenanceReason(
+                    reason="sole_survivor",
+                    blocking=[b.model_dump() for b in blocking],
+                )
+            )
+
+    return PreflightResult(
+        eligible=len(denial_reasons) == 0,
+        denial_reasons=denial_reasons,
+        blocking_chute_ids=blocking,
+        current_slots=current_slots,
+        limit=limit,
+    )
+
+
+async def confirm_maintenance(
+    db: AsyncSession, server: Server, miner_hotkey: str
+) -> ConfirmMaintenanceResult:
+    """Enter maintenance: re-validate, set pending window, and auto-purge instances.
+
+    Raises HTTPException (409/403) on failure.
+    """
+    preflight = await preflight_maintenance(db, server, miner_hotkey)
+    if not preflight.eligible:
+        reason_codes = {r.reason for r in preflight.denial_reasons}
+        conflict_reasons = {"sole_survivor", "concurrency_cap", "maintenance_pending"}
+        if reason_codes & conflict_reasons:
+            status_code = status.HTTP_409_CONFLICT
+        else:
+            status_code = status.HTTP_403_FORBIDDEN
+        raise HTTPException(status_code=status_code, detail=preflight.model_dump())
+
+    active_window = await get_active_upgrade_window(db)
+    server.maintenance_pending_window_id = active_window.id
+    await db.commit()
+    await db.refresh(server)
+
+    instances = await _get_instances_on_server(db, server.server_id)
+    purged_ids: list[str] = []
+    for inst in instances:
+        try:
+            await purge_and_notify(
+                inst,
+                reason="maintenance - server entering TEE upgrade window",
+                valid_termination=True,
+            )
+            purged_ids.append(inst.instance_id)
+        except Exception:
+            logger.error(
+                f"Failed to purge instance {inst.instance_id} during maintenance", exc_info=True
+            )
+
+    return ConfirmMaintenanceResult(
+        server_id=server.server_id,
+        purged_instance_ids=purged_ids,
+        window=UpgradeWindowInfo(
+            id=active_window.id,
+            target_measurement_version=active_window.target_measurement_version,
+            upgrade_window_start=str(active_window.upgrade_window_start),
+            upgrade_window_end=str(active_window.upgrade_window_end),
+            max_concurrent_per_miner=active_window.max_concurrent_per_miner,
+        ),
+    )

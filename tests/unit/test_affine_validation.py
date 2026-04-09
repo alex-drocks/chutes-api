@@ -34,7 +34,7 @@ def test_valid_sglang_chute_with_engine_args() -> None:
             shutdown_after_seconds=28800,
             scaling_threshold=0.5,
             engine_args=(
-                "--mem-fraction-static 0.85 "
+                "--mem-fraction-static 0.8 "
                 "--context-length 36384"
             ),
         )
@@ -63,7 +63,7 @@ def test_valid_vllm_chute_with_engine_args() -> None:
             shutdown_after_seconds=28800,
             scaling_threshold=0.5,
             engine_args=(
-                "--mem-fraction-static 0.85 "
+                "--mem-fraction-static 0.8 "
                 "--context-length 36384"
             ),
         )
@@ -78,7 +78,6 @@ def test_valid_allowed_env_vars() -> None:
         from chutes.chute.template.sglang import build_sglang_chute
 
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
-        os.environ["LMCACHE_USE_EXPERIMENTAL"] = "true"
 
         chute = build_sglang_chute(
             username="exampleuser",
@@ -121,7 +120,7 @@ def test_invalid_engine_args_trust_remote_code() -> None:
             engine_args="--trust-remote-code true",
         )
         """,
-        "engine_args string cannot contain 'trust_remote_code' or 'trust-remote-code'",
+        "engine_args cannot contain 'trust_remote_code' or 'trust-remote-code'",
     )
 
 
@@ -134,10 +133,58 @@ def test_invalid_engine_args_concatenated_flags() -> None:
             username="exampleuser",
             model_name="foo/affine-test",
             image="chutes/vllm:nightly-2026010900",
-            engine_args="--mem-fraction-static 0.85--context-length 36384",
+            engine_args="--mem-fraction-static 0.8--context-length 36384",
         )
         """,
         "engine_args appears to contain concatenated flags",
+    )
+
+
+def test_invalid_engine_args_mem_fraction_static_too_high() -> None:
+    assert_invalid(
+        """
+        from chutes.chute.template.sglang import build_sglang_chute
+
+        chute = build_sglang_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/sglang:nightly-2025121000",
+            engine_args="--mem-fraction-static 0.9 --context-length 36384",
+        )
+        """,
+        "--mem-fraction-static value 0.9 is too high (must be < 0.85",
+    )
+
+
+def test_invalid_engine_args_mem_fraction_static_at_boundary() -> None:
+    assert_invalid(
+        """
+        from chutes.chute.template.vllm import build_vllm_chute
+
+        chute = build_vllm_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/vllm:nightly-2026010900",
+            engine_args="--mem-fraction-static 0.85",
+        )
+        """,
+        "--mem-fraction-static value 0.85 is too high (must be < 0.85",
+    )
+
+
+def test_invalid_engine_args_gpu_memory_utilization_too_high() -> None:
+    assert_invalid(
+        """
+        from chutes.chute.template.vllm import build_vllm_chute
+
+        chute = build_vllm_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/vllm:nightly-2026010900",
+            engine_args="--gpu-memory-utilization 0.95",
+        )
+        """,
+        "--gpu-memory-utilization value 0.95 is too high (must be < 0.85",
     )
 
 

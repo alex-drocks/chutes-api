@@ -46,7 +46,7 @@ from api.instance.schemas import Instance, LaunchConfig
 from api.instance.util import invalidate_instance_cache
 from api.metrics.util import reconcile_connection_counts
 from api.capacity_log.schemas import CapacityLog
-from watchtower import purge, purge_and_notify  # noqa
+from api.instance.util import purge, purge_and_notify  # noqa
 from api.constants import (
     UNDERUTILIZED_CAP,
     UTILIZATION_SCALE_UP,
@@ -224,11 +224,6 @@ STARVING_HISTORY_KEY_PREFIX = "starving:"
 
 # Higher min instance counts for some chutes...
 LIMIT_OVERRIDES = {
-    "7858c162-4f52-5a11-868e-ddef2c04f4d8": 1,
-    "8f3bb827-b9e6-5487-88bc-ee8f0c6f5810": 1,
-    "6320ab82-9e94-5d63-8e38-d136f61dc157": 1,
-    "18aab253-1f97-5279-bef7-499f1f837653": 1,
-    "c8fd098a-6d29-5a9c-b25a-ea5764b89441": 1,
     "ac059e33-eb27-541c-b9a9-24b214036475": 7,
 }
 FAILSAFE = {
@@ -409,7 +404,8 @@ async def instance_cleanup():
             )
             logger.warning(f"  {instance.verified=} {instance.active=}")
             await purge_and_notify(
-                instance, reason="Instance failed to verify within a reasonable amount of time"
+                instance,
+                reason="autoscaler - instance failed to verify within a reasonable amount of time",
             )
             total += 1
         if total:
@@ -948,6 +944,97 @@ async def refresh_instance_compute_multipliers(chute_ids: List[str] = None):
             logger.success(f"Updated compute_multiplier for {len(updates)} instances")
         else:
             logger.info("No compute_multiplier updates needed")
+
+
+async def rotate_private_instance_compute_history():
+    """
+    For long-running private instances, periodically close the current open
+    compute history record and create a new one with the same multiplier.
+
+    This caps the penalty for improper deletion to ~6 hours of lost incentives
+    instead of the entire instance lifetime.
+    """
+    async with get_session() as session:
+        await session.execute(text("SET LOCAL statement_timeout = '10s'"))
+        result = await session.execute(
+            text("""
+                SELECT ich.instance_id
+                FROM instance_compute_history ich
+                JOIN instances i ON i.instance_id = ich.instance_id
+                WHERE ich.ended_at IS NULL
+                  AND i.billed_to IS NOT NULL
+                  AND i.active = true
+                  AND ich.started_at <= NOW() - INTERVAL '6 hours'
+            """)
+        )
+        candidate_instance_ids = [row.instance_id for row in result.fetchall()]
+
+    if not candidate_instance_ids:
+        logger.info("No private instance compute history records to rotate")
+        return
+
+    rotated = 0
+    for instance_id in candidate_instance_ids:
+        try:
+            async with get_session() as session:
+                await session.execute(text("SET LOCAL statement_timeout = '10s'"))
+                row = await session.execute(
+                    text("""
+                        SELECT id, compute_multiplier
+                        FROM instance_compute_history
+                        WHERE instance_id = :instance_id
+                          AND ended_at IS NULL
+                          AND started_at <= NOW() - INTERVAL '6 hours'
+                        FOR UPDATE
+                    """),
+                    {"instance_id": instance_id},
+                )
+                record = row.fetchone()
+                if not record:
+                    continue
+
+                inst = await session.execute(
+                    text("""
+                        SELECT 1 FROM instances
+                        WHERE instance_id = :instance_id
+                          AND active = true
+                    """),
+                    {"instance_id": instance_id},
+                )
+                if not inst.fetchone():
+                    continue
+
+                await session.execute(
+                    text("""
+                        UPDATE instance_compute_history
+                        SET ended_at = NOW()
+                        WHERE id = :record_id
+                    """),
+                    {"record_id": record.id},
+                )
+                await session.execute(
+                    text("""
+                        INSERT INTO instance_compute_history
+                            (instance_id, compute_multiplier, started_at)
+                        VALUES (:instance_id, :compute_multiplier, NOW())
+                    """),
+                    {
+                        "instance_id": instance_id,
+                        "compute_multiplier": record.compute_multiplier,
+                    },
+                )
+
+                await session.commit()
+                rotated += 1
+        except Exception:
+            logger.warning(
+                f"Failed to rotate compute history for instance {instance_id}", exc_info=True
+            )
+
+    if rotated:
+        logger.success(f"Rotated compute history for {rotated} private instances")
+    else:
+        logger.info("No private instance compute history records to rotate")
 
 
 async def _log_thrashing_instances():
@@ -2692,6 +2779,8 @@ async def _perform_autoscale_impl(
         # Refresh instance compute_multipliers (only if requested - should run hourly, not every run)
         if refresh_multipliers:
             await refresh_instance_compute_multipliers()
+            # XXX disabled for the time-being.
+            # await rotate_private_instance_compute_history()
 
         # Manage rolling updates (replacement + hard cap enforcement)
         # In soft_mode, still manage rolling updates (they're not scale-downs, they're version transitions)
@@ -3107,7 +3196,7 @@ async def execute_downsizing(to_downsize: List[Tuple[str, int, Set[str]]], db_no
             valid_candidates = []
             for inst in active_instances:
                 if len(inst.nodes) != (chute.node_selector.get("gpu_count") or 1):
-                    await purge_and_notify(inst, "Instance node count mismatch")
+                    await purge_and_notify(inst, "autoscaler - instance node count mismatch")
                     num_to_remove -= 1
                     instances_removed += 1
                 elif db_now.replace(tzinfo=None) - inst.activated_at.replace(
@@ -3140,7 +3229,7 @@ async def execute_downsizing(to_downsize: List[Tuple[str, int, Set[str]]], db_no
                     f"Downscaling {chute_id}: removing {targeted_instance.instance_id} ({targeted_instance.nodes[0].gpu_identifier if targeted_instance.nodes else 'unknown'})"
                 )
                 await purge_and_notify(
-                    targeted_instance, "Autoscaler adjustment", valid_termination=True
+                    targeted_instance, "autoscaler - downscale adjustment", valid_termination=True
                 )
                 await invalidate_instance_cache(chute_id, targeted_instance.instance_id)
                 instances_removed += 1
