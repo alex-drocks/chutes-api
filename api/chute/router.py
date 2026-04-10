@@ -93,7 +93,7 @@ from api.util import (
     notify_deleted,
     image_supports_cllmv,
 )
-from api.affine import check_affine_code
+from api.affine import check_affine_code, force_affine_engine_args
 from api.guesser import guesser
 from aiocache import cached, Cache
 from api.chute.teeify import transform_for_tee
@@ -2056,6 +2056,11 @@ async def deploy_chute(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=message,
             )
+
+        # Force required engine_args values for affine chutes.
+        forced_code = force_affine_engine_args(chute_args.code)
+        if forced_code is not None:
+            chute_args.code = forced_code
 
         # Make sure egress is disabled (checked in code also, but...)
         if chute_args.allow_external_egress:

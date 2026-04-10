@@ -1,5 +1,5 @@
 import textwrap
-from api.affine import check_affine_code
+from api.affine import check_affine_code, force_affine_engine_args
 
 
 def assert_valid(code: str) -> None:
@@ -388,3 +388,140 @@ def test_invalid_os_environ_setdefault() -> None:
         """,
         "os.environ.setdefault is not allowed",
     )
+
+
+# --- force_affine_engine_args tests ---
+
+
+def test_force_sglang_adds_missing_engine_args() -> None:
+    code = textwrap.dedent("""
+        from chutes.chute.template.sglang import build_sglang_chute
+
+        chute = build_sglang_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/sglang:nightly-2025121000",
+        )
+    """)
+    result = force_affine_engine_args(code)
+    assert result is not None
+    assert "--mem-fraction-static 0.8" in result
+    assert "--chunked-prefill-size 4096" in result
+
+
+def test_force_vllm_adds_missing_engine_args() -> None:
+    code = textwrap.dedent("""
+        from chutes.chute.template.vllm import build_vllm_chute
+
+        chute = build_vllm_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/vllm:nightly-2026010900",
+        )
+    """)
+    result = force_affine_engine_args(code)
+    assert result is not None
+    assert "--gpu-memory-utilization 0.8" in result
+    assert "--max-num-batched-tokens 4096" in result
+
+
+def test_force_replaces_conflicting_numeric_values() -> None:
+    code = textwrap.dedent("""
+        from chutes.chute.template.sglang import build_sglang_chute
+
+        chute = build_sglang_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/sglang:nightly-2025121000",
+            engine_args="--mem-fraction-static 0.95 --chunked-prefill-size 2048",
+        )
+    """)
+    result = force_affine_engine_args(code)
+    assert result is not None
+    assert "--mem-fraction-static 0.8" in result
+    assert "--chunked-prefill-size 4096" in result
+    assert "0.95" not in result
+    assert "2048" not in result
+
+
+def test_force_replaces_non_numeric_values() -> None:
+    code = textwrap.dedent("""
+        from chutes.chute.template.vllm import build_vllm_chute
+
+        chute = build_vllm_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/vllm:nightly-2026010900",
+            engine_args="--gpu-memory-utilization auto --max-num-batched-tokens auto",
+        )
+    """)
+    result = force_affine_engine_args(code)
+    assert result is not None
+    assert "--gpu-memory-utilization 0.8" in result
+    assert "--max-num-batched-tokens 4096" in result
+    assert "auto" not in result
+
+
+def test_force_preserves_other_flags() -> None:
+    code = textwrap.dedent("""
+        from chutes.chute.template.sglang import build_sglang_chute
+
+        chute = build_sglang_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/sglang:nightly-2025121000",
+            engine_args="--context-length 36384 --mem-fraction-static 0.8 --chunked-prefill-size 4096",
+        )
+    """)
+    result = force_affine_engine_args(code)
+    # No change needed — should return original code.
+    assert result == code
+    assert "--context-length" in result
+
+
+def test_force_returns_none_for_no_builder() -> None:
+    code = textwrap.dedent("""
+        x = 1 + 2
+    """)
+    assert force_affine_engine_args(code) is None
+
+
+def test_force_returns_none_for_syntax_error() -> None:
+    assert force_affine_engine_args("def (((") is None
+
+
+def test_force_no_duplicate_flags() -> None:
+    code = textwrap.dedent("""
+        from chutes.chute.template.vllm import build_vllm_chute
+
+        chute = build_vllm_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/vllm:nightly-2026010900",
+            engine_args="--gpu-memory-utilization 0.7 --max-num-batched-tokens 2048 --context-length 4096",
+        )
+    """)
+    result = force_affine_engine_args(code)
+    assert result is not None
+    assert result.count("--gpu-memory-utilization") == 1
+    assert result.count("--max-num-batched-tokens") == 1
+
+
+def test_force_targets_top_level_assignment_only() -> None:
+    """Only the top-level assignment to a builder call should be rewritten."""
+    code = textwrap.dedent("""
+        from chutes.chute.template.sglang import build_sglang_chute
+
+        chute = build_sglang_chute(
+            username="exampleuser",
+            model_name="foo/affine-test",
+            image="chutes/sglang:nightly-2025121000",
+            engine_args="--context-length 36384",
+        )
+    """)
+    result = force_affine_engine_args(code)
+    assert result is not None
+    assert "--mem-fraction-static 0.8" in result
+    assert "--chunked-prefill-size 4096" in result
+    # The original flag is preserved.
+    assert "--context-length" in result

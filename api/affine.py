@@ -600,3 +600,73 @@ def check_affine_code(code: str) -> tuple[bool, str]:
         return True, f"Valid chute file with {chute_assignment}"
     else:
         return True, "Valid chute file with Chute constructor"
+
+
+def _update_engine_args_str(engine_args: str, builder_name: str) -> str:
+    """
+    Ensure required flags are present in the engine_args string.
+    sglang: --mem-fraction-static 0.8 --chunked-prefill-size 4096
+    vllm:   --gpu-memory-utilization 0.8 --max-num-batched-tokens 4096
+    """
+    if builder_name == "build_sglang_chute":
+        mem_flag = "--mem-fraction-static"
+        prefill_flag = "--chunked-prefill-size"
+    else:
+        mem_flag = "--gpu-memory-utilization"
+        prefill_flag = "--max-num-batched-tokens"
+
+    for flag, default in [(mem_flag, "0.8"), (prefill_flag, "4096")]:
+        pattern = re.escape(flag) + r"\s+=?\s*\S+"
+        if re.search(pattern, engine_args):
+            engine_args = re.sub(pattern, f"{flag} {default}", engine_args)
+        else:
+            engine_args = engine_args.rstrip() + f" {flag} {default}"
+
+    # Fix concatenated flags and collapse double spaces.
+    engine_args = re.sub(r"(?<=\S)(--)", r" \1", engine_args)
+    engine_args = re.sub(r"  +", " ", engine_args)
+    return engine_args.strip()
+
+
+def force_affine_engine_args(code: str) -> str | None:
+    """
+    Parse affine chute code, force required engine_args values, return updated code.
+    Returns None if no builder call found or code can't be parsed.
+
+    Only targets a top-level assignment whose value is a builder call,
+    matching the same pattern check_affine_code validates. Uses ast.unparse()
+    to regenerate source, which drops comments and reformats — acceptable
+    since affine code is machine-validated and structurally constrained.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    # Find the top-level `var = build_sglang_chute(...)` or `var = build_vllm_chute(...)`.
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if not isinstance(stmt.value, ast.Call):
+            continue
+        name = getattr(stmt.value.func, "id", None) or getattr(stmt.value.func, "attr", None)
+        if name not in ALLOWED_TEMPLATE_BUILDERS:
+            continue
+
+        node = stmt.value
+        # Find or create engine_args keyword.
+        for kw in node.keywords:
+            if kw.arg == "engine_args":
+                old_val = kw.value.value if isinstance(kw.value, ast.Constant) else ""
+                new_val = _update_engine_args_str(old_val, name)
+                if old_val.strip() == new_val.strip():
+                    return code  # No change needed.
+                kw.value = ast.Constant(value=new_val)
+                return ast.unparse(tree)
+
+        # No engine_args keyword exists — add one.
+        new_val = _update_engine_args_str("", name)
+        node.keywords.append(ast.keyword(arg="engine_args", value=ast.Constant(value=new_val)))
+        return ast.unparse(tree)
+
+    return None
