@@ -90,6 +90,7 @@ async def list_nodes(
             nodes_by_hotkey[node.miner_hotkey].append(
                 {
                     "gpu": node.gpu_identifier,
+                    "server_id": node.server_id,
                     "chute": (
                         {
                             "username": node.instance.chute.user.username
@@ -99,6 +100,7 @@ async def list_nodes(
                             if node.instance.chute.public
                             else "[private chute]",
                             "chute_id": node.instance.chute_id,
+                            "created_at": node.instance.created_at,
                             "verified": node.instance.verified,
                             "activated_at": node.instance.activated_at,
                             "instance_id": node.instance.instance_id,
