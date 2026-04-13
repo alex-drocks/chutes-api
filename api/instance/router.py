@@ -3060,6 +3060,7 @@ async def delete_instance(
     await db.execute(text(sql), params)
 
     await db.commit()
+    await invalidate_instance_cache(chute_id, instance_id=instance_id)
     await notify_deleted(instance)
 
     return {"instance_id": instance_id, "deleted": True}
