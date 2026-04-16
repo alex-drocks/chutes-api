@@ -2593,10 +2593,23 @@ async def update_common_attributes(
     Update readme, tagline, etc. (but not code, image, etc.).
     """
     chute = await get_one(chute_id_or_name)
-    if not chute or chute.user_id != current_user.user_id:
+    is_subnet_admin = chute and subnet_role_accessible(chute, current_user, admin=True)
+    if not chute or (chute.user_id != current_user.user_id and not is_subnet_admin):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Chute not found, or does not belong to you",
+        )
+    if is_subnet_admin:
+        # Subnet admins can only update disabled, scaling_threshold, and max_instances.
+        if any([args.tagline, args.readme, args.tool_description, args.logo_id]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Subnet admins may only update disabled, scaling_threshold, and max_instances.",
+            )
+        logger.warning(
+            f"Subnet admin triggered chute update: {current_user.user_id=} "
+            f"{current_user.username=} {chute.chute_id=} {chute.name=} "
+            f"disabled={args.disabled} scaling_threshold={args.scaling_threshold} max_instances={args.max_instances}"
         )
     chute = (
         (
@@ -2625,6 +2638,11 @@ async def update_common_attributes(
         chute.tool_description = args.tool_description
     if args.logo_id:
         chute.logo_id = args.logo_id
+
+    if args.max_instances is not None:
+        chute.max_instances = args.max_instances
+    if args.scaling_threshold is not None:
+        chute.scaling_threshold = args.scaling_threshold
 
     # Handle disabled field
     if args.disabled is not None:

@@ -33,8 +33,8 @@ class ChuteUpdateArgs(BaseModel):
     readme: Optional[str] = Field(default="", max_length=16384)
     tool_description: Optional[str] = Field(default="", max_length=16384)
     logo_id: Optional[str] = None
-    max_instances: Optional[int] = Field(default=1, ge=1, le=100)
-    scaling_threshold: Optional[float] = Field(default=0.75, ge=0.0, le=1.0)
+    max_instances: Optional[int] = Field(default=None, ge=1, le=100)
+    scaling_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     shutdown_after_seconds: Optional[int] = Field(default=300, ge=60, le=604800)
     disabled: Optional[bool] = None
 
