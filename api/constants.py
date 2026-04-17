@@ -92,8 +92,8 @@ BOUNTY_COOLDOWN_SECONDS = 600
 VLM_MAX_SIZE = 100 * 1024 * 1024
 
 # Private instance compute multiplier bonus.
-PRIVATE_INSTANCE_BONUS = 3
-INTEGRATED_SUBNET_BONUS = 4
+PRIVATE_INSTANCE_BONUS = 2
+INTEGRATED_SUBNET_BONUS = 3
 
 # TEE bonus.
 TEE_BONUS = 2.25
@@ -144,7 +144,7 @@ INTEGRATED_SUBNETS = {
         "max_public_chutes": 3,
     },
     "vocence": {
-        "netuid": 102,
+        "netuid": 78,
         "model_substring": "vocence",
         "max_public_chutes": 3,
     },
