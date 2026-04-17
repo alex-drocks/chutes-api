@@ -144,7 +144,7 @@ INTEGRATED_SUBNETS = {
         "max_public_chutes": 3,
     },
     "vocence": {
-        "netuid": 102,
+        "netuid": 78,
         "model_substring": "vocence",
         "max_public_chutes": 3,
     },
