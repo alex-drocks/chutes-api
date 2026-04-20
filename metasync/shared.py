@@ -145,4 +145,4 @@ async def get_scoring_data(interval: str = SCORING_INTERVAL):
 if __name__ == "__main__":
     import asyncio
 
-    asyncio.run(get_scoring_data(interval="7 days"))
+    asyncio.run(get_scoring_data(interval="1 day"))
