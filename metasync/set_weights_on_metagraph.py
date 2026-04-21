@@ -3,6 +3,8 @@ Calculates and schedules weights every SCORING_PERIOD
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+
 from async_substrate_interface import AsyncSubstrateInterface
 from loguru import logger
 from metasync.database import engine, Base
@@ -201,9 +203,23 @@ async def _get_and_set_weights(substrate: AsyncSubstrateInterface) -> bool:
     if success:
         logger.info("Weights set successfully.")
         return True
-    else:
-        logger.error("Failed to set weights :(")
-        return False
+
+    logger.error("Failed to set weights :(")
+    return False
+
+
+def _seconds_until_next_weight_window() -> float:
+    """Seconds until the top of the next UTC hour."""
+    now = datetime.now(timezone.utc)
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return (next_hour - now).total_seconds()
+
+
+async def _sleep_until_next_weight_window() -> None:
+    """Sleep until the start of the next UTC-aligned hourly weight-setting window."""
+    sleep_s = _seconds_until_next_weight_window()
+    logger.info(f"Next weight window in {sleep_s:.1f}s (top of next UTC hour)")
+    await asyncio.sleep(sleep_s)
 
 
 async def set_weights_periodically() -> None:
@@ -223,6 +239,8 @@ async def set_weights_periodically() -> None:
 
         consecutive_failures = 0
         while True:
+            await _sleep_until_next_weight_window()
+
             current_block = await _get_current_block(substrate)
             last_update_map = await _get_last_update(substrate, settings.netuid)
             last_updated = last_update_map.get(validator_uid, 0)
@@ -231,30 +249,42 @@ async def set_weights_periodically() -> None:
             logger.info(f"Last updated: {updated} blocks ago for uid: {validator_uid}")
 
             if updated < set_weights_interval_blocks:
-                blocks_to_sleep = set_weights_interval_blocks - updated + 1
                 logger.info(
-                    f"Last updated: {updated} - sleeping for {blocks_to_sleep} blocks as we set recently..."
+                    f"Updated {updated} blocks ago (<{set_weights_interval_blocks}); "
+                    "skipping this weight window"
                 )
-                await asyncio.sleep(12 * blocks_to_sleep)
                 continue
 
-            try:
+            deadline = datetime.now(timezone.utc) + timedelta(minutes=15)
+            attempt = 0
+            success = False
+            while not success:
+                attempt += 1
                 success = await _get_and_set_weights(substrate)
-            except Exception as e:
-                logger.error(f"Failed to set weights with error: {e}")
-                success = False
+                if success:
+                    break
+                remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+                if remaining <= 0:
+                    logger.error(f"Giving up on this window after {attempt} attempt(s)")
+                    break
+                retry_in = min(60, remaining)
+                logger.warning(
+                    f"Attempt {attempt} failed; retrying in {retry_in:.0f}s ({remaining:.0f}s budget remaining)"
+                )
+                await asyncio.sleep(retry_in)
 
             if success:
+                if consecutive_failures > 0:
+                    logger.info(
+                        f"Weight setting recovered after {consecutive_failures} missed window(s)"
+                    )
                 consecutive_failures = 0
-                logger.info("Successfully set weights!")
-                continue
-
-            consecutive_failures += 1
-            logger.info(
-                f"Failed to set weights {consecutive_failures} times in a row"
-                " - sleeping for 10 blocks before trying again..."
-            )
-            await asyncio.sleep(12 * 10)
+            else:
+                consecutive_failures += 1
+                logger.critical(
+                    f"WEIGHT_SET_FAILURE: failed to set weights for {consecutive_failures} "
+                    f"consecutive window(s) (~{consecutive_failures}h of missed updates)"
+                )
 
 
 async def main():
