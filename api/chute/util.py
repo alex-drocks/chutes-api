@@ -37,6 +37,7 @@ from api.constants import (
     DIFFUSION_PRICE_MULT_PER_STEP,
     PRIVATE_INSTANCE_BONUS,
     INTEGRATED_SUBNET_BONUS,
+    TEE_PRIVATE_INSTANCE_BONUS,
     TEE_BONUS,
     INTEGRATED_SUBNETS,
     DEFAULT_CACHE_DISCOUNT,
@@ -468,7 +469,10 @@ async def calculate_effective_compute_multiplier(
             if config["model_substring"] in chute.name.lower():
                 integrated = True
                 break
-        if integrated:
+        if chute.tee:
+            factors["private_tee"] = TEE_PRIVATE_INSTANCE_BONUS
+            total *= TEE_PRIVATE_INSTANCE_BONUS
+        elif integrated:
             factors["integrated_subnet"] = INTEGRATED_SUBNET_BONUS
             total *= INTEGRATED_SUBNET_BONUS
         else:

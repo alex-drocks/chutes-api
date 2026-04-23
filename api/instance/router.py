@@ -34,6 +34,7 @@ from api.constants import (
     HOTKEY_HEADER,
     AUTHORIZATION_HEADER,
     PRIVATE_INSTANCE_BONUS,
+    TEE_PRIVATE_INSTANCE_BONUS,
     INTEGRATED_SUBNETS,
     INTEGRATED_SUBNET_BONUS,
     NoncePurpose,
@@ -1463,7 +1464,12 @@ async def _validate_launch_config_instance(
             if config["model_substring"] in chute.name.lower():
                 integrated = True
                 break
-        bonus = PRIVATE_INSTANCE_BONUS if not integrated else INTEGRATED_SUBNET_BONUS
+        if chute.tee:
+            bonus = TEE_PRIVATE_INSTANCE_BONUS
+        elif integrated:
+            bonus = INTEGRATED_SUBNET_BONUS
+        else:
+            bonus = PRIVATE_INSTANCE_BONUS
         instance.compute_multiplier *= bonus
         logger.info(
             f"Adding private instance bonus value {bonus=} to {instance.instance_id} "
