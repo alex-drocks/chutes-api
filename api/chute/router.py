@@ -91,7 +91,7 @@ from api.util import (
     notify_deleted,
     image_supports_cllmv,
 )
-from api.affine import check_affine_code
+from api.affine import check_affine_code, force_affine_engine_args
 from api.guesser import guesser
 from aiocache import cached, Cache
 
@@ -2144,6 +2144,15 @@ async def deploy_chute(
                         f"{min_vram_required=} {node_selector_min_vram=}, please fix and try again."
                     ),
                 )
+
+        # Force engine_args: mem-fraction, prefill size, and TP/DP for TEE.
+        gpu_count = chute_args.node_selector.gpu_count or 1
+        forced_code = force_affine_engine_args(
+            chute_args.code,
+            gpu_count=gpu_count if chute_args.tee else None,
+        )
+        if forced_code is not None:
+            chute_args.code = forced_code
 
         logger.success(
             f"Affine deployment initiated: {chute_args.name=} from {current_user.hotkey=}, "

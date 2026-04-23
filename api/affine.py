@@ -764,7 +764,7 @@ def transform_code_for_tee(code: str, gpu_count: int, is_affine: bool) -> str | 
         return None
 
     ast.fix_missing_locations(tree)
-    new_code = ast.unparse(tree)
+    new_code = "\n".join(ast.unparse(stmt) for stmt in tree.body)
 
     if is_affine:
         forced = force_affine_engine_args(new_code, gpu_count=gpu_count)
