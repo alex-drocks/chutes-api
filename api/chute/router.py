@@ -91,7 +91,7 @@ from api.util import (
     notify_deleted,
     image_supports_cllmv,
 )
-from api.affine import check_affine_code, transform_code_for_tee
+from api.affine import check_affine_code
 from api.guesser import guesser
 from aiocache import cached, Cache
 
@@ -1614,15 +1614,15 @@ async def _deploy_chute(
     if isinstance(chute_args.node_selector, dict):
         chute_args.node_selector = NodeSelector(**chute_args.node_selector)
 
-    # Force TEE and pro_6000 node selector for all integrated subnet chutes.
-    # Must happen after normalization but before fee estimation so pricing
-    # and validation reflect the actual deployed hardware.
     if is_subnet_model:
-        chute_args.tee = True
-        chute_args.node_selector = NodeSelector(
-            gpu_count=chute_args.node_selector.gpu_count,
-            include=["pro_6000"],
-        )
+        include_gpus = [gpu.lower() for gpu in (chute_args.node_selector.include or [])]
+        if not chute_args.tee or include_gpus != ["pro_6000"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "TEE with node_selector include=['pro_6000'] is required now for integrated subnet chutes."
+                ),
+            )
 
     if len(chute_args.node_selector.exclude or []) > 5:
         raise HTTPException(
@@ -2149,18 +2149,6 @@ async def deploy_chute(
             f"Affine deployment initiated: {chute_args.name=} from {current_user.hotkey=}, "
             "code check and prelim model config/node selector config passed."
         )
-
-    # Rewrite code AST for subnet models so the stored code reflects the
-    # forced tee=True and node_selector=pro_6000 (and TP/DP for affine).
-    if is_subnet_model:
-        is_affine = "affine" in chute_args.name.lower()
-        transformed = transform_code_for_tee(
-            chute_args.code,
-            gpu_count=chute_args.node_selector.gpu_count,
-            is_affine=is_affine,
-        )
-        if transformed is not None:
-            chute_args.code = transformed
 
     # Non-subnet chutes cannot be created with tee=True directly.
     if (
