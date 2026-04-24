@@ -571,21 +571,17 @@ async def simulate_miner_scores(
 
         metagraph_result = await session.execute(
             text(f"""
-                SELECT coldkey, hotkey, blacklist_reason
+                SELECT hotkey, blacklist_reason
                 FROM metagraph_nodes
                 WHERE netuid = {settings.netuid} AND node_id >= 0
             """)
         )
-        hot_cold_map = {}
+        active_hotkeys = set()
         blacklisted_hotkeys = set()
-        for coldkey, hotkey, blacklist_reason in metagraph_result:
-            hot_cold_map[hotkey] = coldkey
+        for hotkey, blacklist_reason in metagraph_result:
+            active_hotkeys.add(hotkey)
             if blacklist_reason:
                 blacklisted_hotkeys.add(hotkey)
-
-        coldkey_counts = {}
-        for hotkey, coldkey in hot_cold_map.items():
-            coldkey_counts[coldkey] = coldkey_counts.get(coldkey, 0) + 1
 
         current_query = text(f"""
             WITH billed_instances AS (
@@ -735,7 +731,7 @@ async def simulate_miner_scores(
 
     for inst in instances_data:
         hotkey = inst["miner_hotkey"]
-        if not hotkey or hotkey not in hot_cold_map or hotkey in blacklisted_hotkeys:
+        if not hotkey or hotkey not in active_hotkeys or hotkey in blacklisted_hotkeys:
             continue
 
         instance_id = inst["instance_id"]
@@ -755,17 +751,6 @@ async def simulate_miner_scores(
             simulated_raw[hotkey] += simulated_units
         else:
             simulated_raw[hotkey] += current_units
-
-    for coldkey in set(hot_cold_map.values()):
-        if coldkey_counts.get(coldkey, 0) > 1:
-            coldkey_hotkeys = [
-                hk for hk, ck in hot_cold_map.items() if ck == coldkey and hk in current_raw
-            ]
-            if len(coldkey_hotkeys) > 1:
-                coldkey_hotkeys.sort(key=lambda hk: current_raw.get(hk, 0.0), reverse=True)
-                for hk in coldkey_hotkeys[1:]:
-                    current_raw.pop(hk, None)
-                    simulated_raw.pop(hk, None)
 
     current_sum = sum(max(0.0, v) for v in current_raw.values())
     simulated_sum = sum(max(0.0, v) for v in simulated_raw.values())
