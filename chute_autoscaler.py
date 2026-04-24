@@ -2350,7 +2350,12 @@ async def _perform_autoscale_impl(
     # Calculate effective compute multiplier for each chute (for CSV export and logging)
     # This mirrors the logic in api/chute/util.py:calculate_effective_compute_multiplier
     # but uses ctx.boost (which may not be saved to DB yet in dry-run mode)
-    from api.constants import PRIVATE_INSTANCE_BONUS, INTEGRATED_SUBNET_BONUS, TEE_BONUS
+    from api.constants import (
+        PRIVATE_INSTANCE_BONUS,
+        INTEGRATED_SUBNET_BONUS,
+        TEE_BONUS,
+        TEE_PRIVATE_INSTANCE_BONUS,
+    )
     from api.chute.util import INTEGRATED_SUBNETS
 
     for ctx in contexts.values():
@@ -2365,14 +2370,17 @@ async def _perform_autoscale_impl(
 
         # Private/integrated bonus
         if not ctx.public and ctx.info:
-            is_integrated = any(
-                config["model_substring"] in ctx.info.name.lower()
-                for config in INTEGRATED_SUBNETS.values()
-            )
-            if is_integrated:
-                total *= INTEGRATED_SUBNET_BONUS
+            if ctx.tee:
+                total *= TEE_PRIVATE_INSTANCE_BONUS
             else:
-                total *= PRIVATE_INSTANCE_BONUS
+                is_integrated = any(
+                    config["model_substring"] in ctx.info.name.lower()
+                    for config in INTEGRATED_SUBNETS.values()
+                )
+                if is_integrated:
+                    total *= INTEGRATED_SUBNET_BONUS
+                else:
+                    total *= PRIVATE_INSTANCE_BONUS
 
         # Urgency boost
         if ctx.boost > 1.0:

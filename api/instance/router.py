@@ -34,6 +34,7 @@ from api.constants import (
     HOTKEY_HEADER,
     AUTHORIZATION_HEADER,
     PRIVATE_INSTANCE_BONUS,
+    TEE_PRIVATE_INSTANCE_BONUS,
     INTEGRATED_SUBNETS,
     INTEGRATED_SUBNET_BONUS,
     NoncePurpose,
@@ -605,23 +606,27 @@ async def _check_scalable_private(db, chute, miner):
     #        detail=message,
     #    )
 
-    # Miners with an active TEE instance bypass the history/inventory gates.
-    has_tee = (
-        await db.execute(
-            text("""
-            SELECT 1 FROM instances i
-            JOIN chutes c ON c.chute_id = i.chute_id
-            WHERE i.miner_hotkey = :hotkey
-              AND i.active = TRUE
-              AND i.verified = TRUE
-              AND c.tee = TRUE
-            LIMIT 1
-        """),
-            {"hotkey": miner.hotkey},
-        )
-    ).scalar_one_or_none()
+    # TEE chutes skip all history/inventory gates entirely.
+    # Miners with an active TEE instance also bypass.
+    skip_gates = chute.tee
+    if not skip_gates:
+        has_tee = (
+            await db.execute(
+                text("""
+                SELECT 1 FROM instances i
+                JOIN chutes c ON c.chute_id = i.chute_id
+                WHERE i.miner_hotkey = :hotkey
+                  AND i.active = TRUE
+                  AND i.verified = TRUE
+                  AND c.tee = TRUE
+                LIMIT 1
+            """),
+                {"hotkey": miner.hotkey},
+            )
+        ).scalar_one_or_none()
+        skip_gates = has_tee is not None
 
-    if not has_tee:
+    if not skip_gates:
         # Require some public chute history.
         public_history_query = text("""
             SELECT COUNT(*) AS public_count
@@ -1459,7 +1464,12 @@ async def _validate_launch_config_instance(
             if config["model_substring"] in chute.name.lower():
                 integrated = True
                 break
-        bonus = PRIVATE_INSTANCE_BONUS if not integrated else INTEGRATED_SUBNET_BONUS
+        if chute.tee:
+            bonus = TEE_PRIVATE_INSTANCE_BONUS
+        elif integrated:
+            bonus = INTEGRATED_SUBNET_BONUS
+        else:
+            bonus = PRIVATE_INSTANCE_BONUS
         instance.compute_multiplier *= bonus
         logger.info(
             f"Adding private instance bonus value {bonus=} to {instance.instance_id} "
