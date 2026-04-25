@@ -2159,16 +2159,20 @@ async def deploy_chute(
             "code check and prelim model config/node selector config passed."
         )
 
-    # Non-subnet chutes cannot be created with tee=True directly.
+    # Non-subnet chutes cannot be created with tee=True directly, unless
+    # it's a single pro_6000 GPU deployment.
     if (
         chute_args.tee
         and not is_subnet_model
         and not current_user.has_role(Permissioning.unlimited_dev)
     ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="TEE private deployments are limited at this time due to infrastructure capacity limitations.",
-        )
+        include_gpus = [gpu.lower() for gpu in (chute_args.node_selector.include or [])]
+        is_single_pro6000 = chute_args.node_selector.gpu_count == 1 and include_gpus == ["pro_6000"]
+        if not is_single_pro6000:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="TEE private deployments are limited at this time due to infrastructure capacity limitations.",
+            )
 
     # No-DoS-Plz.
     await limit_deployments(db, current_user)
