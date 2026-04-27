@@ -1821,6 +1821,11 @@ async def _deploy_chute(
             else (chute_args.scaling_threshold or 0.75)
         )
         chute.allow_external_egress = allow_egress
+        if chute.tee and not chute_args.tee:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot downgrade a TEE chute to non-TEE",
+            )
         chute.tee = chute_args.tee
         chute.lock_modules = lock_modules
         chute.encrypted_fs = chute.encrypted_fs and chute_args.encrypted_fs  # XX prevent changing
