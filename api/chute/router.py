@@ -1760,6 +1760,17 @@ async def _deploy_chute(
                 detail="This chute is immutable and cannot be modified. Only deletion is allowed.",
             )
 
+        # Prevent NS modifications for TEE chutes.
+        if chute.tee and not current_user.has_role(Permissioning.unlimited_dev):
+            old_selector = NodeSelector(**chute.node_selector)
+            if old_selector.gpu_count != chute_args.node_selector.gpu_count or set(
+                old_selector.supported_gpus
+            ) != set(chute_args.node_selector.supported_gpus):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot change node selector placement constraints on a TEE chute",
+                )
+
         # Create a rolling update object so we can gracefully restart/recreate.
         permitted = {}
         for inst in chute.instances:
@@ -1821,6 +1832,11 @@ async def _deploy_chute(
             else (chute_args.scaling_threshold or 0.75)
         )
         chute.allow_external_egress = allow_egress
+        if chute.tee and not chute_args.tee:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot downgrade a TEE chute to non-TEE",
+            )
         chute.tee = chute_args.tee
         chute.lock_modules = lock_modules
         chute.encrypted_fs = chute.encrypted_fs and chute_args.encrypted_fs  # XX prevent changing
@@ -2159,16 +2175,20 @@ async def deploy_chute(
             "code check and prelim model config/node selector config passed."
         )
 
-    # Non-subnet chutes cannot be created with tee=True directly.
+    # Non-subnet chutes cannot be created with tee=True directly, unless
+    # it's a single pro_6000 GPU deployment.
     if (
         chute_args.tee
         and not is_subnet_model
         and not current_user.has_role(Permissioning.unlimited_dev)
     ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="TEE private deployments are limited at this time due to infrastructure capacity limitations.",
-        )
+        include_gpus = [gpu.lower() for gpu in (chute_args.node_selector.include or [])]
+        is_single_pro6000 = chute_args.node_selector.gpu_count == 1 and include_gpus == ["pro_6000"]
+        if not is_single_pro6000:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="TEE private deployments are limited at this time due to infrastructure capacity limitations.",
+            )
 
     # No-DoS-Plz.
     await limit_deployments(db, current_user)

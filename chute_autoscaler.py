@@ -224,7 +224,7 @@ STARVING_HISTORY_KEY_PREFIX = "starving:"
 
 # Higher min instance counts for some chutes...
 LIMIT_OVERRIDES = {
-    "ac059e33-eb27-541c-b9a9-24b214036475": 7,
+    "ac059e33-eb27-541c-b9a9-24b214036475": 12,
 }
 FAILSAFE = {
     "ce6a92e4-5c2f-5681-9742-c80a4447bbdf": 6,
@@ -419,7 +419,7 @@ async def instance_cleanup():
 # EMA smoothing for stability
 EMA_ALPHA_URGENCY = 0.3  # For urgency/boost calculations
 EMA_ALPHA_UTIL = 0.4  # For utilization (slightly more reactive)
-EMA_ALPHA_TARGET = 0.4  # For target_count smoothing (prevents thrashing on scale-ups)
+EMA_ALPHA_TARGET = 0.3  # For target_count smoothing (prevents thrashing)
 EMA_REDIS_TTL = 7200  # 2 hours - survive missed runs but not stale forever
 
 
@@ -571,21 +571,17 @@ async def simulate_miner_scores(
 
         metagraph_result = await session.execute(
             text(f"""
-                SELECT coldkey, hotkey, blacklist_reason
+                SELECT hotkey, blacklist_reason
                 FROM metagraph_nodes
                 WHERE netuid = {settings.netuid} AND node_id >= 0
             """)
         )
-        hot_cold_map = {}
+        active_hotkeys = set()
         blacklisted_hotkeys = set()
-        for coldkey, hotkey, blacklist_reason in metagraph_result:
-            hot_cold_map[hotkey] = coldkey
+        for hotkey, blacklist_reason in metagraph_result:
+            active_hotkeys.add(hotkey)
             if blacklist_reason:
                 blacklisted_hotkeys.add(hotkey)
-
-        coldkey_counts = {}
-        for hotkey, coldkey in hot_cold_map.items():
-            coldkey_counts[coldkey] = coldkey_counts.get(coldkey, 0) + 1
 
         current_query = text(f"""
             WITH billed_instances AS (
@@ -735,7 +731,7 @@ async def simulate_miner_scores(
 
     for inst in instances_data:
         hotkey = inst["miner_hotkey"]
-        if not hotkey or hotkey not in hot_cold_map or hotkey in blacklisted_hotkeys:
+        if not hotkey or hotkey not in active_hotkeys or hotkey in blacklisted_hotkeys:
             continue
 
         instance_id = inst["instance_id"]
@@ -755,17 +751,6 @@ async def simulate_miner_scores(
             simulated_raw[hotkey] += simulated_units
         else:
             simulated_raw[hotkey] += current_units
-
-    for coldkey in set(hot_cold_map.values()):
-        if coldkey_counts.get(coldkey, 0) > 1:
-            coldkey_hotkeys = [
-                hk for hk, ck in hot_cold_map.items() if ck == coldkey and hk in current_raw
-            ]
-            if len(coldkey_hotkeys) > 1:
-                coldkey_hotkeys.sort(key=lambda hk: current_raw.get(hk, 0.0), reverse=True)
-                for hk in coldkey_hotkeys[1:]:
-                    current_raw.pop(hk, None)
-                    simulated_raw.pop(hk, None)
 
     current_sum = sum(max(0.0, v) for v in current_raw.values())
     simulated_sum = sum(max(0.0, v) for v in simulated_raw.values())
@@ -2532,6 +2517,40 @@ async def _perform_autoscale_impl(
     for ctx in contexts.values():
         apply_overrides(ctx)
 
+        # Smooth target_count for normal autoscale decisions in both directions.
+        # Hard overrides, disabled/private no-capacity decisions, and no_action stay immediate.
+        raw_target = ctx.target_count
+        target_for_ema = float(ctx.target_count)
+        should_smooth_target = (
+            ctx.action in {"scale_up_candidate", "scale_down_candidate"}
+            and ctx.target_count != ctx.current_count
+        )
+        if should_smooth_target:
+            prev = previous_smoothed.get(ctx.chute_id)
+            prev_target = (
+                prev["target"] if prev and prev.get("target") else float(ctx.current_count)
+            )
+            if prev_target > 0:
+                smoothed_target = calculate_ema(
+                    float(ctx.target_count), prev_target, EMA_ALPHA_TARGET
+                )
+                if raw_target > ctx.current_count:
+                    # Round up so we don't stall scaling, but cap at the raw target.
+                    ctx.target_count = min(raw_target, math.ceil(smoothed_target))
+                    ctx.target_count = max(ctx.current_count + 1, ctx.target_count)
+                else:
+                    # Round down so scale-down can progress, but never pass the raw target.
+                    ctx.target_count = max(raw_target, math.floor(smoothed_target))
+                    ctx.target_count = min(ctx.current_count - 1, ctx.target_count)
+                ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+                ctx.downscale_amount = max(0, ctx.current_count - ctx.target_count)
+                if ctx.target_count != raw_target:
+                    logger.info(
+                        f"Target smoothed: {ctx.chute_id} raw={raw_target} -> smoothed={ctx.target_count} "
+                        f"(prev_smooth={prev_target:.1f}, alpha={EMA_ALPHA_TARGET})"
+                    )
+            target_for_ema = float(ctx.target_count)
+
         # For voluntary scale-downs (not forced donations), check moving average permission
         # Skip this check in soft_mode since we won't execute scale-downs anyway
         if ctx.action == "scale_down_candidate" and ctx.downscale_amount > 0 and not soft_mode:
@@ -2556,31 +2575,8 @@ async def _perform_autoscale_impl(
             # Keep target_count at current to avoid Redis showing lower targets
             ctx.target_count = ctx.current_count
 
-        # Smooth target_count for scale-ups to prevent thrashing.
-        # Scale-downs and no_action use the raw target (scale-downs are already conservative).
-        raw_target = ctx.target_count
-        if "scale_up" in ctx.action and ctx.target_count > ctx.current_count:
-            prev = previous_smoothed.get(ctx.chute_id)
-            prev_target = prev["target"] if prev and prev.get("target") else None
-            if prev_target is not None and prev_target > 0:
-                smoothed_target = calculate_ema(
-                    float(ctx.target_count), prev_target, EMA_ALPHA_TARGET
-                )
-                # Round up so we don't stall scaling, but cap at the raw target
-                ctx.target_count = min(ctx.target_count, math.ceil(smoothed_target))
-                # Ensure we still scale up at least 1 above current
-                ctx.target_count = max(ctx.current_count + 1, ctx.target_count)
-                ctx.upscale_amount = ctx.target_count - ctx.current_count
-                if ctx.target_count != raw_target:
-                    logger.info(
-                        f"Target smoothed: {ctx.chute_id} raw={raw_target} -> smoothed={ctx.target_count} "
-                        f"(prev_smooth={prev_target:.1f}, alpha={EMA_ALPHA_TARGET})"
-                    )
-            # Update smoothed target for next run
-            new_smoothed_metrics.setdefault(ctx.chute_id, {})["target"] = float(ctx.target_count)
-        else:
-            # For non-scale-up actions, still track the target for EMA continuity
-            new_smoothed_metrics.setdefault(ctx.chute_id, {})["target"] = float(ctx.target_count)
+        # Track the smoothed pre-gate target for EMA continuity.
+        new_smoothed_metrics.setdefault(ctx.chute_id, {})["target"] = target_for_ema
 
         chute_actions[ctx.chute_id] = ctx.action
         chute_target_counts[ctx.chute_id] = ctx.target_count

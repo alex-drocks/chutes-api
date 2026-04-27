@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from fastapi.responses import PlainTextResponse
 from fastapi import APIRouter, Depends, HTTPException, Response, status, Header, Request
 from sqlalchemy import select, text, func, update, and_, desc, true
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, lazyload
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
@@ -1477,6 +1477,11 @@ async def _validate_launch_config_instance(
         )
         instance.billed_to = chute.user_id
 
+    # Track the warmup (base) multiplier separately — this is node_selector + private/tee bonus
+    # + manual boost + TEE bonus, but WITHOUT urgency (chute.boost) or bounty.
+    # Used at activation time for the startup period compute history record.
+    warmup_compute_multiplier = instance.compute_multiplier
+
     # Add chute boost (urgency boost from autoscaler).
     # Skip for private instances — their multiplier stays at the base GPU calculation.
     # Skip for thrashing miners. Use DB NOW() via None param since launch_config.created_at
@@ -1504,6 +1509,7 @@ async def _validate_launch_config_instance(
     manual_boost = await get_manual_boost(chute.chute_id, db=db)
     if manual_boost != 1.0:
         instance.compute_multiplier *= manual_boost
+        warmup_compute_multiplier *= manual_boost
         logger.info(
             f"Adding manual boost {manual_boost=} to {instance.instance_id} "
             f"for total {instance.compute_multiplier=} for {chute.name=} {chute.chute_id=}"
@@ -1512,6 +1518,7 @@ async def _validate_launch_config_instance(
     # Add TEE boost.
     if chute.tee:
         instance.compute_multiplier *= TEE_BONUS
+        warmup_compute_multiplier *= TEE_BONUS
         logger.info(
             f"Adding TEE instance bonus value {TEE_BONUS} to {instance.instance_id} "
             f"for total {instance.compute_multiplier=} for {chute.name=} {chute.chute_id=}"
@@ -1593,6 +1600,7 @@ async def _validate_launch_config_instance(
         if ns_min_compute > 0 and actual_base != ns_min_compute:
             ratio = actual_base / ns_min_compute
             instance.compute_multiplier *= ratio
+            warmup_compute_multiplier *= ratio
         instance.hourly_rate = SUPPORTED_GPUS[actual_gpu]["hourly_rate"] * gpu_count
         logger.info(
             f"Adjusted private instance {instance.instance_id} for "
@@ -1602,6 +1610,11 @@ async def _validate_launch_config_instance(
             f"compute_multiplier={ns_min_compute:.4f}->{actual_base:.4f} "
             f"(delta={actual_base - ns_min_compute:+.4f}, ratio={actual_base / ns_min_compute if ns_min_compute else 0:.2f}x)"
         )
+
+    # Store the warmup (base) compute multiplier for use at activation time.
+    if instance.extra is None:
+        instance.extra = {}
+    instance.extra["warmup_compute_multiplier"] = warmup_compute_multiplier
 
     # Enforce rint_pubkey for chutes >= 0.5.1
     if semcomp(instance.chutes_version or "0.0.0", "0.5.1") >= 0:
@@ -2336,7 +2349,14 @@ async def activate_launch_config_instance(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Launch config has not been verified.",
         )
-    instance = launch_config.instance
+    instance = (
+        await db.execute(
+            select(Instance)
+            .where(Instance.config_id == launch_config.config_id)
+            .options(lazyload("*"))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
     if not instance:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2389,6 +2409,7 @@ async def activate_launch_config_instance(
         await _check_scalable_activation(db, chute, launch_config.miner_hotkey)
 
     # Activate the instance (and trigger tentative billing stop time).
+    # The instance row is already locked via FOR UPDATE from the query above.
     if not instance.active:
         # Reject instances that took too long to activate (> 90 minutes). These should be cleaned up automatically
         # in the chute autoscaler's instance_cleanup() method, but just in case...
@@ -2458,6 +2479,25 @@ async def activate_launch_config_instance(
         #        )
         # elif semcomp(chute.chutes_version, "0.4.0") >= 0:
         #    asyncio.create_task(delayed_instance_fs_check(instance.instance_id))
+
+        # Insert warmup compute history record (created_at → now) at the base
+        # multiplier rate (no bounty/urgency boosts).
+        warmup_multiplier = (instance.extra or {}).get(
+            "warmup_compute_multiplier", instance.compute_multiplier
+        )
+        if warmup_multiplier is not None and instance.created_at is not None:
+            await db.execute(
+                text("""
+                    INSERT INTO instance_compute_history
+                        (instance_id, compute_multiplier, started_at, ended_at)
+                    VALUES (:instance_id, :multiplier, :started_at, NOW())
+                """),
+                {
+                    "instance_id": instance.instance_id,
+                    "multiplier": warmup_multiplier,
+                    "started_at": instance.created_at.replace(tzinfo=None),
+                },
+            )
 
         instance.active = True
         instance.activated_at = func.now()

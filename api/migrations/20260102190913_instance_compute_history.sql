@@ -15,7 +15,9 @@ CREATE OR REPLACE FUNCTION fn_instance_compute_history_update()
 RETURNS TRIGGER AS $$
 BEGIN
     -- Case 1: Instance just activated (activated_at changed from NULL to non-NULL).
-    -- Create startup period record at 50% rate and active period record at full rate.
+    -- The startup/warmup record (created_at → activated_at) is inserted by Python code
+    -- in api/instance/router.py at activation time, using the base multiplier (no bounty/urgency).
+    -- Here we only insert the active period record at the full rate.
     IF NEW.activated_at IS NOT NULL AND OLD.activated_at IS NULL THEN
         IF NEW.compute_multiplier IS NOT NULL THEN
             -- Close any existing open record for this instance.
@@ -23,10 +25,6 @@ BEGIN
                SET ended_at = NOW()
              WHERE instance_id = NEW.instance_id
                AND ended_at IS NULL;
-
-            -- Insert startup period: created_at to activated_at at 50% rate
-            INSERT INTO instance_compute_history (instance_id, compute_multiplier, started_at, ended_at)
-            VALUES (NEW.instance_id, NEW.compute_multiplier * 0.5, OLD.created_at, NEW.activated_at);
 
             -- Insert active period: activated_at onwards at full rate
             INSERT INTO instance_compute_history (instance_id, compute_multiplier, started_at)
