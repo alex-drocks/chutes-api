@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from fastapi.responses import PlainTextResponse
 from fastapi import APIRouter, Depends, HTTPException, Response, status, Header, Request
 from sqlalchemy import select, text, func, update, and_, desc, true
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, lazyload
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
@@ -2349,7 +2349,14 @@ async def activate_launch_config_instance(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Launch config has not been verified.",
         )
-    instance = launch_config.instance
+    instance = (
+        await db.execute(
+            select(Instance)
+            .where(Instance.config_id == launch_config.config_id)
+            .options(lazyload("*"))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
     if not instance:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2401,19 +2408,8 @@ async def activate_launch_config_instance(
     elif chute.public:
         await _check_scalable_activation(db, chute, launch_config.miner_hotkey)
 
-    # Lock the instance row to prevent concurrent activation (which could
-    # duplicate the warmup compute history record). Re-read active status
-    # under the lock so a racing request sees the first caller's commit.
-    instance = (
-        await db.execute(
-            select(Instance)
-            .where(Instance.instance_id == instance.instance_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one()
-
     # Activate the instance (and trigger tentative billing stop time).
+    # The instance row is already locked via FOR UPDATE from the query above.
     if not instance.active:
         # Reject instances that took too long to activate (> 90 minutes). These should be cleaned up automatically
         # in the chute autoscaler's instance_cleanup() method, but just in case...
@@ -2499,7 +2495,7 @@ async def activate_launch_config_instance(
                 {
                     "instance_id": instance.instance_id,
                     "multiplier": warmup_multiplier,
-                    "started_at": instance.created_at,
+                    "started_at": instance.created_at.replace(tzinfo=None),
                 },
             )
 
