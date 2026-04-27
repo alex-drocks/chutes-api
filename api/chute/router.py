@@ -1760,6 +1760,17 @@ async def _deploy_chute(
                 detail="This chute is immutable and cannot be modified. Only deletion is allowed.",
             )
 
+        # Prevent NS modifications for TEE chutes.
+        if chute.tee and not current_user.has_role(Permissioning.unlimited_dev):
+            old_selector = NodeSelector(**chute.node_selector)
+            if old_selector.gpu_count != chute_args.node_selector.gpu_count or set(
+                old_selector.supported_gpus
+            ) != set(chute_args.node_selector.supported_gpus):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot change node selector placement constraints on a TEE chute",
+                )
+
         # Create a rolling update object so we can gracefully restart/recreate.
         permitted = {}
         for inst in chute.instances:
