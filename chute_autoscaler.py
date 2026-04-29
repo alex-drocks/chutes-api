@@ -3019,30 +3019,6 @@ async def calculate_local_decision(ctx: AutoScaleContext):
         )
         return
 
-    # Rolling updates: allow scaling up to ensure smooth transition
-    if ctx.has_rolling_update:
-        if ctx.is_starving:
-            # High demand during rolling update - scale up aggressively
-            num_to_add = max(2, int(ctx.current_count * 0.2))
-            ctx.upscale_amount = num_to_add
-            ctx.target_count = max(failsafe_min, ctx.current_count + num_to_add)
-            ctx.action = "scale_up_candidate"
-            clamp_to_max_instances(ctx)
-            logger.info(
-                f"Scale up: {ctx.chute_id} - rolling update with high demand, "
-                f"util={ctx.utilization_basis:.1%}, adding {ctx.upscale_amount} instances"
-            )
-        else:
-            # Rolling update without high demand - still allow +1 for buffer
-            ctx.upscale_amount = 1
-            ctx.target_count = max(failsafe_min, ctx.current_count + 1)
-            ctx.action = "scale_up_candidate"
-            clamp_to_max_instances(ctx)
-            logger.info(
-                f"Scale up: {ctx.chute_id} - rolling update buffer, adding {ctx.upscale_amount} instance(s)"
-            )
-        return
-
     if ctx.is_starving:
         num_to_add = 1
 
@@ -3196,6 +3172,27 @@ async def calculate_local_decision(ctx: AutoScaleContext):
                 f"Scale up: {ctx.chute_id} - new chute, "
                 f"adding {ctx.upscale_amount} instances, target={ctx.target_count}"
             )
+
+    # Rolling updates: add +1 buffer on top of the organic target to ensure smooth transition.
+    # For starving chutes during rolling updates, add extra headroom.
+    if ctx.has_rolling_update:
+        pre_buffer_target = ctx.target_count
+        if ctx.is_starving:
+            num_to_add = max(2, int(ctx.target_count * 0.2))
+        else:
+            num_to_add = 1
+        ctx.target_count = max(failsafe_min, ctx.target_count + num_to_add)
+        # Recalculate scale amounts based on the buffered target
+        ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+        ctx.downscale_amount = max(0, ctx.current_count - ctx.target_count)
+        if ctx.upscale_amount > 0:
+            ctx.action = "scale_up_candidate"
+        elif ctx.downscale_amount > 0:
+            ctx.action = "scale_down_candidate"
+        logger.info(
+            f"Rolling update buffer: {ctx.chute_id} - organic_target={pre_buffer_target}, "
+            f"added {num_to_add} instance(s), target={ctx.target_count}"
+        )
 
     # Always clamp to max_instances at the end
     clamp_to_max_instances(ctx)
