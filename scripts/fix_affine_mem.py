@@ -8,6 +8,7 @@ Usage:
   python scripts/fix_affine_mem.py --apply   # actually persist changes
 """
 
+import api.database.orms
 import ast
 import re
 import sys
@@ -17,7 +18,7 @@ import orjson as json
 from loguru import logger
 from api.config import settings
 from api.database import get_session
-from api.chute.schemas import Chute
+from api.chute.schemas import Chute, NodeSelector
 from sqlalchemy import select, func
 
 ALLOWED_BUILDERS = {"build_sglang_chute", "build_vllm_chute"}
@@ -121,6 +122,88 @@ def show_diff(chute_id: str, name: str, image_name: str, old: str, new: str):
     print(f'  + engine_args="{new}"')
 
 
+async def fix_dp_gpu_mismatch(session, dry_run: bool):
+    """
+    Fix chutes where the code's gpu_count=X differs from --dp Y.
+    Updates --dp to match gpu_count, and syncs the DB node_selector.
+    """
+    all_chutes = (
+        (await session.execute(select(Chute)))
+        .unique()
+        .scalars()
+        .all()
+    )
+
+    mismatched = []
+    for chute in all_chutes:
+        code = chute.code or ""
+        gpu_match = re.search(r"gpu_count=(\d+)", code)
+        dp_match = re.search(r"--dp\s+(\d+)", code)
+        if gpu_match and dp_match:
+            gpu_count = int(gpu_match.group(1))
+            dp_value = int(dp_match.group(1))
+            if gpu_count != dp_value:
+                mismatched.append((chute, gpu_count, dp_value))
+
+    logger.info(f"Found {len(mismatched)} chutes with dp/gpu_count mismatch")
+
+    updated = 0
+    skipped = 0
+    for chute, gpu_count, dp_value in mismatched:
+        print(f"\n{'=' * 72}")
+        print(f"Chute: {chute.name}")
+        print(f"ID:    {chute.chute_id}")
+        print(f"  code gpu_count={gpu_count}, --dp {dp_value}")
+        print(f"  DB node_selector gpu_count={chute.node_selector.get('gpu_count')}")
+        print(f"  -> setting --dp {gpu_count}, node_selector gpu_count={gpu_count}")
+
+        new_code = re.sub(r"(--dp\s+)\d+", rf"\g<1>{gpu_count}", chute.code)
+        # Show the code diff around the --dp change.
+        old_lines = chute.code.splitlines()
+        new_lines = new_code.splitlines()
+        for i, (ol, nl) in enumerate(zip(old_lines, new_lines), 1):
+            if ol != nl:
+                print(f"  - L{i}: {ol.strip()}")
+                print(f"  + L{i}: {nl.strip()}")
+
+        if dry_run:
+            updated += 1
+            continue
+
+        chute.code = new_code
+        chute.code = new_code
+
+        # Fix the DB node_selector.
+        ns = dict(chute.node_selector)
+        ns["gpu_count"] = gpu_count
+        chute.node_selector = NodeSelector(**ns)
+
+        chute.version = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{chute.image_id}:{new_code}"))
+        chute.updated_at = func.now()
+        await session.commit()
+        await session.refresh(chute)
+
+        await settings.redis_client.publish(
+            "miner_broadcast",
+            json.dumps(
+                {
+                    "reason": "chute_updated",
+                    "data": {
+                        "chute_id": chute.chute_id,
+                        "version": chute.version,
+                        "job_only": not chute.cords,
+                    },
+                }
+            ).decode(),
+        )
+        logger.success(f"Updated dp/node_selector for {chute.name}")
+        updated += 1
+
+    print(f"\n{'=' * 72}")
+    mode = "Would update" if dry_run else "Updated"
+    print(f"[dp/gpu_count fix] {mode}: {updated} | Skipped: {skipped} | Total mismatched: {len(mismatched)}")
+
+
 async def main():
     dry_run = "--apply" not in sys.argv
     if dry_run:
@@ -129,6 +212,7 @@ async def main():
         logger.warning("APPLY mode: changes will be persisted")
 
     async with get_session() as session:
+        # --- Fix 1: affine engine_args ---
         chutes = (
             (await session.execute(select(Chute).where(Chute.name.ilike("%affine%"))))
             .unique()
@@ -195,9 +279,13 @@ async def main():
 
         print(f"\n{'=' * 72}")
         mode = "Would update" if dry_run else "Updated"
-        print(f"{mode}: {updated} | Skipped: {skipped} | Total: {len(chutes)}")
-        if dry_run and updated > 0:
-            print("Run with --apply to persist these changes.")
+        print(f"[affine engine_args] {mode}: {updated} | Skipped: {skipped} | Total: {len(chutes)}")
+
+        # --- Fix 2: dp/gpu_count mismatch ---
+        await fix_dp_gpu_mismatch(session, dry_run)
+
+        if dry_run:
+            print("\nRun with --apply to persist these changes.")
 
 
 asyncio.run(main())
