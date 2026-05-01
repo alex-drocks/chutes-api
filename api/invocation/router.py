@@ -74,8 +74,18 @@ def _has_regex_pattern(schema: object) -> bool:
         return False
     if "pattern" in schema:
         return True
-    for key in ("properties", "items", "additionalProperties",
-                "allOf", "anyOf", "oneOf", "not", "if", "then", "else"):
+    for key in (
+        "properties",
+        "items",
+        "additionalProperties",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+    ):
         val = schema.get(key)
         if isinstance(val, dict):
             if _has_regex_pattern(val):
@@ -97,15 +107,15 @@ def _reject_regex_structured_output(body: object) -> None:
 
     _detail_direct = "Regex-based structured output is temporarily disabled."
     _detail_pattern = (
-        "Regex-based structured output (JSON schema 'pattern' fields)"
-        " is temporarily disabled."
+        "Regex-based structured output (JSON schema 'pattern' fields) is temporarily disabled."
     )
 
     # guided_regex — direct regex constraint
     if body.get("guided_regex"):
         logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=_detail_direct,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_detail_direct,
         )
 
     # structured_outputs.regex, direct regex via structured_outputs param
@@ -113,7 +123,8 @@ def _reject_regex_structured_output(body: object) -> None:
     if isinstance(so, dict) and so.get("regex"):
         logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=_detail_direct,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_detail_direct,
         )
 
     # structured_outputs.json, which could be a JSON schema with pattern fields
@@ -127,7 +138,8 @@ def _reject_regex_structured_output(body: object) -> None:
         if isinstance(so_json, dict) and _has_regex_pattern(so_json):
             logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=_detail_pattern,
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_detail_pattern,
             )
 
     # response_format.json_schema.schema — pattern fields in JSON schema.
@@ -139,7 +151,8 @@ def _reject_regex_structured_output(body: object) -> None:
             if isinstance(schema, dict) and _has_regex_pattern(schema):
                 logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail=_detail_pattern,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=_detail_pattern,
                 )
 
 
@@ -598,12 +611,13 @@ async def _invoke(
             logger.error(f"Failed to update VLM request payload: {str(exc)}")
 
         # Reject regex-based structured output (temporarily disabled).
-        try:
-            _reject_regex_structured_output(request_body)
-        except Exception as exc:
-            if isinstance(exc, HTTPException):
-                raise
-            logger.error(f"Failed to check regex guided output: {str(exc)}")
+        if chute.name.startswith(("moonshotai/Kimi-K2.6-TEE", "moonshotai/Kimi-K2.5-TEE")):
+            try:
+                _reject_regex_structured_output(request_body)
+            except Exception as exc:
+                if isinstance(exc, HTTPException):
+                    raise
+                logger.error(f"Failed to check regex guided output: {str(exc)}")
 
         # Validate tool call arguments JSON.
         try:
