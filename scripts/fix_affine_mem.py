@@ -8,7 +8,7 @@ Usage:
   python scripts/fix_affine_mem.py --apply   # actually persist changes
 """
 
-import api.database.orms
+import api.database.orms  # noqa
 import ast
 import re
 import sys
