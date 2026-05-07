@@ -1590,7 +1590,11 @@ async def _deploy_chute(
         allow_egress = False
     elif allow_egress is None:
         allow_egress = False
-    if "affine" in chute_args.name.lower() or "turbovision" in chute_args.name.lower():
+    if (
+        "affine" in chute_args.name.lower()
+        or "turbovision" in chute_args.name.lower()
+        or "vocence" in chute_args.name.lower()
+    ):
         allow_egress = False
 
     # Module locking: standard templates are always locked, otherwise default False.
