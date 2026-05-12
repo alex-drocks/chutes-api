@@ -226,12 +226,10 @@ STARVING_HISTORY_KEY_PREFIX = "starving:"
 LIMIT_OVERRIDES = {}
 FAILSAFE = {
     "aac09863-35b4-5d9b-9b67-6e6a9d54273a": 5,
-    "08a7a60f-6956-5a9e-9983-5603c3ac5a38": 4,
     "b048fe26-0352-5c46-acf7-335e527e7f3d": 12,
-    "e51e818e-fa63-570d-9f68-49d7d1b4d12f": 10,
-    "2ff25e81-4586-5ec8-b892-3a6f342693d7": 18,
+    "2ff25e81-4586-5ec8-b892-3a6f342693d7": 10,
     "d899b064-d9ae-5612-99e6-413e9136671b": 4,
-    "ac059e33-eb27-541c-b9a9-24b214036475": 7,
+    "ac059e33-eb27-541c-b9a9-24b214036475": 10,
 }
 
 
@@ -2547,7 +2545,76 @@ async def _perform_autoscale_impl(
                         f"Target smoothed: {ctx.chute_id} raw={raw_target} -> smoothed={ctx.target_count} "
                         f"(prev_smooth={prev_target:.1f}, alpha={EMA_ALPHA_TARGET})"
                     )
-            target_for_ema = float(ctx.target_count)
+
+        # Cap max increase per cycle to prevent bursty thrashing.
+        # Respect failsafe minimums for public chutes so the cap never
+        # reduces the target below the configured floor.
+        MAX_INCREASE_PER_CYCLE = 5
+        if (
+            ctx.action == "scale_up_candidate"
+            and ctx.target_count > ctx.current_count + MAX_INCREASE_PER_CYCLE
+        ):
+            cap_floor = ctx.current_count + MAX_INCREASE_PER_CYCLE
+            if ctx.public:
+                failsafe_min = FAILSAFE.get(ctx.chute_id, UNDERUTILIZED_CAP)
+                cap_floor = max(cap_floor, failsafe_min)
+            ctx.target_count = min(ctx.target_count, cap_floor)
+            ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+            ctx.downscale_amount = 0
+            logger.info(
+                f"Target capped: {ctx.chute_id} raw={raw_target} -> capped={ctx.target_count} "
+                f"(max increase per cycle={MAX_INCREASE_PER_CYCLE}, current={ctx.current_count})"
+            )
+
+        # Sticky high-water mark: hold target at its recent peak for 15 minutes
+        # to prevent premature scale-down after bursty traffic.
+        STICKY_TARGET_TTL = 900  # 15 minutes
+        if ctx.action in {"scale_up_candidate", "scale_down_candidate"} and not dry_run:
+            peak_key = f"target_peak:{ctx.chute_id}"
+            stored_peak = await settings.redis_client.get(peak_key)
+            if stored_peak is not None:
+                stored_peak = int(stored_peak)
+
+            if ctx.target_count >= (stored_peak or 0):
+                # New peak or equal — update and reset TTL
+                await settings.redis_client.set(peak_key, ctx.target_count, ex=STICKY_TARGET_TTL)
+            elif stored_peak and stored_peak > ctx.target_count:
+                # Target dropped but peak is still fresh — stick to peak,
+                # but still respect the per-cycle cap and max_instances.
+                effective_max = ctx.max_instances
+                if ctx.has_rolling_update and ctx.old_instance_count:
+                    effective_max = ctx.max_instances + ctx.old_instance_count
+                # For scale-down candidates, sticky only prevents the downscale
+                # (holds at current_count) — it should not create a new scale-up.
+                peak_ceiling = (
+                    ctx.current_count
+                    if ctx.action == "scale_down_candidate"
+                    else ctx.current_count + MAX_INCREASE_PER_CYCLE
+                )
+                effective_peak = min(
+                    stored_peak,
+                    peak_ceiling,
+                    effective_max,
+                )
+                # Only apply if the clamped peak is actually higher than current target
+                if effective_peak > ctx.target_count:
+                    logger.info(
+                        f"Sticky target: {ctx.chute_id} calculated={ctx.target_count} -> peak={effective_peak} "
+                        f"(stored_peak={stored_peak}, holding at recent high-water mark)"
+                    )
+                    ctx.target_count = effective_peak
+                    ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+                    ctx.downscale_amount = max(0, ctx.current_count - ctx.target_count)
+                    # Fix action to match the actual direction after sticky adjustment
+                    if ctx.upscale_amount > 0 and ctx.action == "scale_down_candidate":
+                        ctx.action = "scale_up_candidate"
+                    elif ctx.upscale_amount == 0 and ctx.downscale_amount == 0:
+                        ctx.action = "no_action"
+
+        # Track the post-cap/sticky pre-gate target for EMA continuity.
+        # This captures the target after smoothing, cap, and sticky adjustments
+        # but before scale-down permission and soft_mode gates rewrite it.
+        target_for_ema = float(ctx.target_count)
 
         # For voluntary scale-downs (not forced donations), check moving average permission
         # Skip this check in soft_mode since we won't execute scale-downs anyway
