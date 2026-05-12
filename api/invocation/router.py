@@ -963,6 +963,10 @@ async def hostname_invocation(
         if model == "deepseek-ai/DeepSeek-R1-sgtest":
             payload["model"] = "deepseek-ai/DeepSeek-R1"
 
+        # Qwen3 8B embedding TEE rewrite.
+        if model == "Qwen/Qwen3-Embedding-8B":
+            payload["model"] = "Qwen/Qwen3-Embedding-8B-TEE"
+
         # TEE re-routes.
         if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
             payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
