@@ -1024,6 +1024,10 @@ async def hostname_invocation(
             payload["model"] = "openai/gpt-oss-20b:THINKING"
             if model.endswith(":THINKING"):
                 payload["model"] = "openai/gpt-oss-20b:THINKING"
+        elif model == "Qwen/Qwen3-Next-80B-A3B-Instruct":
+            payload["model"] = "Qwen/Qwen3-Next-80B-A3B-Instruct-TEE"
+        elif model == "unsloth/Mistral-Nemo-Instruct-2407":
+            payload["model"] = "unsloth/Mistral-Nemo-Instruct-2407-TEE"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):
