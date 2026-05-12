@@ -1610,9 +1610,14 @@ async def _deploy_chute(
     if chute_args.encrypted_fs is None:
         chute_args.encrypted_fs = False
 
-    # TEE mode.
+    # TEE mode required now.
     if chute_args.tee is None:
-        chute_args.tee = False
+        chute_args.tee = True
+    if not chute_args.tee:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only TEE chutes are supported as of 2026-05-12, please set tee=True",
+        )
 
     if not chute_args.node_selector:
         chute_args.node_selector = {"gpu_count": 1}
