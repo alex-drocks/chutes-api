@@ -1028,6 +1028,10 @@ async def hostname_invocation(
             payload["model"] = "Qwen/Qwen3-Next-80B-A3B-Instruct-TEE"
         elif model == "unsloth/Mistral-Nemo-Instruct-2407":
             payload["model"] = "unsloth/Mistral-Nemo-Instruct-2407-TEE"
+        elif model == "Qwen/Qwen2.5-Coder-32B-Instruct":
+            payload["model"] = "Qwen/Qwen2.5-Coder-32B-Instruct-TEE"
+        elif model == "Qwen/Qwen2.5-VL-32B-Instruct":
+            payload["model"] = "Qwen/Qwen2.5-VL-32B-Instruct-TEE"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):
