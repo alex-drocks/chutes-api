@@ -1918,13 +1918,19 @@ async def _perform_autoscale_impl(
         # Identify Potential Donors (for forced donations during arbitration)
         # Private chutes are not donors unless they belong to chutes_user_id (semi-private).
         # Chutes in LIMIT_OVERRIDES should never be preempted.
+        # Chutes that recently scaled up should never donate — we just paid cold-start
+        # time for those instances and donating them away wastes that investment.
         # Use SMOOTHED utilization for donor determination to prevent flip-flopping
         allow_donor = ctx.public or (ctx.info and ctx.info.user_id == await chutes_user_id())
+        recently_scaled_up = await settings.redis_client.exists(
+            f"recently_scaled_up:{ctx.chute_id}"
+        )
         if (
             not ctx.any_rate_limiting
             and ctx.current_count > 0
             and allow_donor
             and ctx.chute_id not in LIMIT_OVERRIDES
+            and not recently_scaled_up
         ):
             # Voluntary scale-down candidate: below scale_down_threshold
             # These will scale down on their own (gated by moving average)
@@ -2652,6 +2658,13 @@ async def _perform_autoscale_impl(
         # In dry_run, skip Redis writes entirely
         if not dry_run:
             await settings.redis_client.set(f"scale:{ctx.chute_id}", ctx.target_count, ex=3700)
+            # Track recent scale-ups so we don't donate away instances we just paid
+            # cold-start time for. 90-minute TTL covers typical cold-start delays.
+            RECENTLY_SCALED_UP_TTL = 5400  # 90 minutes
+            if ctx.target_count > ctx.current_count:
+                await settings.redis_client.set(
+                    f"recently_scaled_up:{ctx.chute_id}", "1", ex=RECENTLY_SCALED_UP_TTL
+                )
 
         if ctx.downscale_amount > 0:
             to_downsize.append((ctx.chute_id, ctx.downscale_amount, ctx.preferred_downscale_gpus))
