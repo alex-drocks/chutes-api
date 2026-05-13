@@ -2212,11 +2212,16 @@ async def deploy_chute(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=json.dumps(response).decode(),
             )
+    use_rolling_update = chute_args.use_rolling_update
+    if is_subnet_model:
+        use_rolling_update = False
+    elif use_rolling_update is None:
+        use_rolling_update = True
     chute = await _deploy_chute(
         chute_args,
         db,
         current_user,
-        use_rolling_update=not is_subnet_model,
+        use_rolling_update=use_rolling_update,
         accept_fee=accept_fee,
         is_subnet_model=is_subnet_model,
     )
