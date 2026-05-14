@@ -535,7 +535,7 @@ class LeastConnManager:
             return None
 
         # Select instances with cache that have reasonable connection counts
-        routable = [iid for iid in likely_cached if abs(counts[iid] - min_count) <= 2]
+        routable = [iid for iid in likely_cached if abs(counts[iid] - min_count) <= 7]
         if not routable:
             return None
 
