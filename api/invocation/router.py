@@ -68,6 +68,94 @@ class DiffusionInput(BaseModel):
         extra = "forbid"
 
 
+def _has_regex_pattern(schema: object) -> bool:
+    """Recursively check if a JSON schema contains any 'pattern' fields."""
+    if not isinstance(schema, dict):
+        return False
+    if "pattern" in schema:
+        return True
+    for key in (
+        "properties",
+        "items",
+        "additionalProperties",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+    ):
+        val = schema.get(key)
+        if isinstance(val, dict):
+            if _has_regex_pattern(val):
+                return True
+        elif isinstance(val, list):
+            for item in val:
+                if _has_regex_pattern(item):
+                    return True
+    return False
+
+
+def _reject_regex_structured_output(body: object) -> None:
+    """
+    XXX - temporarily reject requests that use regex-based structured output,
+          because it crashes vllm...
+    """
+    if not isinstance(body, dict):
+        return
+
+    _detail_direct = "Regex-based structured output is temporarily disabled."
+    _detail_pattern = (
+        "Regex-based structured output (JSON schema 'pattern' fields) is temporarily disabled."
+    )
+
+    # guided_regex — direct regex constraint
+    if body.get("guided_regex"):
+        logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_detail_direct,
+        )
+
+    # structured_outputs.regex, direct regex via structured_outputs param
+    so = body.get("structured_outputs")
+    if isinstance(so, dict) and so.get("regex"):
+        logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_detail_direct,
+        )
+
+    # structured_outputs.json, which could be a JSON schema with pattern fields
+    if isinstance(so, dict):
+        so_json = so.get("json")
+        if isinstance(so_json, str):
+            try:
+                so_json = json.loads(so_json)
+            except Exception:
+                so_json = None
+        if isinstance(so_json, dict) and _has_regex_pattern(so_json):
+            logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_detail_pattern,
+            )
+
+    # response_format.json_schema.schema — pattern fields in JSON schema.
+    rf = body.get("response_format")
+    if isinstance(rf, dict) and rf.get("type") == "json_schema":
+        js = rf.get("json_schema")
+        if isinstance(js, dict):
+            schema = js.get("schema")
+            if isinstance(schema, dict) and _has_regex_pattern(schema):
+                logger.warning(f"GUIDEDREGEX blocked temporarily: {body.get('model')}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=_detail_pattern,
+                )
+
+
 def _derive_upstream_status(error: object) -> int | None:
     """
     Map upstream error payloads to HTTP statuses used by retry/failover logic.
@@ -522,6 +610,15 @@ async def _invoke(
                 raise
             logger.error(f"Failed to update VLM request payload: {str(exc)}")
 
+        # Reject regex-based structured output (temporarily disabled).
+        if chute.name.startswith(("moonshotai/Kimi-K2.6-TEE", "moonshotai/Kimi-K2.5-TEE")):
+            try:
+                _reject_regex_structured_output(request_body)
+            except Exception as exc:
+                if isinstance(exc, HTTPException):
+                    raise
+                logger.error(f"Failed to check regex guided output: {str(exc)}")
+
         # Validate tool call arguments JSON.
         try:
             await validate_tool_call_arguments(request_body)
@@ -866,6 +963,10 @@ async def hostname_invocation(
         if model == "deepseek-ai/DeepSeek-R1-sgtest":
             payload["model"] = "deepseek-ai/DeepSeek-R1"
 
+        # Qwen3 8B embedding TEE rewrite.
+        if model == "Qwen/Qwen3-Embedding-8B":
+            payload["model"] = "Qwen/Qwen3-Embedding-8B-TEE"
+
         # TEE re-routes.
         if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
             payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
@@ -923,6 +1024,14 @@ async def hostname_invocation(
             payload["model"] = "openai/gpt-oss-20b:THINKING"
             if model.endswith(":THINKING"):
                 payload["model"] = "openai/gpt-oss-20b:THINKING"
+        elif model == "Qwen/Qwen3-Next-80B-A3B-Instruct":
+            payload["model"] = "Qwen/Qwen3-Next-80B-A3B-Instruct-TEE"
+        elif model == "unsloth/Mistral-Nemo-Instruct-2407":
+            payload["model"] = "unsloth/Mistral-Nemo-Instruct-2407-TEE"
+        elif model == "Qwen/Qwen2.5-Coder-32B-Instruct":
+            payload["model"] = "Qwen/Qwen2.5-Coder-32B-Instruct-TEE"
+        elif model == "Qwen/Qwen2.5-VL-32B-Instruct":
+            payload["model"] = "Qwen/Qwen2.5-VL-32B-Instruct-TEE"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):
@@ -938,6 +1047,9 @@ async def hostname_invocation(
                                 status_code=status.HTTP_400_BAD_REQUEST,
                                 detail="File content not currently supported",
                             )
+
+        # Reject regex-based structured output (temporarily disabled).
+        _reject_regex_structured_output(payload)
 
         # Fix continue_final_message <=> add_generation_prompt incompatibility.
         if payload.get("continue_final_message") and payload.get("add_generation_prompt", True):

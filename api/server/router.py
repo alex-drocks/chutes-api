@@ -2,7 +2,8 @@
 FastAPI routes for server management and TDX attestation.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List
+import orjson as json
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Header, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,7 @@ from api.server.schemas import (
     ServerUpgradeStatus,
     TeeUpgradeWindow,
     UpgradeWindowInfo,
+    TeeMeasurementResponse,
 )
 from api.server.service import (
     create_nonce,
@@ -50,10 +52,8 @@ from api.server.service import (
     _count_active_maintenance_slots,
 )
 from api.server.util import (
-    decrypt_passphrase,
     extract_client_cert_hash,
     get_luks_passphrase,
-    _get_vm_cache_config,
 )
 from api.server.exceptions import (
     AttestationError,
@@ -119,63 +119,6 @@ async def verify_boot_attestation(
         logger.error(f"Unexpected error in boot attestation: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Boot attestation failed"
-        )
-
-
-@router.get("/{vm_name}/luks", response_model=Dict[str, str])
-async def get_cache_luks_passphrase(
-    vm_name: str,
-    hotkey: str,
-    db: AsyncSession = Depends(get_db_session),
-    boot_token: str | None = Header(None, alias="X-Boot-Token"),
-):
-    """
-    Retrieve existing LUKS passphrase for cache volume encryption.
-
-    This endpoint is called when the initramfs detects that the cache volume
-    is already encrypted. It retrieves the passphrase that was previously
-    generated for this VM configuration (miner_hotkey + vm_name).
-
-    The hotkey must be provided as a query parameter.
-    The boot token must be provided in the X-Boot-Token header.
-    """
-    # TODO: Remove this once all VMs are upgraded to 0.2.0 or later
-    try:
-        if not boot_token:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Boot token is required (X-Boot-Token header)",
-            )
-        if not hotkey:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Hotkey is required"
-            )
-
-        vm_config = await _get_vm_cache_config(db, hotkey, vm_name)
-        if vm_config is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
-
-        # Legacy passphrase stored under storage key
-        passphrase = decrypt_passphrase(vm_config.volume_passphrases.get("storage"))
-
-        return {"passphrase": passphrase}
-
-    except NonceError as e:
-        logger.warning(f"Boot token validation error: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
-    except ValueError as e:
-        logger.error(f"Cache passphrase not found: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No cache passphrase found for this VM. This shouldn't happen for encrypted volumes.",
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error retrieving cache passphrase: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve cache passphrase",
         )
 
 
@@ -340,6 +283,53 @@ async def create_server(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Server registration failed"
         )
+
+
+TEE_MEASUREMENTS_CACHE_KEY = "tee_measurements"
+TEE_MEASUREMENTS_CACHE_TTL = 3600  # 60 minutes; measurements only change on new releases
+
+
+@router.get("/tee/measurements", response_model=List[TeeMeasurementResponse])
+async def get_tee_measurements():
+    """
+    Return the list of currently accepted TEE measurement configurations.
+
+    These are the reference values (MRTD + RTMRs) that the platform accepts
+    during boot and runtime attestation. Clients can use these to independently
+    verify that a server is running approved software before trusting it.
+    No authentication required — public transparency endpoint.
+    """
+    cached = await settings.redis_client.get(TEE_MEASUREMENTS_CACHE_KEY)
+    if cached:
+        return json.loads(cached)
+
+    try:
+        measurements = settings.tee_measurements
+    except Exception as e:
+        logger.error(f"TEE measurement config is invalid: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to read TEE measurements",
+        )
+
+    result = [
+        TeeMeasurementResponse(
+            version=m.version,
+            name=m.name,
+            mrtd=m.mrtd,
+            boot_rtmrs=m.boot_rtmrs,
+            runtime_rtmrs=m.runtime_rtmrs,
+            expected_gpus=m.expected_gpus,
+            gpu_count=m.gpu_count,
+        )
+        for m in measurements
+    ]
+    await settings.redis_client.set(
+        TEE_MEASUREMENTS_CACHE_KEY,
+        json.dumps([r.model_dump() for r in result]).decode(),
+        ex=TEE_MEASUREMENTS_CACHE_TTL,
+    )
+    return result
 
 
 @router.get("/maintenance/policy", response_model=MaintenancePolicyResponse)

@@ -223,17 +223,13 @@ STARVING_COOLDOWN_MINUTES = 90
 STARVING_HISTORY_KEY_PREFIX = "starving:"
 
 # Higher min instance counts for some chutes...
-LIMIT_OVERRIDES = {
-    "ac059e33-eb27-541c-b9a9-24b214036475": 12,
-}
+LIMIT_OVERRIDES = {}
 FAILSAFE = {
-    "ce6a92e4-5c2f-5681-9742-c80a4447bbdf": 6,
     "aac09863-35b4-5d9b-9b67-6e6a9d54273a": 5,
-    "08a7a60f-6956-5a9e-9983-5603c3ac5a38": 4,
     "b048fe26-0352-5c46-acf7-335e527e7f3d": 12,
-    "e51e818e-fa63-570d-9f68-49d7d1b4d12f": 10,
-    "2ff25e81-4586-5ec8-b892-3a6f342693d7": 18,
-    "d899b064-d9ae-5612-99e6-413e9136671b": 10,
+    "2ff25e81-4586-5ec8-b892-3a6f342693d7": 10,
+    "d899b064-d9ae-5612-99e6-413e9136671b": 4,
+    "ac059e33-eb27-541c-b9a9-24b214036475": 10,
 }
 
 
@@ -1922,13 +1918,19 @@ async def _perform_autoscale_impl(
         # Identify Potential Donors (for forced donations during arbitration)
         # Private chutes are not donors unless they belong to chutes_user_id (semi-private).
         # Chutes in LIMIT_OVERRIDES should never be preempted.
+        # Chutes that recently scaled up should never donate — we just paid cold-start
+        # time for those instances and donating them away wastes that investment.
         # Use SMOOTHED utilization for donor determination to prevent flip-flopping
         allow_donor = ctx.public or (ctx.info and ctx.info.user_id == await chutes_user_id())
+        recently_scaled_up = await settings.redis_client.exists(
+            f"recently_scaled_up:{ctx.chute_id}"
+        )
         if (
             not ctx.any_rate_limiting
             and ctx.current_count > 0
             and allow_donor
             and ctx.chute_id not in LIMIT_OVERRIDES
+            and not recently_scaled_up
         ):
             # Voluntary scale-down candidate: below scale_down_threshold
             # These will scale down on their own (gated by moving average)
@@ -2549,7 +2551,76 @@ async def _perform_autoscale_impl(
                         f"Target smoothed: {ctx.chute_id} raw={raw_target} -> smoothed={ctx.target_count} "
                         f"(prev_smooth={prev_target:.1f}, alpha={EMA_ALPHA_TARGET})"
                     )
-            target_for_ema = float(ctx.target_count)
+
+        # Cap max increase per cycle to prevent bursty thrashing.
+        # Respect failsafe minimums for public chutes so the cap never
+        # reduces the target below the configured floor.
+        MAX_INCREASE_PER_CYCLE = 5
+        if (
+            ctx.action == "scale_up_candidate"
+            and ctx.target_count > ctx.current_count + MAX_INCREASE_PER_CYCLE
+        ):
+            cap_floor = ctx.current_count + MAX_INCREASE_PER_CYCLE
+            if ctx.public:
+                failsafe_min = FAILSAFE.get(ctx.chute_id, UNDERUTILIZED_CAP)
+                cap_floor = max(cap_floor, failsafe_min)
+            ctx.target_count = min(ctx.target_count, cap_floor)
+            ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+            ctx.downscale_amount = 0
+            logger.info(
+                f"Target capped: {ctx.chute_id} raw={raw_target} -> capped={ctx.target_count} "
+                f"(max increase per cycle={MAX_INCREASE_PER_CYCLE}, current={ctx.current_count})"
+            )
+
+        # Sticky high-water mark: hold target at its recent peak for 15 minutes
+        # to prevent premature scale-down after bursty traffic.
+        STICKY_TARGET_TTL = 900  # 15 minutes
+        if ctx.action in {"scale_up_candidate", "scale_down_candidate"} and not dry_run:
+            peak_key = f"target_peak:{ctx.chute_id}"
+            stored_peak = await settings.redis_client.get(peak_key)
+            if stored_peak is not None:
+                stored_peak = int(stored_peak)
+
+            if ctx.target_count >= (stored_peak or 0):
+                # New peak or equal — update and reset TTL
+                await settings.redis_client.set(peak_key, ctx.target_count, ex=STICKY_TARGET_TTL)
+            elif stored_peak and stored_peak > ctx.target_count:
+                # Target dropped but peak is still fresh — stick to peak,
+                # but still respect the per-cycle cap and max_instances.
+                effective_max = ctx.max_instances
+                if ctx.has_rolling_update and ctx.old_instance_count:
+                    effective_max = ctx.max_instances + ctx.old_instance_count
+                # For scale-down candidates, sticky only prevents the downscale
+                # (holds at current_count) — it should not create a new scale-up.
+                peak_ceiling = (
+                    ctx.current_count
+                    if ctx.action == "scale_down_candidate"
+                    else ctx.current_count + MAX_INCREASE_PER_CYCLE
+                )
+                effective_peak = min(
+                    stored_peak,
+                    peak_ceiling,
+                    effective_max,
+                )
+                # Only apply if the clamped peak is actually higher than current target
+                if effective_peak > ctx.target_count:
+                    logger.info(
+                        f"Sticky target: {ctx.chute_id} calculated={ctx.target_count} -> peak={effective_peak} "
+                        f"(stored_peak={stored_peak}, holding at recent high-water mark)"
+                    )
+                    ctx.target_count = effective_peak
+                    ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+                    ctx.downscale_amount = max(0, ctx.current_count - ctx.target_count)
+                    # Fix action to match the actual direction after sticky adjustment
+                    if ctx.upscale_amount > 0 and ctx.action == "scale_down_candidate":
+                        ctx.action = "scale_up_candidate"
+                    elif ctx.upscale_amount == 0 and ctx.downscale_amount == 0:
+                        ctx.action = "no_action"
+
+        # Track the post-cap/sticky pre-gate target for EMA continuity.
+        # This captures the target after smoothing, cap, and sticky adjustments
+        # but before scale-down permission and soft_mode gates rewrite it.
+        target_for_ema = float(ctx.target_count)
 
         # For voluntary scale-downs (not forced donations), check moving average permission
         # Skip this check in soft_mode since we won't execute scale-downs anyway
@@ -2587,6 +2658,13 @@ async def _perform_autoscale_impl(
         # In dry_run, skip Redis writes entirely
         if not dry_run:
             await settings.redis_client.set(f"scale:{ctx.chute_id}", ctx.target_count, ex=3700)
+            # Track recent scale-ups so we don't donate away instances we just paid
+            # cold-start time for. 90-minute TTL covers typical cold-start delays.
+            RECENTLY_SCALED_UP_TTL = 5400  # 90 minutes
+            if ctx.target_count > ctx.current_count:
+                await settings.redis_client.set(
+                    f"recently_scaled_up:{ctx.chute_id}", "1", ex=RECENTLY_SCALED_UP_TTL
+                )
 
         if ctx.downscale_amount > 0:
             to_downsize.append((ctx.chute_id, ctx.downscale_amount, ctx.preferred_downscale_gpus))
@@ -3019,30 +3097,6 @@ async def calculate_local_decision(ctx: AutoScaleContext):
         )
         return
 
-    # Rolling updates: allow scaling up to ensure smooth transition
-    if ctx.has_rolling_update:
-        if ctx.is_starving:
-            # High demand during rolling update - scale up aggressively
-            num_to_add = max(2, int(ctx.current_count * 0.2))
-            ctx.upscale_amount = num_to_add
-            ctx.target_count = max(failsafe_min, ctx.current_count + num_to_add)
-            ctx.action = "scale_up_candidate"
-            clamp_to_max_instances(ctx)
-            logger.info(
-                f"Scale up: {ctx.chute_id} - rolling update with high demand, "
-                f"util={ctx.utilization_basis:.1%}, adding {ctx.upscale_amount} instances"
-            )
-        else:
-            # Rolling update without high demand - still allow +1 for buffer
-            ctx.upscale_amount = 1
-            ctx.target_count = max(failsafe_min, ctx.current_count + 1)
-            ctx.action = "scale_up_candidate"
-            clamp_to_max_instances(ctx)
-            logger.info(
-                f"Scale up: {ctx.chute_id} - rolling update buffer, adding {ctx.upscale_amount} instance(s)"
-            )
-        return
-
     if ctx.is_starving:
         num_to_add = 1
 
@@ -3196,6 +3250,27 @@ async def calculate_local_decision(ctx: AutoScaleContext):
                 f"Scale up: {ctx.chute_id} - new chute, "
                 f"adding {ctx.upscale_amount} instances, target={ctx.target_count}"
             )
+
+    # Rolling updates: add +1 buffer on top of the organic target to ensure smooth transition.
+    # For starving chutes during rolling updates, add extra headroom.
+    if ctx.has_rolling_update:
+        pre_buffer_target = ctx.target_count
+        if ctx.is_starving:
+            num_to_add = max(2, int(ctx.target_count * 0.2))
+        else:
+            num_to_add = 1
+        ctx.target_count = max(failsafe_min, ctx.target_count + num_to_add)
+        # Recalculate scale amounts based on the buffered target
+        ctx.upscale_amount = max(0, ctx.target_count - ctx.current_count)
+        ctx.downscale_amount = max(0, ctx.current_count - ctx.target_count)
+        if ctx.upscale_amount > 0:
+            ctx.action = "scale_up_candidate"
+        elif ctx.downscale_amount > 0:
+            ctx.action = "scale_down_candidate"
+        logger.info(
+            f"Rolling update buffer: {ctx.chute_id} - organic_target={pre_buffer_target}, "
+            f"added {num_to_add} instance(s), target={ctx.target_count}"
+        )
 
     # Always clamp to max_instances at the end
     clamp_to_max_instances(ctx)

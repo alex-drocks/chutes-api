@@ -1589,27 +1589,26 @@ async def _validate_launch_config_instance(
             await error_session.commit()
         raise
 
-    # For private instances, use the actual GPU's rate/multiplier instead of the
+    # Use the actual GPU's rate/multiplier instead of the
     # minimum across all supported GPUs in the node selector.
-    if instance.billed_to is not None:
-        actual_gpu = nodes[0].gpu_identifier
-        gpu_count = chute.node_selector.get("gpu_count", 1)
-        actual_base = gpu_count * COMPUTE_MULTIPLIER[actual_gpu]
-        ns_min_compute = node_selector.compute_multiplier
-        ns_min_hourly = instance.hourly_rate
-        if ns_min_compute > 0 and actual_base != ns_min_compute:
-            ratio = actual_base / ns_min_compute
-            instance.compute_multiplier *= ratio
-            warmup_compute_multiplier *= ratio
-        instance.hourly_rate = SUPPORTED_GPUS[actual_gpu]["hourly_rate"] * gpu_count
-        logger.info(
-            f"Adjusted private instance {instance.instance_id} for "
-            f"chute_id={chute.chute_id} name={chute.name!r} to actual GPU {actual_gpu}: "
-            f"hourly_rate={ns_min_hourly:.4f}->{instance.hourly_rate:.4f} "
-            f"(delta={instance.hourly_rate - ns_min_hourly:+.4f}, ratio={instance.hourly_rate / ns_min_hourly if ns_min_hourly else 0:.2f}x), "
-            f"compute_multiplier={ns_min_compute:.4f}->{actual_base:.4f} "
-            f"(delta={actual_base - ns_min_compute:+.4f}, ratio={actual_base / ns_min_compute if ns_min_compute else 0:.2f}x)"
-        )
+    actual_gpu = nodes[0].gpu_identifier
+    gpu_count = chute.node_selector.get("gpu_count", 1)
+    actual_base = gpu_count * COMPUTE_MULTIPLIER[actual_gpu]
+    ns_min_compute = node_selector.compute_multiplier
+    ns_min_hourly = instance.hourly_rate
+    if ns_min_compute > 0 and actual_base != ns_min_compute:
+        ratio = actual_base / ns_min_compute
+        instance.compute_multiplier *= ratio
+        warmup_compute_multiplier *= ratio
+    instance.hourly_rate = SUPPORTED_GPUS[actual_gpu]["hourly_rate"] * gpu_count
+    logger.info(
+        f"Adjusted instance {instance.instance_id} for "
+        f"chute_id={chute.chute_id} name={chute.name!r} to actual GPU {actual_gpu}: "
+        f"hourly_rate={ns_min_hourly:.4f}->{instance.hourly_rate:.4f} "
+        f"(delta={instance.hourly_rate - ns_min_hourly:+.4f}, ratio={instance.hourly_rate / ns_min_hourly if ns_min_hourly else 0:.2f}x), "
+        f"compute_multiplier={ns_min_compute:.4f}->{actual_base:.4f} "
+        f"(delta={actual_base - ns_min_compute:+.4f}, ratio={actual_base / ns_min_compute if ns_min_compute else 0:.2f}x)"
+    )
 
     # Store the warmup (base) compute multiplier for use at activation time.
     if instance.extra is None:

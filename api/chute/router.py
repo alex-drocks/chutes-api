@@ -1590,7 +1590,12 @@ async def _deploy_chute(
         allow_egress = False
     elif allow_egress is None:
         allow_egress = False
-    if "affine" in chute_args.name.lower() or "turbovision" in chute_args.name.lower():
+    if (
+        "affine" in chute_args.name.lower()
+        or "turbovision" in chute_args.name.lower()
+        or "vocence" in chute_args.name.lower()
+        or "leoma" in chute_args.name.lower()
+    ):
         allow_egress = False
 
     # Module locking: standard templates are always locked, otherwise default False.
@@ -1605,9 +1610,14 @@ async def _deploy_chute(
     if chute_args.encrypted_fs is None:
         chute_args.encrypted_fs = False
 
-    # TEE mode.
+    # TEE mode required now.
     if chute_args.tee is None:
-        chute_args.tee = False
+        chute_args.tee = True
+    if not chute_args.tee:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only TEE chutes are supported as of 2026-05-12, please set tee=True",
+        )
 
     if not chute_args.node_selector:
         chute_args.node_selector = {"gpu_count": 1}
@@ -2202,11 +2212,16 @@ async def deploy_chute(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=json.dumps(response).decode(),
             )
+    use_rolling_update = chute_args.use_rolling_update
+    if is_subnet_model:
+        use_rolling_update = False
+    elif use_rolling_update is None:
+        use_rolling_update = True
     chute = await _deploy_chute(
         chute_args,
         db,
         current_user,
-        use_rolling_update=not is_subnet_model,
+        use_rolling_update=use_rolling_update,
         accept_fee=accept_fee,
         is_subnet_model=is_subnet_model,
     )

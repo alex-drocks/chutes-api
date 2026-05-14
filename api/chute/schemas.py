@@ -205,6 +205,7 @@ class ChuteArgs(BaseModel):
     encrypted_fs: Optional[bool] = Field(default=False)
     tee: Optional[bool] = Field(default=False)
     lock_modules: Optional[bool] = Field(default=None)
+    use_rolling_update: Optional[bool] = Field(default=True)
 
 
 class InvocationArgs(BaseModel):

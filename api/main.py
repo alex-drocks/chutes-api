@@ -289,6 +289,11 @@ async def host_router_middleware(request: Request, call_next):
     host = request.headers.get("host", "")
     host_parts = re.search(r"^([a-z0-9-]+)\.[a-z0-9-]+", host.lower())
 
+    # Slug overrides, if any.
+    slug = host_parts.group(1).lower() if host_parts else None
+    if slug == "chutes-qwen-qwen3-embedding-8b":
+        slug = "chutes-qwen-qwen3-embedding-8b-tee"
+
     # MEGALLM
     if (
         host_parts
@@ -318,11 +323,7 @@ async def host_router_middleware(request: Request, call_next):
         app.router = host_invocation_router
 
     # Hostname based router.
-    elif (
-        host_parts
-        and host_parts.group(1) != "api"
-        and (chute_id := await chute_id_by_slug(host_parts.group(1).lower()))
-    ):
+    elif host_parts and host_parts.group(1) != "api" and (chute_id := await chute_id_by_slug(slug)):
         request.state.chute_id = chute_id
         request.state.auth_method = "invoke"
         request.state.auth_object_type = "chutes"
