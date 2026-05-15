@@ -569,14 +569,6 @@ async def check_quota_and_balance(request, current_user, chute):
                 )
             force_paygo = True
 
-        if get_subscription_tier(quota) == 3.0 and chute.chute_id in settings.premium_chute_ids:
-            if effective_balance <= 0:
-                raise HTTPException(
-                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                    detail="This model requires a higher subscription tier or positive balance.",
-                )
-            force_paygo = True
-
         # Automatically switch to paygo when the quota is exceeded.
         if request_count >= quota:
             if effective_balance <= 0 and not request.state.free_invocation:
