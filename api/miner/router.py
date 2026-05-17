@@ -31,7 +31,7 @@ from api.invocation.util import gather_metrics
 from api.user.service import get_current_user
 from api.database import get_session, get_db_session
 from api.config import settings
-from api.constants import HOTKEY_HEADER, AUTHORIZATION_HEADER, THRASH_WINDOW_HOURS
+from api.constants import HOTKEY_HEADER, AUTHORIZATION_HEADER
 from api.instance.util import _decode_chutes_jwt
 import api.miner_client as miner_client
 from api.metasync import get_miner_by_hotkey, MetagraphNode
@@ -621,38 +621,9 @@ async def get_thrash_cooldowns(
     _: User = Depends(get_current_user(purpose="miner", registered_to=settings.netuid)),
 ):
     """
-    Return all chutes where this miner is currently in a thrash cooldown,
-    along with when the cooldown expires.
+    XXX Removed, no such thing, but return empty array for compat.
     """
-    result = await session.execute(
-        text(f"""
-            SELECT DISTINCT ON (ia.chute_id)
-                ia.chute_id,
-                c.name AS chute_name,
-                ia.deleted_at,
-                ia.deleted_at + INTERVAL '{THRASH_WINDOW_HOURS} hours' AS cooldown_expires_at
-            FROM instance_audit ia
-            JOIN chutes c ON c.chute_id = ia.chute_id
-            WHERE ia.miner_hotkey = :hotkey
-              AND ia.activated_at IS NOT NULL
-              AND ia.deleted_at IS NOT NULL
-              AND ia.deleted_at > NOW() - INTERVAL '{THRASH_WINDOW_HOURS} hours'
-              AND ia.valid_termination IS NOT TRUE
-            ORDER BY ia.chute_id, ia.deleted_at DESC
-        """),
-        {"hotkey": hotkey},
-    )
-    return [
-        {
-            "chute_id": row.chute_id,
-            "chute_name": row.chute_name,
-            "deleted_at": row.deleted_at.isoformat() if row.deleted_at else None,
-            "cooldown_expires_at": row.cooldown_expires_at.isoformat()
-            if row.cooldown_expires_at
-            else None,
-        }
-        for row in result.fetchall()
-    ]
+    return []
 
 
 @router.get("/metagraph")
