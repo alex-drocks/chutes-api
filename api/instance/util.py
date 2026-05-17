@@ -172,10 +172,12 @@ async def batch_check_disabled(instance_ids: list[str]) -> set[str]:
 
 
 async def get_instance_disable_count(instance_id: str) -> int:
-    count = await settings.redis_client.get(f"instance_disable_count:{instance_id}")
-    if count is None:
-        return 0
-    return int(count)
+    key = f"instance_disable_zset:{instance_id}"
+    now = time.time()
+    cutoff = now - 3600
+    await settings.redis_client.client.zremrangebyscore(key, "-inf", cutoff)
+    count = await settings.redis_client.client.zcard(key)
+    return count
 
 
 class _InstanceInfo:
@@ -290,7 +292,7 @@ async def disable_instance(
     instant_delete: bool = False,
 ) -> bool:
     disabled_key = f"instance_disabled:{instance_id}"
-    count_key = f"instance_disable_count:{instance_id}"
+    count_key = f"instance_disable_zset:{instance_id}"
 
     # Use the raw redis client to ensure we don't silently discard.
     acquired = await settings.redis_client.client.set(
@@ -299,8 +301,17 @@ async def disable_instance(
     if not acquired:
         return False
 
-    disable_count = await settings.redis_client.incr(count_key)
-    await settings.redis_client.expire(count_key, 3600)
+    # Sliding window: track each disable as a ZSET entry scored by timestamp.
+    # Trim entries older than 1 hour, then count remaining.
+    now = time.time()
+    cutoff = now - 3600
+    pipe = settings.redis_client.client.pipeline()
+    pipe.zremrangebyscore(count_key, "-inf", cutoff)
+    pipe.zadd(count_key, {f"{now}:{uuid.uuid4().hex[:8]}": now})
+    pipe.zcard(count_key)
+    pipe.expire(count_key, 3600)
+    results = await pipe.execute()
+    disable_count = results[2]
 
     should_delete = disable_count > MAX_INSTANCE_DISABLES or skip_disable_loop or instant_delete
 
@@ -310,9 +321,7 @@ async def disable_instance(
         elif skip_disable_loop:
             reason = f"server error after {disable_count} consecutive failure events"
         else:
-            reason = (
-                f"max consecutive failures reached after {disable_count - 1} temporary disables"
-            )
+            reason = f"max failures reached: {disable_count} disables within sliding 1-hour window"
 
         # For catastrophic errors (instant_delete) or server errors (skip_disable_loop),
         # delete immediately - no cascade check needed because connection worked
@@ -339,7 +348,7 @@ async def disable_instance(
 
 async def clear_instance_disable_state(instance_id: str) -> None:
     await settings.redis_client.delete(f"instance_disabled:{instance_id}")
-    await settings.redis_client.delete(f"instance_disable_count:{instance_id}")
+    await settings.redis_client.delete(f"instance_disable_zset:{instance_id}")
 
 
 MANAGERS = {}

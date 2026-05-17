@@ -223,13 +223,16 @@ STARVING_COOLDOWN_MINUTES = 90
 STARVING_HISTORY_KEY_PREFIX = "starving:"
 
 # Higher min instance counts for some chutes...
-LIMIT_OVERRIDES = {}
+LIMIT_OVERRIDES = {
+    "ac059e33-eb27-541c-b9a9-24b214036475": 8,
+    "17912852-3fb6-5fb0-b05d-fcfebe0ada6d": 5,
+    "398651e1-5f85-5e50-a513-7c5324e8e839": 6,
+}
 FAILSAFE = {
     "aac09863-35b4-5d9b-9b67-6e6a9d54273a": 5,
     "b048fe26-0352-5c46-acf7-335e527e7f3d": 12,
     "2ff25e81-4586-5ec8-b892-3a6f342693d7": 10,
     "d899b064-d9ae-5612-99e6-413e9136671b": 4,
-    "ac059e33-eb27-541c-b9a9-24b214036475": 6,
 }
 
 
@@ -1772,12 +1775,15 @@ async def _perform_autoscale_impl(
                 {"lookback": RECENT_SCALEUP_LOOKBACK_MINUTES},
             )
             recently_scaled_up_chutes = {row[0] for row in result.fetchall()}
-            # Peak target in the sticky lookback window for high-water mark.
+            # Peak target in the sticky lookback window for high-water mark,
+            # but only considering when the action was to scale up so this never
+            # self-perpetuates.
             result = await session.execute(
                 text("""
                     SELECT chute_id, MAX(target_count) as peak_target
                     FROM capacity_log
                     WHERE timestamp >= NOW() - make_interval(mins => :lookback)
+                      AND action_taken = 'scale_up_candidate'
                     GROUP BY chute_id
                 """),
                 {"lookback": STICKY_LOOKBACK_MINUTES},

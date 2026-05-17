@@ -102,8 +102,8 @@ TEE_BONUS = 2.25
 # Duration for instance disablement when consecutive errors are hit (increases linearly until max).
 INSTANCE_DISABLE_BASE_TIMEOUT = 90
 
-# Number of times an instance can be disabled before deleting (after consecutive failures).
-MAX_INSTANCE_DISABLES = 2
+# Number of times an instance can be disabled within a sliding 1-hour window before deletion.
+MAX_INSTANCE_DISABLES = 5
 
 # Cascade failure detection: if more than this many instances are pending deletion
 # within the detection window, assume network outage and skip deletions.
