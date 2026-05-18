@@ -23,6 +23,10 @@ ENCRYPTED_HEADER = "X-Chutes-Encrypted"
 # LUKS volume names allowed in GET/POST (extendable)
 SUPPORTED_LUKS_VOLUMES = ("storage", "tdx-cache")
 
+# The storage volume's first-boot state determines whether a new k3s encryption
+# key must be generated (luksFormat on a raw device vs. luksOpen on existing LUKS).
+LUKS_STORAGE_VOLUME = "storage"
+
 # Min balance to register via the CLI (tao units)
 MIN_REG_BALANCE = 0.25
 
@@ -79,12 +83,6 @@ SCALE_DOWN_LOOKBACK_MINUTES = 90
 # Can't drop more than this ratio below the rolling average target count.
 SCALE_DOWN_MAX_DROP_RATIO = 0.6
 
-# Thrash detection: prevents miners from gaming bounty/urgency boosts by
-# repeatedly deleting and recreating instances of the same chute.
-# Window to check for prior deleted active instances before new instance creation.
-THRASH_WINDOW_HOURS = 2
-# Duration of penalty period after activation where boosts are not applied.
-THRASH_PENALTY_HOURS = 2
 # Cooldown between bounty creations per chute to prevent race conditions.
 BOUNTY_COOLDOWN_SECONDS = 600
 
@@ -102,8 +100,8 @@ TEE_BONUS = 2.25
 # Duration for instance disablement when consecutive errors are hit (increases linearly until max).
 INSTANCE_DISABLE_BASE_TIMEOUT = 90
 
-# Number of times an instance can be disabled before deleting (after consecutive failures).
-MAX_INSTANCE_DISABLES = 2
+# Number of times an instance can be disabled within a sliding 1-hour window before deletion.
+MAX_INSTANCE_DISABLES = 5
 
 # Cascade failure detection: if more than this many instances are pending deletion
 # within the detection window, assume network outage and skip deletions.
