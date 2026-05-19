@@ -7,7 +7,6 @@ import api.user.schemas  # noqa: F401
 import api.fmv.schemas  # noqa: F401
 import api.payment.schemas  # noqa: F401
 import api.logo.schemas  # noqa: F401
-import api.report.schemas  # noqa: F401
 import api.capacity_log.schemas  # noqa: F401
 import api.job.schemas  # noqa: F401
 import api.secret.schemas  # noqa: F401

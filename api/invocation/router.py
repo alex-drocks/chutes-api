@@ -19,7 +19,7 @@ from io import BytesIO, StringIO
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from starlette.responses import StreamingResponse
-from sqlalchemy import text, select
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.config import settings
 from api.chute.util import (
@@ -32,8 +32,7 @@ from api.chute.util import (
 from api.util import recreate_vlm_payload
 from api.user.schemas import User
 from api.user.service import chutes_user_id, get_current_user, subnet_role_accessible
-from api.report.schemas import Report, ReportArgs
-from api.database import get_db_session, get_session, get_inv_session, get_db_ro_session
+from api.database import get_session, get_inv_session, get_db_ro_session
 from api.instance.util import get_chute_target_manager
 from api.invocation.util import (
     get_prompt_prefix_hashes,
@@ -343,9 +342,9 @@ async def get_export(
     hour_format: str,
 ) -> Response:
     """
-    Get invocation exports (and reports) for a particular hour.
+    Get invocation exports for a particular hour.
     """
-    format_match = re.match(r"^(\d+)((?:-(reports|jobs))?\.csv)$", hour_format)
+    format_match = re.match(r"^(\d+)((?:-(jobs))?\.csv)$", hour_format)
     if not format_match:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid format: {hour_format}"
@@ -377,7 +376,7 @@ async def get_export(
             detail=f"Invocations export not found {year=} {month=} {day=} {hour=}",
         )
 
-    # Construct the S3 key based on whether this is a reports request
+    # Construct the S3 key.
     key = f"invocations/{year}/{month:02d}/{day:02d}/{hour:02d}{suffix}"
 
     # Check if the file exists
@@ -457,41 +456,6 @@ async def get_recent_export(
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="recent.csv"'},
     )
-
-
-@router.post("/{invocation_id}/report")
-async def report_invocation(
-    invocation_id: str,
-    report_args: ReportArgs,
-    db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user()),
-):
-    # Make sure the invocation exists and there isn't already a report.
-    report_exists = (
-        await db.execute(
-            select(
-                text(
-                    "EXISTS (SELECT 1 FROM reports WHERE invocation_id = :invocation_id)"
-                ).bindparams(invocation_id=invocation_id)
-            )
-        )
-    ).scalar()
-    if report_exists:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A report has already been filed for this invocation",
-        )
-
-    report = Report(
-        invocation_id=invocation_id,
-        user_id=current_user.user_id,
-        reason=report_args.reason,
-    )
-    db.add(report)
-    await db.commit()
-    return {
-        "status": f"report received for {invocation_id=}",
-    }
 
 
 async def _invoke(
