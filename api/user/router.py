@@ -1852,7 +1852,7 @@ async def change_fingerprint(
         if not header:
             return False
         signing_message = f"{header}:{fingerprint}:{nonce}"
-        keypair = Keypair(hotkey)
+        keypair = Keypair(header)
         try:
             if keypair.verify(signing_message, signature_hex):
                 return True
