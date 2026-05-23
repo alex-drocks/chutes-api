@@ -32,7 +32,7 @@ from async_lru import alru_cache
 from urllib.parse import urlparse
 from sqlalchemy.future import select
 from api.constants import VLM_MAX_SIZE, MIN_REG_BALANCE, INTEGRATED_SUBNETS
-from api.metasync import MetagraphNode
+from api.metagraph import MetagraphNode
 from api.permissions import Permissioning
 from fastapi import Request, status, HTTPException
 from sqlalchemy import func, or_, and_, exists

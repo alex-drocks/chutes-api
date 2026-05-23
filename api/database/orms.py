@@ -10,7 +10,7 @@ import api.logo.schemas  # noqa: F401
 import api.capacity_log.schemas  # noqa: F401
 import api.job.schemas  # noqa: F401
 import api.secret.schemas  # noqa: F401
-import api.metasync  # noqa: F401
+import api.metagraph  # noqa: F401
 import api.user.events  # noqa: F401
 import api.node.events  # noqa: F401
 import api.server.schemas  # noqa: F401

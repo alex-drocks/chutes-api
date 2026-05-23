@@ -1,5 +1,5 @@
 from loguru import logger
-from api.metasync import get_miner_by_hotkey
+from api.metagraph import get_miner_by_hotkey
 from api.config import settings
 
 

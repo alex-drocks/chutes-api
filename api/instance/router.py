@@ -85,7 +85,7 @@ from api.server.exceptions import (
 )
 from api.user.schemas import User
 from api.user.service import get_current_user, chutes_user_id, subnet_role_accessible
-from api.metasync import get_miner_by_hotkey
+from api.metagraph import get_miner_by_hotkey
 from api.util import (
     semcomp,
     is_valid_host,
