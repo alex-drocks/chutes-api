@@ -1940,7 +1940,6 @@ async def get_launch_config(
                     "message": f"Launch token created for chute {chute_id} by miner {hotkey}",
                     "data": {
                         "chute_id": chute_id,
-                        "config_id": config_id,
                         "miner_hotkey": hotkey,
                         "gpu_count": ns.get("gpu_count", 1),
                         "include_gpus": ns.get("include"),
