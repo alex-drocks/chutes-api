@@ -58,6 +58,7 @@ from api.instance.schemas import (
 )
 from api.job.schemas import Job
 from api.instance.util import (
+    _decode_chutes_jwt,
     create_launch_jwt_v2,
     generate_fs_key,
     get_instance_by_chute_and_id,
@@ -1991,17 +1992,17 @@ async def get_rint_nonce(
 
     token = authorization.strip().split(" ")[-1]
 
-    # Decode the JWT to get the config_id
+    # Decode and verify the JWT signature
     try:
-        import jwt
-
-        payload = jwt.decode(token, options={"verify_signature": False})
+        payload = _decode_chutes_jwt(token, require_exp=True)
         req_config_id = payload.get("sub")
         if not req_config_id or req_config_id != config_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or missing token, expected launch JWT",
             )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

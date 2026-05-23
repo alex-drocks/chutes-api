@@ -34,6 +34,7 @@ from api.idp.schemas import (
     OAuthAppUpdateRequest,
     OAuthAuthorization,
     OAuthRefreshToken,
+    PRIVILEGED_SCOPES,
     get_available_scopes,
     get_scope_descriptions,
     validate_requested_scopes,
@@ -225,6 +226,16 @@ async def create_app(
     current_user: User = Depends(get_current_user()),
 ):
     """Create a new OAuth application."""
+    if args.allowed_scopes:
+        requested_privileged = set(args.allowed_scopes) & PRIVILEGED_SCOPES
+        if requested_privileged and not Permissioning.enabled(
+            current_user, Permissioning.unlimited_dev
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Privileged scopes require unlimited_dev permission: {sorted(requested_privileged)}",
+            )
+
     existing = (
         await db.execute(
             select(OAuthApp).where(
@@ -303,6 +314,17 @@ async def update_app(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Application not found",
         )
+
+    # Check privileged scopes on update
+    if args.allowed_scopes:
+        requested_privileged = set(args.allowed_scopes) & PRIVILEGED_SCOPES
+        if requested_privileged and not Permissioning.enabled(
+            current_user, Permissioning.unlimited_dev
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Privileged scopes require unlimited_dev permission: {sorted(requested_privileged)}",
+            )
 
     # Check for duplicate name if changing
     if args.name and args.name != app.name:
@@ -690,10 +712,10 @@ async def authorize_get(
             status_code=400,
         )
 
-    # Validate PKCE if provided
-    if code_challenge and code_challenge_method not in ("plain", "S256"):
+    # Validate PKCE if provided (only S256 is allowed per RFC 7636 recommendation)
+    if code_challenge and code_challenge_method != "S256":
         return HTMLResponse(
-            content=error_page("invalid_request", "Invalid code_challenge_method"),
+            content=error_page("invalid_request", "Only S256 code_challenge_method is supported"),
             status_code=400,
         )
 
