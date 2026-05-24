@@ -68,44 +68,6 @@ async def get_user_from_token(token: str, request: Request) -> User:
         )
     user_id = payload.get("sub")
 
-    # Squad access?
-    if payload.get("iss") == "squad":
-        if request.state.auth_method not in ("invoke", "read"):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Only invocations and read/GET requests are allowed with squad auth (for now).",
-            )
-        try:
-            payload = jwt.decode(
-                token,
-                settings.squad_cert,
-                algorithms=["RS256"],
-                options={
-                    "verify_signature": True,
-                    "verify_exp": True,
-                    "verify_iat": True,
-                    "verify_iss": True,
-                    "require": ["exp", "iat", "iss"],
-                },
-                issuer="squad",
-            )
-            async with get_session() as session:
-                user = (
-                    await session.execute(
-                        select(User).where(User.user_id == user_id, User.squad_enabled.is_(True))
-                    )
-                ).scalar_one_or_none()
-                if user:
-                    request.state.squad_request = True
-                    request.state.free_invocation = True
-                    return user
-        except jwt.InvalidTokenError:
-            ...
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token.",
-        )
-
     # Normal user JWT access.
     fingerprint_hash = await get_user_fingerprint_hash(user_id)
     if fingerprint_hash:

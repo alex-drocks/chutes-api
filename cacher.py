@@ -59,7 +59,7 @@ async def warm_up_inventory_history():
     """
     Update the miner unique chute count history endpoint.
     """
-    from api.metasync import get_inventory_history
+    from api.metagraph import get_inventory_history
 
     logger.info("Attempting to warm up inventory history...")
     history = None
