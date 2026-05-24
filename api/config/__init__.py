@@ -276,6 +276,9 @@ class Settings(BaseSettings):
     # IP hash check salt.
     ip_check_salt: str = os.getenv("IP_CHECK_SALT", "salt")
 
+    # User JWT salt.
+    user_jwt_salt: Optional[str] = os.getenv("USER_JWT_SALT", "replaceme")
+
     # Flag indicating that all accounts created are free.
     all_accounts_free: bool = os.getenv("ALL_ACCOUNTS_FREE", "false").lower() == "true"
 
