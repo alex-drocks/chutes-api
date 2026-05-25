@@ -1871,6 +1871,31 @@ async def _perform_autoscale_impl(
         else:
             median_rev_per_inst = nonzero_revs[mid]
 
+    # Stable median computed over ALL public vLLM chutes with revenue (not just those
+    # under pressure). Used for retention boost and effective multiplier calculations
+    # so the boost doesn't thrash when chutes enter/leave the pressure set.
+    all_vllm_public_revs = sorted(
+        [
+            ctx.hourly_revenue_per_instance
+            for ctx in contexts.values()
+            if ctx.standard_template == "vllm"
+            and ctx.public
+            and ctx.current_count > 0
+            and ctx.hourly_revenue_per_instance > 0
+        ]
+    )
+    has_stable_revenue_data = len(all_vllm_public_revs) >= 3
+    stable_median_rev_per_inst = 0.0
+
+    if has_stable_revenue_data:
+        mid_s = len(all_vllm_public_revs) // 2
+        if len(all_vllm_public_revs) % 2 == 0:
+            stable_median_rev_per_inst = (
+                all_vllm_public_revs[mid_s - 1] + all_vllm_public_revs[mid_s]
+            ) / 2
+        else:
+            stable_median_rev_per_inst = all_vllm_public_revs[mid_s]
+
     any_profitable_starving = False
     for ctx in contexts.values():
         if ctx.standard_template != "vllm" or not ctx.public:
@@ -2210,9 +2235,9 @@ async def _perform_autoscale_impl(
             # Zero/unknown revenue chutes get a minimal weight so they can't
             # outrank known-revenue chutes on urgency alone.
             revenue_bonus = 0.0
-            if has_revenue_data and ctx.public and ctx.standard_template == "vllm":
-                if median_rev_per_inst > 0 and ctx.hourly_revenue_per_instance > 0:
-                    revenue_ratio = ctx.hourly_revenue_per_instance / median_rev_per_inst
+            if has_stable_revenue_data and ctx.public and ctx.standard_template == "vllm":
+                if stable_median_rev_per_inst > 0 and ctx.hourly_revenue_per_instance > 0:
+                    revenue_ratio = ctx.hourly_revenue_per_instance / stable_median_rev_per_inst
                     revenue_weight = max(0.1, min(revenue_ratio, 3.0))
                     revenue_bonus = min(revenue_ratio * REVENUE_BOOST_SCALE, REVENUE_BOOST_MAX)
                 else:
@@ -2222,15 +2247,17 @@ async def _perform_autoscale_impl(
 
             ctx.boost = 1.0 + urgency_bonus + revenue_bonus
         else:
-            # No scaling needed — small revenue retention signal to keep miners on profitable chutes
+            # No scaling needed — small revenue retention signal to keep miners on profitable chutes.
+            # Uses stable median (all public vLLM chutes) to avoid thrashing when the
+            # pressure-filtered set fluctuates.
             if (
-                has_revenue_data
-                and median_rev_per_inst > 0
+                has_stable_revenue_data
+                and stable_median_rev_per_inst > 0
                 and ctx.hourly_revenue_per_instance > 0
                 and ctx.public
                 and ctx.standard_template == "vllm"
             ):
-                revenue_ratio = ctx.hourly_revenue_per_instance / median_rev_per_inst
+                revenue_ratio = ctx.hourly_revenue_per_instance / stable_median_rev_per_inst
                 ctx.boost = 1.0 + min(revenue_ratio * REVENUE_RETAIN_SCALE, REVENUE_RETAIN_MAX)
             else:
                 ctx.boost = 1.0
