@@ -6,7 +6,8 @@ import os
 import re
 import gc
 import asyncio
-import fickling
+
+# import fickling
 import hashlib
 from loguru import logger
 from urllib.parse import quote
@@ -272,7 +273,7 @@ app.include_router(default_router)
 app.include_router(host_invocation_router)
 
 # Pickle safety checks.
-fickling.always_check_safety()
+# fickling.always_check_safety()
 
 
 @app.middleware("http")
