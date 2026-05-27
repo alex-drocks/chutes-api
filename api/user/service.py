@@ -8,7 +8,7 @@ from sqlalchemy.future import select
 from fastapi import APIRouter, Header, Request, HTTPException, Security, status
 from bittensor_wallet.keypair import Keypair
 from api.config import settings
-from api.metasync import MetagraphNode
+from api.metagraph import MetagraphNode
 from api.database import get_session
 from api.user.schemas import User
 from api.api_key.util import get_and_check_api_key

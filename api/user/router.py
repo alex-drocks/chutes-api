@@ -1852,7 +1852,7 @@ async def change_fingerprint(
         if not header:
             return False
         signing_message = f"{header}:{fingerprint}:{nonce}"
-        keypair = Keypair(hotkey)
+        keypair = Keypair(header)
         try:
             if keypair.verify(signing_message, signature_hex):
                 return True
@@ -2037,31 +2037,6 @@ async def change_bt_auth(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=error_message or "Invalid request, please provide a coldkey and/or hotkey",
     )
-
-
-@router.put("/squad_access")
-async def update_squad_access(
-    request: Request,
-    db: AsyncSession = Depends(get_db_session),
-    user: User = Depends(get_current_user()),
-):
-    """
-    Enable squad access.
-    """
-    user = await db.merge(user)
-    body = await request.json()
-    if body.get("enable") in (True, "true", "True"):
-        user.squad_enabled = True
-    elif "enable" in body:
-        user.squad_enabled = False
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail='Invalid request, payload should be {"enable": true|false}',
-        )
-    await db.commit()
-    await db.refresh(user)
-    return {"squad_enabled": user.squad_enabled}
 
 
 @router.get("/{user_id}/usage")

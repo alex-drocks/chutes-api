@@ -27,14 +27,6 @@ from loguru import logger
 
 
 @lru_cache(maxsize=1)
-def load_squad_cert():
-    if (path := os.getenv("SQUAD_CERT_PATH")) is not None:
-        with open(path, "rb") as infile:
-            return infile.read()
-    return b""
-
-
-@lru_cache(maxsize=1)
 def load_launch_config_private_key():
     if (path := os.getenv("LAUNCH_CONFIG_PRIVATE_KEY_PATH")) is not None:
         with open(path, "rb") as infile:
@@ -276,17 +268,14 @@ class Settings(BaseSettings):
     # IP hash check salt.
     ip_check_salt: str = os.getenv("IP_CHECK_SALT", "salt")
 
+    # User JWT salt.
+    user_jwt_salt: Optional[str] = os.getenv("USER_JWT_SALT", "replaceme")
+
     # Flag indicating that all accounts created are free.
     all_accounts_free: bool = os.getenv("ALL_ACCOUNTS_FREE", "false").lower() == "true"
 
-    # Squad cert (for JWT auth from agents).
-    squad_cert: bytes = load_squad_cert()
-
     # Consecutive failure count that triggers instance deletion.
     consecutive_failure_limit: int = int(os.getenv("CONSECUTIVE_FAILURE_LIMIT", "7"))
-
-    # API key for checking code.
-    codecheck_key: Optional[str] = os.getenv("CODECHECK_KEY")
 
     # Logos CDN hostname.
     logo_cdn: Optional[str] = os.getenv("LOGO_CDN", "https://logos.chutes.ai")

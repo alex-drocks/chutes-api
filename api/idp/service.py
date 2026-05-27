@@ -177,25 +177,23 @@ async def exchange_authorization_code(
     if not app or app.app_id != auth_code.app_id:
         return None, None, None, None, "invalid_client"
 
-    # Verify client secret or PKCE
+    # Always verify client secret for confidential clients (those with a secret hash).
+    if app.client_secret_hash and (not client_secret or not app.verify_secret(client_secret)):
+        return None, None, None, None, "invalid_client"
+
+    # Verify PKCE code_verifier if a code_challenge was present during authorization.
     if auth_code.code_challenge:
-        # PKCE flow
         if not code_verifier:
             return None, None, None, None, "invalid_grant"
 
-        if auth_code.code_challenge_method == "S256":
-            # RFC 7636: BASE64URL(SHA256(code_verifier))
-            sha256_hash = hashlib.sha256(code_verifier.encode()).digest()
-            expected = base64.urlsafe_b64encode(sha256_hash).rstrip(b"=").decode("ascii")
-            if expected != auth_code.code_challenge:
-                return None, None, None, None, "invalid_grant"
-        elif auth_code.code_challenge_method == "plain":
-            if code_verifier != auth_code.code_challenge:
-                return None, None, None, None, "invalid_grant"
-    else:
-        # Standard flow - verify client secret
-        if not client_secret or not app.verify_secret(client_secret):
-            return None, None, None, None, "invalid_client"
+        if auth_code.code_challenge_method != "S256":
+            return None, None, None, None, "invalid_grant"
+
+        # RFC 7636: BASE64URL(SHA256(code_verifier))
+        sha256_hash = hashlib.sha256(code_verifier.encode()).digest()
+        expected = base64.urlsafe_b64encode(sha256_hash).rstrip(b"=").decode("ascii")
+        if expected != auth_code.code_challenge:
+            return None, None, None, None, "invalid_grant"
 
     async with get_session() as session:
         # Get or create authorization

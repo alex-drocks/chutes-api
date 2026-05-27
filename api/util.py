@@ -10,7 +10,6 @@ import ast
 import aiodns
 import pybase64 as base64
 import ctypes
-import random
 import semver
 import string
 import aiohttp
@@ -32,7 +31,7 @@ from async_lru import alru_cache
 from urllib.parse import urlparse
 from sqlalchemy.future import select
 from api.constants import VLM_MAX_SIZE, MIN_REG_BALANCE, INTEGRATED_SUBNETS
-from api.metasync import MetagraphNode
+from api.metagraph import MetagraphNode
 from api.permissions import Permissioning
 from fastapi import Request, status, HTTPException
 from sqlalchemy import func, or_, and_, exists
@@ -129,7 +128,8 @@ def gen_random_token(k: int = 16) -> str:
     """
     Generate a random token, useful for fingerprints.
     """
-    return "".join(random.sample(string.ascii_letters + string.digits, k=k))
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(k))
 
 
 def nonce_is_valid(nonce: str) -> bool:

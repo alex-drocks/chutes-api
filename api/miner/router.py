@@ -34,7 +34,7 @@ from api.config import settings
 from api.constants import HOTKEY_HEADER, AUTHORIZATION_HEADER
 from api.instance.util import _decode_chutes_jwt
 import api.miner_client as miner_client
-from api.metasync import get_miner_by_hotkey, MetagraphNode
+from api.metagraph import get_miner_by_hotkey, MetagraphNode
 from api.util import semcomp
 from metasync.shared import get_scoring_data
 

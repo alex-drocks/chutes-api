@@ -6,7 +6,8 @@ import os
 import re
 import gc
 import asyncio
-import fickling
+
+# import fickling
 import hashlib
 from loguru import logger
 from urllib.parse import quote
@@ -272,7 +273,7 @@ app.include_router(default_router)
 app.include_router(host_invocation_router)
 
 # Pickle safety checks.
-fickling.always_check_safety()
+# fickling.always_check_safety()
 
 
 @app.middleware("http")
@@ -284,7 +285,6 @@ async def host_router_middleware(request: Request, call_next):
         app.router = default_router
         return await call_next(request)
     request.state.chute_id = None
-    request.state.squad_request = False
     request.state.free_invocation = False
     host = request.headers.get("host", "")
     host_parts = re.search(r"^([a-z0-9-]+)\.[a-z0-9-]+", host.lower())

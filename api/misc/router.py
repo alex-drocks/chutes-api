@@ -20,10 +20,12 @@ from fastapi import APIRouter, Request, Response, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from typing import AsyncIterator
 from sqlalchemy import select
+from ipaddress import ip_address
 from api.config import settings
 from api.database import get_session
 from api.chute.util import get_one
 from api.chute.schemas import LLMDetail
+from api.util import get_resolved_ips, is_invalid_ip
 
 router = APIRouter()
 
@@ -61,9 +63,32 @@ async def _get_llm_root_map() -> dict[str, str]:
     return root_map
 
 
-def is_url_allowed(url: str) -> bool:
+async def is_url_allowed(url: str) -> bool:
     parsed = urlparse(url)
-    return any(domain in parsed.netloc for domain in ALLOWED_DOMAINS)
+    hostname = parsed.hostname
+    if not hostname:
+        return False
+    if not any(hostname == domain or hostname.endswith("." + domain) for domain in ALLOWED_DOMAINS):
+        return False
+
+    # Resolve and reject private/loopback IPs to prevent SSRF to internal services.
+    try:
+        # Check if hostname is already an IP literal.
+        try:
+            ip = ip_address(hostname)
+            if is_invalid_ip(ip):
+                return False
+            return True
+        except ValueError:
+            pass
+
+        resolved = await get_resolved_ips(hostname)
+        if any(is_invalid_ip(ip) for ip in resolved):
+            return False
+    except ValueError:
+        return False
+
+    return True
 
 
 @router.get("/proxy")
@@ -75,7 +100,7 @@ async def proxy(
     if url == "ping":
         return {"pong": True}
 
-    if not url.startswith(("http://", "https://")) or not is_url_allowed(url):
+    if not url.startswith(("http://", "https://")) or not await is_url_allowed(url):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or unauthorized URL.",
@@ -184,7 +209,7 @@ async def proxy_put(
     url: str,
     request: Request,
 ):
-    if not url.startswith(("http://", "https://")) or not is_url_allowed(url):
+    if not url.startswith(("http://", "https://")) or not await is_url_allowed(url):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or unauthorized URL.",

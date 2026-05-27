@@ -58,6 +58,7 @@ from api.instance.schemas import (
 )
 from api.job.schemas import Job
 from api.instance.util import (
+    _decode_chutes_jwt,
     create_launch_jwt_v2,
     generate_fs_key,
     get_instance_by_chute_and_id,
@@ -84,7 +85,7 @@ from api.server.exceptions import (
 )
 from api.user.schemas import User
 from api.user.service import get_current_user, chutes_user_id, subnet_role_accessible
-from api.metasync import get_miner_by_hotkey
+from api.metagraph import get_miner_by_hotkey
 from api.util import (
     semcomp,
     is_valid_host,
@@ -1939,7 +1940,6 @@ async def get_launch_config(
                     "message": f"Launch token created for chute {chute_id} by miner {hotkey}",
                     "data": {
                         "chute_id": chute_id,
-                        "config_id": config_id,
                         "miner_hotkey": hotkey,
                         "gpu_count": ns.get("gpu_count", 1),
                         "include_gpus": ns.get("include"),
@@ -1991,17 +1991,17 @@ async def get_rint_nonce(
 
     token = authorization.strip().split(" ")[-1]
 
-    # Decode the JWT to get the config_id
+    # Decode and verify the JWT signature
     try:
-        import jwt
-
-        payload = jwt.decode(token, options={"verify_signature": False})
+        payload = _decode_chutes_jwt(token, require_exp=True)
         req_config_id = payload.get("sub")
         if not req_config_id or req_config_id != config_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or missing token, expected launch JWT",
             )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

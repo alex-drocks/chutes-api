@@ -19,7 +19,7 @@ from io import BytesIO, StringIO
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from starlette.responses import StreamingResponse
-from sqlalchemy import text, select
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.config import settings
 from api.chute.util import (
@@ -32,8 +32,7 @@ from api.chute.util import (
 from api.util import recreate_vlm_payload
 from api.user.schemas import User
 from api.user.service import chutes_user_id, get_current_user, subnet_role_accessible
-from api.report.schemas import Report, ReportArgs
-from api.database import get_db_session, get_session, get_inv_session, get_db_ro_session
+from api.database import get_session, get_inv_session, get_db_ro_session
 from api.instance.util import get_chute_target_manager
 from api.invocation.util import (
     get_prompt_prefix_hashes,
@@ -343,9 +342,9 @@ async def get_export(
     hour_format: str,
 ) -> Response:
     """
-    Get invocation exports (and reports) for a particular hour.
+    Get invocation exports for a particular hour.
     """
-    format_match = re.match(r"^(\d+)((?:-(reports|jobs))?\.csv)$", hour_format)
+    format_match = re.match(r"^(\d+)((?:-(jobs))?\.csv)$", hour_format)
     if not format_match:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid format: {hour_format}"
@@ -377,7 +376,7 @@ async def get_export(
             detail=f"Invocations export not found {year=} {month=} {day=} {hour=}",
         )
 
-    # Construct the S3 key based on whether this is a reports request
+    # Construct the S3 key.
     key = f"invocations/{year}/{month:02d}/{day:02d}/{hour:02d}{suffix}"
 
     # Check if the file exists
@@ -457,41 +456,6 @@ async def get_recent_export(
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="recent.csv"'},
     )
-
-
-@router.post("/{invocation_id}/report")
-async def report_invocation(
-    invocation_id: str,
-    report_args: ReportArgs,
-    db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user()),
-):
-    # Make sure the invocation exists and there isn't already a report.
-    report_exists = (
-        await db.execute(
-            select(
-                text(
-                    "EXISTS (SELECT 1 FROM reports WHERE invocation_id = :invocation_id)"
-                ).bindparams(invocation_id=invocation_id)
-            )
-        )
-    ).scalar()
-    if report_exists:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A report has already been filed for this invocation",
-        )
-
-    report = Report(
-        invocation_id=invocation_id,
-        user_id=current_user.user_id,
-        reason=report_args.reason,
-    )
-    db.add(report)
-    await db.commit()
-    return {
-        "status": f"report received for {invocation_id=}",
-    }
 
 
 async def _invoke(
@@ -943,95 +907,27 @@ async def hostname_invocation(
         if model.startswith("THUDM/"):
             payload["model"] = re.sub(r"^THUDM/", "zai-org/", model)
 
-        # Kimi K2 Instruct update to moonshotai/Kimi-K2-Instruct-0905
-        if model in ("moonshotai/Kimi-K2-Instruct", "moonshotai/Kimi-K2-Instruct-75k"):
-            payload["model"] = "moonshotai/Kimi-K2-Instruct-0905"
-
-        # GLM-4.5V
-        if model.lower() == "zai-org/glm-4.5v-fp8":
-            payload["model"] = "zai-org/GLM-4.5V"
-
-        # Hermes 4.
-        elif model == "Zenith":
-            payload["model"] = "NousResearch/Hermes-4-405B-FP8"
-        elif model == "Meridian":
-            payload["model"] = "NousResearch/Hermes-4-70B"
-        elif model == "Proxima":
-            payload["model"] = "NousResearch/Hermes-4-14B"
-
-        # Migration of temp/test version of DeepSeek-R1 to "normal" one.
-        if model == "deepseek-ai/DeepSeek-R1-sgtest":
-            payload["model"] = "deepseek-ai/DeepSeek-R1"
-
         # Qwen3 8B embedding TEE rewrite.
         if model == "Qwen/Qwen3-Embedding-8B":
             payload["model"] = "Qwen/Qwen3-Embedding-8B-TEE"
 
         # TEE re-routes.
-        if model == "deepseek-ai/DeepSeek-V3.2-Speciale":
-            payload["model"] = "deepseek-ai/DeepSeek-V3.2-Speciale-TEE"
-        elif model == "tngtech/TNG-R1T-Chimera":
-            payload["model"] = "tngtech/TNG-R1T-Chimera-TEE"
-        elif model == "zai-org/GLM-4.6":
-            payload["model"] = "zai-org/GLM-4.6-TEE"
-        elif model == "openai/gpt-oss-120b":
-            payload["model"] = "openai/gpt-oss-120b-TEE"
-        elif model == "deepseek-ai/DeepSeek-V3-0324":
-            payload["model"] = "deepseek-ai/DeepSeek-V3-0324-TEE"
-        elif model == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8":
-            payload["model"] = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8-TEE"
-        elif model == "deepseek-ai/DeepSeek-V3.2":
+        if model == "deepseek-ai/DeepSeek-V3.2":
             payload["model"] = "deepseek-ai/DeepSeek-V3.2-TEE"
-        elif model == "deepseek-ai/DeepSeek-V3.1":
-            payload["model"] = "deepseek-ai/DeepSeek-V3.1-TEE"
-        elif model == "deepseek-ai/DeepSeek-V3.1-Terminus":
-            payload["model"] = "deepseek-ai/DeepSeek-V3.1-Terminus-TEE"
-        elif model == "zai-org/GLM-4.7":
-            payload["model"] = "zai-org/GLM-4.7-TEE"
-        elif model == "zai-org/GLM-4.5":
-            payload["model"] = "zai-org/GLM-4.5-TEE"
-        elif model == "moonshotai/Kimi-K2-Thinking":
-            payload["model"] = "moonshotai/Kimi-K2-Thinking-TEE"
-        elif model == "deepseek-ai/DeepSeek-R1-0528":
-            payload["model"] = "deepseek-ai/DeepSeek-R1-0528-TEE"
-        elif model == "deepseek-ai/DeepSeek-R1":
-            payload["model"] = "deepseek-ai/DeepSeek-R1-TEE"
-        elif model == "Qwen/Qwen3-235B-A22B-Instruct-2507":
-            payload["model"] = "Qwen/Qwen3-235B-A22B-Instruct-2507-TEE"
-        elif model == "NousResearch/Hermes-4-405B-FP8":
-            payload["model"] = "NousResearch/Hermes-4-405B-FP8-TEE"
-        elif model == "Qwen/Qwen2.5-VL-72B-Instruct":
-            payload["model"] = "Qwen/Qwen2.5-VL-72B-Instruct-TEE"
-        elif model == "OpenGVLab/InternVL3-78B":
-            payload["model"] = "OpenGVLab/InternVL3-78B-TEE"
-        elif model == "mistralai/Devstral-2-123B-Instruct-2512":
-            payload["model"] = "mistralai/Devstral-2-123B-Instruct-2512-TEE"
-        elif model == "Qwen/Qwen3-Coder-Next":
-            payload["model"] = "Qwen/Qwen3-Coder-Next-TEE"
-        elif model == "XiaomiMiMo/MiMo-V2-Flash":
-            payload["model"] = "XiaomiMiMo/MiMo-V2-Flash-TEE"
-        elif model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF1":
-            payload["model"] = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-TEE"
-        elif model == "tngtech/DeepSeek-TNG-R1T2-Chimera":
-            payload["model"] = "tngtech/DeepSeek-TNG-R1T2-Chimera-TEE"
         elif model == "chutesai/Mistral-Small-3.1-24B-Instruct-2503":
             payload["model"] = "chutesai/Mistral-Small-3.1-24B-Instruct-2503-TEE"
         elif model in ("Qwen/Qwen3-32B", "Qwen/Qwen3-32B:THINKING"):
             payload["model"] = "Qwen/Qwen3-32B-TEE"
             if model.endswith(":THINKING"):
                 payload["model"] = "Qwen/Qwen3-32B-TEE:THINKING"
-        elif model in ("openai/gpt-oss-20b", "openai/gpt-oss-20b:THINKING"):
-            payload["model"] = "openai/gpt-oss-20b:THINKING"
-            if model.endswith(":THINKING"):
-                payload["model"] = "openai/gpt-oss-20b:THINKING"
         elif model == "Qwen/Qwen3-Next-80B-A3B-Instruct":
             payload["model"] = "Qwen/Qwen3-Next-80B-A3B-Instruct-TEE"
         elif model == "unsloth/Mistral-Nemo-Instruct-2407":
             payload["model"] = "unsloth/Mistral-Nemo-Instruct-2407-TEE"
         elif model == "Qwen/Qwen2.5-Coder-32B-Instruct":
             payload["model"] = "Qwen/Qwen2.5-Coder-32B-Instruct-TEE"
-        elif model == "Qwen/Qwen2.5-VL-32B-Instruct":
-            payload["model"] = "Qwen/Qwen2.5-VL-32B-Instruct-TEE"
+        elif model == "zai-org/GLM-5-Turbo":
+            payload["model"] = "zai-org/GLM-5-TEE"
 
         # No file support currently.
         if isinstance(payload.get("messages"), list):

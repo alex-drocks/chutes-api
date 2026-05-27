@@ -42,6 +42,13 @@ CFSV_V4_PATH = f"{CFSV_PATH}_v4"
 BCM_SO_PATH = os.path.join(os.path.dirname(chutes.__file__), "chutes-bcm.so")
 MANIFEST_DRIVER_PATH = os.path.join(os.path.dirname(chutes.__file__), "generate_manifest_driver.py")
 
+# Minimal environment for buildah build subprocesses.
+_BUILDAH_CLEAN_ENV = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME": os.environ.get("HOME", "/home/chutes"),
+    "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", ""),
+}
+
 
 async def initialize():
     """
@@ -150,7 +157,9 @@ async def build_and_push_image(image, build_dir):
             "buildah",
             "build",
             "--isolation",
-            "chroot",
+            "rootless",
+            "--network",
+            "slirp4netns",
             "--storage-driver",
             storage_driver,
             "--layers",
@@ -170,6 +179,7 @@ async def build_and_push_image(image, build_dir):
             *build_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_BUILDAH_CLEAN_ENV,
         )
 
         await asyncio.wait_for(
@@ -220,7 +230,9 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-loginterc
             "buildah",
             "build",
             "--isolation",
-            "chroot",
+            "rootless",
+            "--network",
+            "slirp4netns",
             "--layers=false",
             "--storage-opt",
             "overlay.mountopt=metacopy=on",
@@ -237,6 +249,7 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-loginterc
             *build_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_BUILDAH_CLEAN_ENV,
         )
         try:
             await asyncio.wait_for(
@@ -311,7 +324,9 @@ RUN CFSV_OP="${CFSV_OP}" python -m cllmv.pkg_hash > /tmp/package_hashes.json
             "buildah",
             "build",
             "--isolation",
-            "chroot",
+            "rootless",
+            "--network",
+            "slirp4netns",
             "--build-arg",
             f"CFSV_OP={os.getenv('CFSV_OP', str(uuid.uuid4()))}",
             "--build-arg",
@@ -332,6 +347,7 @@ RUN CFSV_OP="${CFSV_OP}" python -m cllmv.pkg_hash > /tmp/package_hashes.json
             *build_cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            env=_BUILDAH_CLEAN_ENV,
         )
         try:
             await asyncio.wait_for(process.wait(), timeout=settings.build_timeout)
@@ -390,7 +406,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
             "buildah",
             "build",
             "--isolation",
-            "chroot",
+            "rootless",
+            "--network",
+            "slirp4netns",
             "--layers=false",
             "--storage-opt",
             "overlay.mountopt=metacopy=on",
@@ -409,6 +427,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
             *build_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_BUILDAH_CLEAN_ENV,
         )
 
         await asyncio.wait_for(
@@ -1081,7 +1100,9 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-loginterc
                 "buildah",
                 "build",
                 "--isolation",
-                "chroot",
+                "rootless",
+                "--network",
+                "slirp4netns",
                 "--layers=false",
                 "--storage-opt",
                 "overlay.mountopt=metacopy=on",
@@ -1098,6 +1119,7 @@ ENV LD_PRELOAD=/usr/local/lib/chutes-netnanny.so:/usr/local/lib/chutes-loginterc
                 *build_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_BUILDAH_CLEAN_ENV,
             )
 
             await asyncio.wait_for(
@@ -1173,7 +1195,9 @@ RUN CFSV_OP="${CFSV_OP}" python -m cllmv.pkg_hash > /tmp/package_hashes.json
                 "buildah",
                 "build",
                 "--isolation",
-                "chroot",
+                "rootless",
+                "--network",
+                "slirp4netns",
                 "--build-arg",
                 f"CFSV_OP={os.getenv('CFSV_OP', str(uuid.uuid4()))}",
                 "--build-arg",
@@ -1194,6 +1218,7 @@ RUN CFSV_OP="${CFSV_OP}" python -m cllmv.pkg_hash > /tmp/package_hashes.json
                 *build_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_BUILDAH_CLEAN_ENV,
             )
 
             # Run without capturing logs to avoid noise
@@ -1270,7 +1295,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
                 "buildah",
                 "build",
                 "--isolation",
-                "chroot",
+                "rootless",
+                "--network",
+                "slirp4netns",
                 "--storage-driver",
                 storage_driver,
                 "--layers",
@@ -1292,6 +1319,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
                 *build_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_BUILDAH_CLEAN_ENV,
             )
 
             await asyncio.wait_for(

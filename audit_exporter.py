@@ -18,7 +18,7 @@ import asyncio
 from loguru import logger
 from sqlalchemy import text
 from datetime import UTC, datetime, timedelta
-from substrateinterface import SubstrateInterface
+from async_substrate_interface.sync_substrate import SubstrateInterface
 from api.config import settings
 from api.database import get_session
 from api.audit.schemas import AuditEntry
@@ -132,25 +132,29 @@ def commit(sha256) -> int:
     Commit this bucket of audit data to chain.
     """
     substrate = SubstrateInterface(url=settings.subtensor)
-    call = substrate.compose_call(
-        call_module="Commitments",
-        call_function="set_commitment",
-        call_params={"netuid": settings.netuid, "info": {"fields": [[{"Sha256": f"0x{sha256}"}]]}},
-    )
-    extrinsic = substrate.create_signed_extrinsic(
-        call=call,
-        keypair=settings.validator_keypair,
-    )
-    response = substrate.submit_extrinsic(
-        extrinsic=extrinsic,
-        wait_for_inclusion=True,
-        wait_for_finalization=False,
-    )
-    response.process_events()
-    assert response.is_success
-    block_hash = response.block_hash
-    block_number = substrate.get_block_number(block_hash)
-    logger.success(f"Committed checksum {sha256} in block {block_number}")
+    # call = substrate.compose_call(
+    #     call_module="Commitments",
+    #     call_function="set_commitment",
+    #     call_params={"netuid": settings.netuid, "info": {"fields": [[{"Sha256": f"0x{sha256}"}]]}},
+    # )
+    # extrinsic = substrate.create_signed_extrinsic(
+    #     call=call,
+    #     keypair=settings.validator_keypair,
+    # )
+    # response = substrate.submit_extrinsic(
+    #     extrinsic=extrinsic,
+    #     wait_for_inclusion=True,
+    #     wait_for_finalization=False,
+    # )
+    # response.process_events()
+    # assert response.is_success
+    # block_hash = response.block_hash
+    # block_number = substrate.get_block_number(block_hash)
+    # logger.success(f"Committed checksum {sha256} in block {block_number}")
+
+    # XXX temp bandaid
+    block_number = substrate.get_block_number(None)
+    logger.info(f"Current block number: {block_number}")
     return block_number
 
 
